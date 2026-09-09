@@ -3,8 +3,7 @@
 ## Background
 
 Maintained fork: `0xble/camofox-browser` of `jo-inc/camofox-browser` on
-the canonical `master` branch. Canonical checkout: `/Users/brianle/camofox-browser`;
-implementation worktree: `/Users/brianle/.worktrees/camofox-browser-fork-foundation`.
+the canonical `master` branch. Canonical checkout: `/Users/brianle/camofox-browser`.
 Accepted deployed baseline: upstream tag `v1.14.0`, commit
 `e5a36f5cd0332fde6597de474329a308a53a0716`. `origin` is the owned publish
 remote; `upstream` is fetch-only and must never receive pushes. The upstream MIT
@@ -21,6 +20,7 @@ remote; `upstream` is fetch-only and must never receive pushes. The upstream MIT
 ### CAMOFOX-001: track reviewed local deployment plugins
 
 - **Status:** Active
+- **Stable subject:** `Add hardened local deployment plugins` (`b2a15d5ea8fc73e99eb9636968eec5102e404ff6`)
 - **Behavior:** `local-hardening` applies the supported launch hook to disable
   default-browser checks, telemetry, reporting, and studies. `local-storage-checkpoint`
   authenticates its storage-state endpoint and returns a snapshot only after persistence.
@@ -35,13 +35,23 @@ remote; `upstream` is fetch-only and must never receive pushes. The upstream MIT
 
 ## Update
 
-Rebase recorded patches from the deployed `v1.14.0` baseline onto a deliberately
-selected upstream release; do not advance merely because upstream `master` moved.
-Update this register with any patch change or retirement before publication.
+On every maintenance run, fetch `origin` and `upstream` separately, resolve the
+live upstream default branch (currently `master`), and reconcile the maintained
+`master` with its latest tip while preserving the registered deployment patches.
+The deployed `v1.14.0` baseline is historical provenance, not a source-sync pin.
+Review linked upstream issues/PRs and replacement behavior; update this register
+before publishing any patch change or retirement. Run the patch regressions and
+repository test/build gates, then publish only to `origin` and read back its SHA.
+If reconciliation, tests, or publication cannot complete safely, report `Blocked`
+with the exact failing stage, refs, and recovery action; never silently defer sync.
+Installation, deployment, and runtime activation require separate authorization.
 
 ## Verify
 
-Run the patch regressions above, the repository test/build gates, and inspect the
-fork-only diff. Before an upstream-sync claim, require zero upstream-only commits
-for the explicitly selected upstream baseline; after publication, read back exact
-`origin` SHA parity. Installation and live-service evidence are separately required.
+Inspect the fork-only diff and retain the verification evidence above. Immediately
+before `Updated` or `Already current`, fetch upstream again and require
+`git rev-list --left-right --count upstream/<live-default>...master` to report zero
+on the left (upstream-only), with the exact fetched upstream SHA recorded. If it
+moved, reconcile and reverify or report `Blocked`. Require published `origin/master`
+to equal the verified maintained SHA. Source-sync success proves no installation
+or live-service activation; those stages need their own evidence and rollback.
