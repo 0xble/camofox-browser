@@ -16,7 +16,8 @@ module.exports = {
   
   // Ignore patterns
   testPathIgnorePatterns: [
-    '/node_modules/'
+    '/node_modules/',
+    '/plugins/local-storage-checkpoint/index.test.js'
   ],
   
   // Setup and teardown

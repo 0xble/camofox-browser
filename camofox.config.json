@@ -1,12 +1,27 @@
 {
   "id": "camofox-browser",
   "name": "Camofox Browser",
-  "version": "1.6.0",
+  "version": "1.14.0",
   "newPageTimeoutMs": 10000,
-  "interactive": { "mode": "off" },
+  "interactive": {
+    "mode": "off"
+  },
   "plugins": {
-    "youtube": { "enabled": true },
-    "persistence": { "enabled": true },
-    "vnc": { "enabled": false, "resolution": "1920x1080" }
+    "local-hardening": {
+      "enabled": true
+    },
+    "persistence": {
+      "enabled": true,
+      "indexedDB": false
+    },
+    "youtube": {
+      "enabled": false
+    },
+    "vnc": {
+      "enabled": false
+    },
+    "local-storage-checkpoint": {
+      "enabled": true
+    }
   }
 }
