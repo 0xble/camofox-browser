@@ -33,6 +33,17 @@ remote; `upstream` is fetch-only and must never receive pushes. The upstream MIT
 - **Retire when:** upstream releases equivalent supported plugin behavior and the
   deployment configuration no longer needs the local plugins.
 
+### CAMOFOX-002: shared persistent identity lifecycle
+
+- **Status:** Active, source-only; not approved for installation.
+- **Stable subject:** `Add shared persistent identity lifecycle` (`85d2f3f`).
+- **Behavior:** native Hermes opaque IDs and optional local aliases resolve to one profile; session-only cookies restore only after a clean close; human handoff serializes with tab work and blocks agent operations.
+- **Surfaces:** `server.js`, `lib/shared-identity.js`, `lib/config.js`, `docs/shared-persistent-browser-spec.md`
+- **Upstream issue/PR:** None after checked 2026-09-10.
+- **Regression:** `npm run test:unit` plus the disposable shared-browser acceptance harness.
+- **Rollback:** `git revert <CAMOFOX-002 commit>`; do not delete preserved profiles.
+- **Retire when:** upstream ships equivalent lifecycle and identity-routing semantics.
+
 ## Update
 
 On every maintenance run, fetch `origin` and `upstream` separately, resolve the

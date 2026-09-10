@@ -4,7 +4,7 @@
 
 ## Outcome
 
-Camofox remains the single loopback-authenticated browser service at `127.0.0.1:9377`. It can own an interactive, persistent browser context for the three named identities `personal`, `lpg`, and `meridian`; the same identity is available to the human and to Hermes through Camofox's existing native HTTP API.
+Camofox remains the single loopback-authenticated browser service at `127.0.0.1:9377`. It can own an interactive, persistent browser context for an explicitly configured allowlist of native Hermes `userId` values; the same opaque identifier is used by Hermes and Camofox for a visible profile.
 
 ## Current facts
 
@@ -23,12 +23,12 @@ Camofox remains the single loopback-authenticated browser service at `127.0.0.1:
 
 ## Settled behavior
 
-1. Only the allowlisted identities may use the shared persistent mode. Other `userId`s retain existing isolated ephemeral behavior.
-2. Each named identity gets a distinct profile directory below `CAMOFOX_SHARED_PROFILE_DIR`. Existing state is never copied into another identity. First creation makes a backup/marker rather than importing Chrome or the old manual profile.
+1. Only configured opaque Hermes `userId`s may use shared persistent mode. `CAMOFOX_SHARED_IDENTITIES` contains those opaque values. When a local launcher needs aliases, `CAMOFOX_SHARED_IDENTITY_MAP` maps each alias to one configured opaque value; both paths normalize before session/profile lookup. Other `userId`s retain existing isolated ephemeral behavior.
+2. Each configured opaque identity gets a distinct profile directory below `CAMOFOX_SHARED_PROFILE_DIR`. Existing state is never copied into another identity. First creation makes a backup/marker rather than importing Chrome or the old manual profile.
 3. A persistent identity opens as a visible desktop browser. The service serializes create/open/close operations per identity; an existing identity is focused, never launched a second time.
-4. Firefox profile state retains extensions and settings. Cookies are checkpointed separately as a deliberately scoped recovery layer. On a service restart, stored cookies are injected with `context.addCookies()` before the first page is opened. Existing `storageState` is not passed to persistent-context launch.
-5. A checkpoint always replaces the prior cookie snapshot, including an empty snapshot. This makes an explicit logout durable instead of resurrecting an older login. Expired cookies are omitted. Checkpoints retain cookie attributes accepted by Playwright (`domain`, `path`, `expires`, `httpOnly`, `secure`, `sameSite`, and `partitionKey` when present).
-6. A persistent tab is keep-open by default and is excluded from idle, task, pressure, and orphan-page cleanup. Pages opened from the visible Firefox UI are registered under a service-owned shared-identity group; the keep-open exclusion remains a fail-safe for a page-event race. Explicit close/session reset still works. A handoff changes only a service-owned tab state (`agent` or `human`); it does not clone a profile or start another process.
+4. Firefox profile state retains extensions, settings, and persistent cookies. Only session cookies are a scoped recovery layer: a snapshot is eligible solely after a clean service close, is invalidated before a subsequent context launch, and is injected with `context.addCookies()` before the first page is opened. A crash therefore cannot replay a stale session snapshot; exact crash-session recovery is intentionally not promised. Existing `storageState` is not passed to persistent-context launch.
+5. A clean close replaces the session-cookie snapshot, including an empty snapshot. This makes an explicit logout durable. Persistent cookies stay in the Firefox profile and are never overlaid from a checkpoint. Expired cookies are omitted; session snapshots retain the Playwright cookie attributes accepted by `addCookies()`.
+6. A persistent tab is keep-open by default and is excluded from idle, task, pressure, and orphan-page cleanup. Pages opened from the visible Firefox UI are registered under a service-owned shared-identity group; the keep-open exclusion remains a fail-safe for a page-event race. Explicit close/session reset still works. Handoff is available only for a shared tab: human transfer waits behind its current tab operation, focuses that exact page, and blocks later agent tab operations until an explicit agent transfer.
 7. The existing production click issue is explicitly out of scope. Console capture is deferred. No browser-engine source or engine pin changes are permitted.
 
 ## Interfaces

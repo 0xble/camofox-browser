@@ -8,12 +8,7 @@
  */
 import { describe, test, expect } from '@jest/globals';
 import { jest } from '@jest/globals';
-import fs from 'node:fs';
-import path from 'node:path';
-import { fileURLToPath } from 'node:url';
-
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const serverSource = fs.readFileSync(path.join(__dirname, '../../server.js'), 'utf8');
+import { isEligibleForAutomaticCleanup } from '../../lib/cleanup-policy.js';
 
 // ============================================================================
 // safePageClose (extracted logic)
@@ -71,7 +66,7 @@ function getTotalTabCount(sessions) {
 function findOrphanPages(sessions) {
   const orphans = [];
   for (const session of sessions.values()) {
-    if (session._closing || session.keepOpen) continue;
+    if (!isEligibleForAutomaticCleanup(session)) continue;
     let contextPages;
     try {
       contextPages = session.context.pages();
@@ -288,9 +283,13 @@ describe('getTotalTabCount', () => {
 // ============================================================================
 
 describe('findOrphanPages (orphan page reaper)', () => {
-  test('server registers visible shared pages and exempts keep-open identities', () => {
-    expect(serverSource).toContain("context.on('page', (page) => registerSharedIdentityPage(created, key, page))");
-    expect(serverSource).toContain('if (session._closing || session.keepOpen) continue;');
+  test('preserves visible shared contexts from automatic cleanup', () => {
+    const shared = { _closing: false, keepOpen: true };
+    const ordinary = { _closing: false, keepOpen: false };
+    const closing = { _closing: true, keepOpen: false };
+    expect(isEligibleForAutomaticCleanup(shared)).toBe(false);
+    expect(isEligibleForAutomaticCleanup(ordinary)).toBe(true);
+    expect(isEligibleForAutomaticCleanup(closing)).toBe(false);
   });
 
   test('returns empty when no sessions', () => {

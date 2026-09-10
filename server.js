@@ -42,6 +42,8 @@ import { mountDocs } from './lib/openapi.js';
 import { initSentry, captureException as sentryCaptureException, setupExpressErrorHandler as setupSentryErrorHandler, flush as sentryFlush } from './lib/sentry.js';
 import { prepareExternalCamoufoxExecutable } from './lib/camoufox-executable.js';
 import { SharedIdentityManager } from './lib/shared-identity.js';
+import { isEligibleForAutomaticCleanup } from './lib/cleanup-policy.js';
+import { applySharedTabHandoff } from './lib/shared-tab-handoff.js';
 import { killProcessIds } from './lib/browser-processes.js';
 import { snapshotOwnedBrowserProcesses, survivingOwnedBrowserProcesses } from './lib/process-ownership.js';
 import {
@@ -568,6 +570,7 @@ class TabLock {
 
 // Per-tab locks to serialize operations on the same tab
 const tabLocks = new Map(); // tabId -> TabLock
+const humanControlledTabs = new Set();
 
 function getTabLock(tabId) {
   if (!tabLocks.has(tabId)) tabLocks.set(tabId, new TabLock());
@@ -576,10 +579,13 @@ function getTabLock(tabId) {
 
 // Timeout is INSIDE the lock so each operation gets its full budget
 // regardless of how long it waited in the queue.
-async function withTabLock(tabId, operation, timeoutMs = HANDLER_TIMEOUT_MS, onTimeout) {
+async function withTabLock(tabId, operation, timeoutMs = HANDLER_TIMEOUT_MS, onTimeout, { allowHumanControl = false } = {}) {
   const lock = getTabLock(tabId);
   await lock.acquire(TAB_LOCK_TIMEOUT_MS);
   try {
+    if (humanControlledTabs.has(tabId) && !allowHumanControl) {
+      throw Object.assign(new Error('Tab is handed off to a human'), { statusCode: 409, code: 'tab_handed_off' });
+    }
     return await withTimeout(operation(), timeoutMs, 'action');
   } catch (err) {
     if (onTimeout && isTimeoutError(err)) {
@@ -1232,9 +1238,11 @@ async function ensureBrowser() {
   return browserLaunchPromise;
 }
 
-// Helper to normalize userId to string (JSON body may parse as number)
+// Resolve local-control aliases once at the API boundary. Native Hermes already
+// sends the opaque value, so both routes converge on one exact profile key.
 function normalizeUserId(userId) {
-  return String(userId);
+  const value = String(userId);
+  return CONFIG.sharedIdentityAliases[value] || value;
 }
 
 const sessionCreations = new Map();
@@ -1247,6 +1255,7 @@ function clearSessionLocks(session) {
       if (lock) {
         lock.drain();
         tabLocks.delete(tabId);
+        humanControlledTabs.delete(tabId);
       }
     }
   }
@@ -1644,6 +1653,7 @@ function handleRouteError(err, req, res, extraFields = {}) {
 }
 
 function destroyTab(session, tabId, reason, userId) {
+  humanControlledTabs.delete(tabId);
   const lock = tabLocks.get(tabId);
   if (lock) {
     lock.drain();
@@ -1677,6 +1687,7 @@ async function destroyTimedOutTab(session, tabId, reason, userId) {
   } catch (err) {
     log('warn', 'timed-out tab cleanup failed', { tabId, error: err.message });
   } finally {
+    humanControlledTabs.delete(tabId);
     group.delete(tabId);
     if (group.size === 0) session.tabGroups.delete(listItemId);
     const lock = tabLocks.get(tabId);
@@ -2907,20 +2918,44 @@ app.post('/browser/identities/:userId/focus', async (req, res) => {
  *         in: path
  *         required: true
  *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [userId, handoff]
+ *             properties:
+ *               userId: { type: string, description: Shared identity owner. }
+ *               handoff: { type: string, enum: [human, agent] }
  *     responses:
  *       200: { description: Handoff recorded. }
+ *       400: { description: Invalid handoff payload. }
  *       404: { description: Tab not found. }
+ *       409: { description: Tab is not a shared identity tab or is no longer available. }
  */
 app.post('/tabs/:tabId/handoff', async (req, res) => {
-  const userId = normalizeUserId(req.body?.userId);
+  const requestedUserId = req.body?.userId;
   const handoff = req.body?.handoff;
-  if (!userId || !['human', 'agent'].includes(handoff)) return res.status(400).json({ error: 'userId and handoff (human or agent) required' });
+  if (requestedUserId === undefined || requestedUserId === null || !['human', 'agent'].includes(handoff)) return res.status(400).json({ error: 'userId and handoff (human or agent) required' });
+  const userId = normalizeUserId(requestedUserId);
   const session = sessions.get(userId);
-  const found = session && findTab(session, req.params.tabId);
-  if (!found) return tabNotFoundResponse(res, req.params.tabId);
-  found.tabState.handoff = handoff;
-  if (handoff === 'human' && session.sharedIdentity) await sharedIdentities.focus(userId);
-  return res.json({ ok: true, handoff, focused: handoff === 'human' && session.sharedIdentity });
+  if (!session?.sharedIdentity) return res.status(409).json({ error: 'Handoff is available only for shared identity tabs' });
+  if (!findTab(session, req.params.tabId)) return tabNotFoundResponse(res, req.params.tabId);
+  try {
+    const result = await withTabLock(req.params.tabId, async () => {
+      const current = findTab(session, req.params.tabId);
+      return applySharedTabHandoff({
+        tabId: req.params.tabId,
+        handoff,
+        tabState: current?.tabState,
+        humanControlledTabs,
+      });
+    }, HANDLER_TIMEOUT_MS, undefined, { allowHumanControl: true });
+    return res.json({ ok: true, ...result });
+  } catch (err) {
+    return handleRouteError(err, req, res);
+  }
 });
 
 // Create new tab
@@ -5329,7 +5364,7 @@ app.delete('/tabs/:tabId', async (req, res) => {
       await clearTabDownloads(found.tabState);
       await safePageClose(found.tabState.page);
       found.group.delete(req.params.tabId);
-      { const _l = tabLocks.get(req.params.tabId); if (_l) _l.drain(); tabLocks.delete(req.params.tabId); refreshTabLockQueueDepth(); }
+      { const _l = tabLocks.get(req.params.tabId); if (_l) _l.drain(); tabLocks.delete(req.params.tabId); humanControlledTabs.delete(req.params.tabId); refreshTabLockQueueDepth(); }
       if (found.group.size === 0) {
         session.tabGroups.delete(found.listItemId);
       }
@@ -5394,6 +5429,7 @@ app.delete('/tabs/group/:listItemId', async (req, res) => {
         if (lock) {
           lock.drain();
           tabLocks.delete(tabId);
+        humanControlledTabs.delete(tabId);
         }
       }
       session.tabGroups.delete(req.params.listItemId);
@@ -5788,7 +5824,7 @@ setInterval(() => {
 setInterval(() => {
   let reaped = 0;
   for (const session of sessions.values()) {
-    if (session._closing || session.keepOpen) continue;
+    if (!isEligibleForAutomaticCleanup(session)) continue;
     let contextPages;
     try {
       contextPages = session.context.pages();

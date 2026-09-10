@@ -19,17 +19,44 @@ describe('SharedIdentityManager', () => {
     };
   }
 
-  test('serializes open and restores the cookie checkpoint before a page can be created', async () => {
-    const manager = new SharedIdentityManager({ identities: ['personal'], profileDir: root });
+  test('serializes opening and restores only a clean session-cookie checkpoint before a page can be created', async () => {
+    const manager = new SharedIdentityManager({ identities: ['opaque-hermes-user'], profileDir: root });
     const first = context();
-    await fs.mkdir(path.dirname(cookieCheckpointPath(root, 'personal')), { recursive: true });
-    await fs.writeFile(cookieCheckpointPath(root, 'personal'), JSON.stringify({ cookies: [{ name: 'sid', value: 'synthetic', domain: 'example.test', path: '/', expires: -1, httpOnly: true, secure: true, sameSite: 'Lax' }] }));
+    await fs.mkdir(path.dirname(cookieCheckpointPath(root, 'opaque-hermes-user')), { recursive: true });
+    await fs.writeFile(cookieCheckpointPath(root, 'opaque-hermes-user'), JSON.stringify({
+      version: 2,
+      cleanShutdown: true,
+      cookies: [
+        { name: 'session', value: 'synthetic', domain: 'example.test', path: '/', expires: -1, httpOnly: true, secure: true, sameSite: 'Lax' },
+        { name: 'persistent', value: 'profile-owned', domain: 'example.test', path: '/', expires: 4102444800 },
+      ],
+    }));
     const create = jest.fn(async () => first);
-    const [a, b] = await Promise.all([manager.open('personal', create), manager.open('personal', create)]);
+    const [a, b] = await Promise.all([manager.open('opaque-hermes-user', create), manager.open('opaque-hermes-user', create)]);
     expect(a).toBe(first);
     expect(b).toBe(first);
     expect(create).toHaveBeenCalledTimes(1);
-    expect(first.addCookies).toHaveBeenCalledWith([expect.objectContaining({ name: 'sid', httpOnly: true, secure: true, sameSite: 'Lax' })]);
+    const restored = first.addCookies.mock.calls[0][0];
+    expect(restored).toEqual([expect.objectContaining({ name: 'session', httpOnly: true, secure: true, sameSite: 'Lax' })]);
+    expect(restored).not.toEqual(expect.arrayContaining([expect.objectContaining({ name: 'persistent' })]));
+    expect(JSON.parse(await fs.readFile(cookieCheckpointPath(root, 'opaque-hermes-user'), 'utf8'))).toEqual(expect.objectContaining({ cleanShutdown: false }));
+  });
+
+  test('a crash-invalidated checkpoint is never restored, but a clean close creates the fresh successor', async () => {
+    const first = context([{ name: 'session', value: 'fresh', domain: 'example.test', path: '/', expires: -1 }]);
+    const manager = new SharedIdentityManager({ identities: ['opaque-hermes-user'], profileDir: root });
+    await manager.open('opaque-hermes-user', async () => first);
+    await manager.close('opaque-hermes-user');
+
+    const second = context();
+    const restarted = new SharedIdentityManager({ identities: ['opaque-hermes-user'], profileDir: root });
+    await restarted.open('opaque-hermes-user', async () => second);
+    expect(second.addCookies).toHaveBeenCalledWith([expect.objectContaining({ name: 'session', value: 'fresh' })]);
+
+    const crashed = context();
+    const afterCrash = new SharedIdentityManager({ identities: ['opaque-hermes-user'], profileDir: root });
+    await afterCrash.open('opaque-hermes-user', async () => crashed);
+    expect(crashed.addCookies).not.toHaveBeenCalled();
   });
 
   test('keeps named identities and profile locations isolated', async () => {
@@ -38,12 +65,13 @@ describe('SharedIdentityManager', () => {
     await expect(manager.open('meridian', async () => context())).rejects.toThrow('allowlisted');
   });
 
-  test('replaces a prior cookie checkpoint with an empty logout checkpoint', async () => {
+  test('replaces a prior cookie checkpoint with an empty logout checkpoint on clean close', async () => {
     const manager = new SharedIdentityManager({ identities: ['personal'], profileDir: root });
     const live = context([]);
     await manager.open('personal', async () => live);
-    await manager.checkpoint('personal');
-    expect(JSON.parse(await fs.readFile(cookieCheckpointPath(root, 'personal'), 'utf8')).cookies).toEqual([]);
+    await manager.close('personal');
+    const checkpoint = JSON.parse(await fs.readFile(cookieCheckpointPath(root, 'personal'), 'utf8'));
+    expect(checkpoint).toEqual(expect.objectContaining({ cleanShutdown: true, cookies: [] }));
   });
 
   test('preserves supported attributes while omitting expired cookies', () => {
