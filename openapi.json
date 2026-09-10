@@ -400,6 +400,84 @@
         }
       }
     },
+    "/browser/identities/{userId}/open": {
+      "post": {
+        "tags": [
+          "Browser"
+        ],
+        "summary": "Open or reuse a named shared identity",
+        "parameters": [
+          {
+            "name": "userId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Shared identity is open."
+          },
+          "404": {
+            "description": "Identity is not configured for shared mode."
+          }
+        }
+      }
+    },
+    "/browser/identities/{userId}/focus": {
+      "post": {
+        "tags": [
+          "Browser"
+        ],
+        "summary": "Focus an open named shared identity",
+        "parameters": [
+          {
+            "name": "userId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Focus result."
+          },
+          "404": {
+            "description": "Identity is not configured or is not open."
+          }
+        }
+      }
+    },
+    "/tabs/{tabId}/handoff": {
+      "post": {
+        "tags": [
+          "Browser"
+        ],
+        "summary": "Mark a tab for human or agent control",
+        "parameters": [
+          {
+            "name": "tabId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Handoff recorded."
+          },
+          "404": {
+            "description": "Tab not found."
+          }
+        }
+      }
+    },
     "/tabs": {
       "post": {
         "tags": [
