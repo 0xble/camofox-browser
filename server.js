@@ -11,6 +11,7 @@ import { normalizePlaywrightProxy, createProxyPool, buildProxyUrl } from './lib/
 import { createFlyHelpers } from './lib/fly.js';
 import { createPluginEvents, loadPlugins } from './lib/plugins.js';
 import { requireAuth, accessKeyMiddleware, timingSafeCompare as _timingSafeCompare, isLoopbackAddress as _isLoopbackAddress } from './lib/auth.js';
+import { sharedIdentityMetadata } from './lib/shared-identity-metadata.js';
 import { windowSnapshot } from './lib/snapshot.js';
 import {
   MAX_DOWNLOAD_INLINE_BYTES,
@@ -2864,6 +2865,20 @@ app.post('/pressure/cleanup', async (req, res) => {
 
 // Shared visible-identity controls. These are intentionally metadata-only: no
 // cookies, storage state, page text, URLs, or extension data is exposed.
+/**
+ * @openapi
+ * /browser/identities:
+ *   get:
+ *     tags: [Browser]
+ *     summary: List configured shared identity metadata
+ *     responses:
+ *       200: { description: Safe configured identity metadata. }
+ *       403: { description: Bearer authentication required. }
+ */
+app.get('/browser/identities', authMiddleware(), (req, res) => {
+  res.json({ identities: sharedIdentityMetadata(CONFIG.sharedIdentityAliases) });
+});
+
 /**
  * @openapi
  * /browser/identities/{userId}/open:
