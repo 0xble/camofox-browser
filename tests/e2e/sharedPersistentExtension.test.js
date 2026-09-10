@@ -1,4 +1,5 @@
 import http from 'node:http';
+import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -7,7 +8,7 @@ import { launchOptions } from 'camoufox-js';
 
 const extensionId = 'shared-persistence-fixture@example.test';
 
-async function makeFixture(root) {
+async function makeFixture(root, { initialValue = null } = {}) {
   const addon = path.join(root, 'addon');
   await fs.mkdir(addon, { recursive: true });
   await fs.writeFile(path.join(addon, 'manifest.json'), JSON.stringify({
@@ -23,19 +24,16 @@ async function makeFixture(root) {
     }],
     browser_specific_settings: { gecko: { id: extensionId } },
   }));
-  await fs.writeFile(path.join(addon, 'background.js'), `
-    browser.storage.local.get('fixtureExtensionSetting').then(({ fixtureExtensionSetting }) => {
-      if (!fixtureExtensionSetting) browser.storage.local.set({ fixtureExtensionSetting: 'retained-v1' });
-    });
-  `);
+  await fs.writeFile(path.join(addon, 'background.js'), '// Deliberately read-only: this fixture must not seed storage on startup.\n');
   await fs.writeFile(path.join(addon, 'content.js'), `
     (async () => {
       let { fixtureExtensionSetting } = await browser.storage.local.get('fixtureExtensionSetting');
-      if (!fixtureExtensionSetting) {
-        fixtureExtensionSetting = 'retained-v1';
+      const firstOnlyValue = ${JSON.stringify(initialValue)};
+      if (firstOnlyValue && !fixtureExtensionSetting) {
+        fixtureExtensionSetting = firstOnlyValue;
         await browser.storage.local.set({ fixtureExtensionSetting });
       }
-      document.documentElement.dataset.fixtureExtensionSetting = fixtureExtensionSetting;
+      document.documentElement.dataset.fixtureExtensionSetting = fixtureExtensionSetting || '';
       document.documentElement.dataset.fixtureExtensionId = browser.runtime.id;
     })();
   `);
@@ -62,14 +60,14 @@ async function persistentOptions(addons = []) {
   });
 }
 
-async function extensionState(page) {
+async function extensionState(page, expectedSetting) {
   let last;
   for (let attempt = 0; attempt < 40; attempt++) {
     last = await page.evaluate(() => ({
-      setting: document.documentElement.dataset.fixtureExtensionSetting,
+      setting: document.documentElement.dataset.fixtureExtensionSetting || null,
       id: document.documentElement.dataset.fixtureExtensionId,
     }));
-    if (last.setting === 'retained-v1' && last.id === extensionId) return last;
+    if (last.setting === expectedSetting && last.id === extensionId) return last;
     await new Promise(resolve => setTimeout(resolve, 100));
   }
   return last;
@@ -91,28 +89,39 @@ describe('shared persistent profile extension retention', () => {
     await fs.rm(root, { recursive: true, force: true });
   });
 
-  test('a locally installed WebExtension keeps browser.storage.local settings after a full persistent-profile close and reopen', async () => {
-    const addon = await makeFixture(root);
+  test('a locally installed WebExtension retains a first-run-only random storage value across a full persistent-profile close and read-only reopen', async () => {
+    const firstOnlyValue = `retained-${crypto.randomUUID()}`;
+    const emptyProfile = path.join(root, 'empty-profile');
     let first;
     let second;
+    let empty;
     try {
-      first = await firefox.launchPersistentContext(profile, await persistentOptions([addon]));
+      const writerAddon = await makeFixture(root, { initialValue: firstOnlyValue });
+      first = await firefox.launchPersistentContext(profile, await persistentOptions([writerAddon]));
       const firstPage = await first.newPage();
       await firstPage.goto(site.url);
-      await expect(extensionState(firstPage)).resolves.toEqual({ setting: 'retained-v1', id: extensionId });
+      await expect(extensionState(firstPage, firstOnlyValue)).resolves.toEqual({ setting: firstOnlyValue, id: extensionId });
       await first.close();
       first = null;
 
-      // Camoufox's supported extracted-addon launch option is supplied to both
-      // real browser processes; the retained value must come from Firefox's
-      // persistent profile rather than the fixture source directory.
-      second = await firefox.launchPersistentContext(profile, await persistentOptions([addon]));
+      // The reopen fixture cannot write a value. Success therefore proves the
+      // random first-run value came from Firefox's persistent profile.
+      const readOnlyAddon = await makeFixture(root);
+      second = await firefox.launchPersistentContext(profile, await persistentOptions([readOnlyAddon]));
       const secondPage = await second.newPage();
       await secondPage.goto(site.url);
-      await expect(extensionState(secondPage)).resolves.toEqual({ setting: 'retained-v1', id: extensionId });
+      await expect(extensionState(secondPage, firstOnlyValue)).resolves.toEqual({ setting: firstOnlyValue, id: extensionId });
+
+      // The same read-only extension sees no value in a distinct empty profile;
+      // it is a negative control against fixture-source self-seeding.
+      empty = await firefox.launchPersistentContext(emptyProfile, await persistentOptions([readOnlyAddon]));
+      const emptyPage = await empty.newPage();
+      await emptyPage.goto(site.url);
+      await expect(extensionState(emptyPage, null)).resolves.toEqual({ setting: null, id: extensionId });
     } finally {
       await first?.close().catch(() => {});
       await second?.close().catch(() => {});
+      await empty?.close().catch(() => {});
     }
   }, 90_000);
 });

@@ -1757,6 +1757,16 @@ function findTab(session, tabId) {
   return null;
 }
 
+function findTabByPage(session, page) {
+  if (!session || !page) return null;
+  for (const [listItemId, group] of session.tabGroups) {
+    for (const [tabId, tabState] of group) {
+      if (tabState.page === page) return { tabId, tabState, listItemId, group };
+    }
+  }
+  return null;
+}
+
 // Return 404 or 410 depending on whether the browser restarted recently.
 // 410 Gone tells clients the tab existed but the browser crashed — create a new one.
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -3072,12 +3082,22 @@ app.post('/tabs', async (req, res) => {
       const lease = createdPage.lease;
       const group = getTabGroup(session, resolvedSessionKey);
 
-      const tabId = fly.makeTabId();
-      let tabState = createTabState(page);
-      attachDownloadListener(tabState, tabId, log, pluginEvents, userId);
+      // A persistent shared context registers `page` synchronously through
+      // its context `page` event. Reuse that state and move it to the caller's
+      // group instead of registering the same Playwright page under another
+      // tab ID (which would create independent locks and bypass handoff).
+      const registered = session.sharedIdentity && findTabByPage(session, page);
+      const tabId = registered?.tabId || fly.makeTabId();
+      let tabState = registered?.tabState || createTabState(page);
+      if (registered) {
+        registered.group.delete(tabId);
+        if (registered.group.size === 0) session.tabGroups.delete(registered.listItemId);
+      } else {
+        attachDownloadListener(tabState, tabId, log, pluginEvents, userId);
+      }
       group.set(tabId, tabState);
       releasePageLease(session, lease);
-      attachPopupHandler(page, userId, resolvedSessionKey);
+      if (!registered) attachPopupHandler(page, userId, resolvedSessionKey);
       refreshActiveTabsGauge();
       
       if (url) {

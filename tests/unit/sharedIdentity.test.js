@@ -74,6 +74,22 @@ describe('SharedIdentityManager', () => {
     expect(checkpoint).toEqual(expect.objectContaining({ cleanShutdown: true, cookies: [] }));
   });
 
+  test('storage-reset close keeps the checkpoint dirty so session credentials cannot revive', async () => {
+    const first = context([{ name: 'session', value: 'must-not-revive', domain: 'example.test', path: '/', expires: -1 }]);
+    const manager = new SharedIdentityManager({ identities: ['personal'], profileDir: root });
+    await manager.open('personal', async () => first);
+    await manager.close('personal', { checkpoint: false });
+
+    expect(first.cookies).not.toHaveBeenCalled();
+    expect(JSON.parse(await fs.readFile(cookieCheckpointPath(root, 'personal'), 'utf8')))
+      .toEqual(expect.objectContaining({ cleanShutdown: false }));
+
+    const reopened = context();
+    const afterReset = new SharedIdentityManager({ identities: ['personal'], profileDir: root });
+    await afterReset.open('personal', async () => reopened);
+    expect(reopened.addCookies).not.toHaveBeenCalled();
+  });
+
   test('preserves supported attributes while omitting expired cookies', () => {
     const cookies = safeCookies([
       { name: 'current', value: 'synthetic', domain: 'example.test', path: '/', expires: -1, httpOnly: true, secure: true, sameSite: 'Strict', partitionKey: 'https://example.test' },
