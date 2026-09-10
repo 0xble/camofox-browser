@@ -2,11 +2,11 @@
 set -euo pipefail
 root=${0:A:h}
 cd "$root"
-swift build -c release
+bin=$(swift build -c release --show-bin-path)
 app="$root/.build/Camofox.app"
 rm -rf "$app"
 mkdir -p "$app/Contents/MacOS"
-cp "$root/.build/arm64-apple-macosx/release/Camofox" "$app/Contents/MacOS/Camofox"
+cp "$bin/Camofox" "$app/Contents/MacOS/Camofox"
 cat > "$app/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

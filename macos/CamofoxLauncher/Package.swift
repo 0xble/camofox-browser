@@ -5,5 +5,8 @@ let package = Package(
     name: "CamofoxLauncher",
     platforms: [.macOS(.v14)],
     products: [.executable(name: "Camofox", targets: ["CamofoxLauncher"])],
-    targets: [.executableTarget(name: "CamofoxLauncher")]
+    targets: [
+        .executableTarget(name: "CamofoxLauncher"),
+        .testTarget(name: "CamofoxLauncherTests", dependencies: ["CamofoxLauncher"]),
+    ]
 )

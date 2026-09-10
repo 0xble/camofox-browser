@@ -44,6 +44,16 @@ remote; `upstream` is fetch-only and must never receive pushes. The upstream MIT
 - **Rollback:** `git revert <CAMOFOX-002 commit>`; do not delete preserved profiles.
 - **Retire when:** upstream ships equivalent lifecycle and identity-routing semantics.
 
+### CAMOFOX-003: dynamic native launcher metadata and app
+
+- **Status:** Active; source and launcher metadata must evolve together, while app installation and service activation remain separate.
+- **Stable subject:** `Add dynamic native launcher service API` (`becd7eabedfcbe60bc38525e676a630dd2c16305`).
+- **Behavior:** the authenticated loopback API exposes configured shared identity metadata; `macos/CamofoxLauncher/` reads only that API and its credential provider, never aliases or profile state.
+- **Surfaces:** `server.js`, `lib/shared-identity-metadata.js`, `openapi.json`, `tests/unit/sharedIdentityMetadata.test.js`, `macos/CamofoxLauncher/`.
+- **Regression:** `npm test -- --runInBand tests/unit/sharedIdentityMetadata.test.js`, `swift test`, and an isolated GUI fixture before installation.
+- **Rollback:** revert the patch; do not alter Hermes identities, browser profiles, or the managed service.
+- **Retire when:** a supported upstream launcher provides the same dynamic identity contract.
+
 ## Update
 
 On every maintenance run, fetch `origin` and `upstream` separately, resolve the
