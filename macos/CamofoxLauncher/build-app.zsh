@@ -2,6 +2,9 @@
 set -euo pipefail
 root=${0:A:h}
 cd "$root"
+# Build first: --show-bin-path only reports an existing release directory and
+# can otherwise cause a stale executable to be bundled.
+swift build -c release
 bin=$(swift build -c release --show-bin-path)
 app="$root/.build/Camofox.app"
 rm -rf "$app"
