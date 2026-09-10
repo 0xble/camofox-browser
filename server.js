@@ -41,6 +41,9 @@ import { createReporter, createTabHealthTracker, collectResourceSnapshot, classi
 import { mountDocs } from './lib/openapi.js';
 import { initSentry, captureException as sentryCaptureException, setupExpressErrorHandler as setupSentryErrorHandler, flush as sentryFlush } from './lib/sentry.js';
 import { prepareExternalCamoufoxExecutable } from './lib/camoufox-executable.js';
+import { SharedIdentityManager } from './lib/shared-identity.js';
+import { isEligibleForAutomaticCleanup } from './lib/cleanup-policy.js';
+import { applySharedTabHandoff } from './lib/shared-tab-handoff.js';
 import { killProcessIds } from './lib/browser-processes.js';
 import { snapshotOwnedBrowserProcesses, survivingOwnedBrowserProcesses } from './lib/process-ownership.js';
 import {
@@ -118,6 +121,14 @@ function log(level, msg, fields = {}) {
     process.stdout.write(line + '\n');
   }
 }
+
+// Named identities are opt-in. They retain the full Firefox profile in a
+// service-owned directory while all other userIds use the existing contexts.
+const sharedIdentities = new SharedIdentityManager({
+  identities: CONFIG.sharedIdentityNames,
+  profileDir: CONFIG.sharedProfileDir,
+  logger: { warn: (msg, fields) => log('warn', msg, fields) },
+});
 
 const app = express();
 const globalJsonParser = express.json({ limit: '100kb' });
@@ -559,6 +570,7 @@ class TabLock {
 
 // Per-tab locks to serialize operations on the same tab
 const tabLocks = new Map(); // tabId -> TabLock
+const humanControlledTabs = new Set();
 
 function getTabLock(tabId) {
   if (!tabLocks.has(tabId)) tabLocks.set(tabId, new TabLock());
@@ -567,10 +579,13 @@ function getTabLock(tabId) {
 
 // Timeout is INSIDE the lock so each operation gets its full budget
 // regardless of how long it waited in the queue.
-async function withTabLock(tabId, operation, timeoutMs = HANDLER_TIMEOUT_MS, onTimeout) {
+async function withTabLock(tabId, operation, timeoutMs = HANDLER_TIMEOUT_MS, onTimeout, { allowHumanControl = false } = {}) {
   const lock = getTabLock(tabId);
   await lock.acquire(TAB_LOCK_TIMEOUT_MS);
   try {
+    if (humanControlledTabs.has(tabId) && !allowHumanControl) {
+      throw Object.assign(new Error('Tab is handed off to a human'), { statusCode: 409, code: 'tab_handed_off' });
+    }
     return await withTimeout(operation(), timeoutMs, 'action');
   } catch (err) {
     if (onTimeout && isTimeoutError(err)) {
@@ -1223,9 +1238,11 @@ async function ensureBrowser() {
   return browserLaunchPromise;
 }
 
-// Helper to normalize userId to string (JSON body may parse as number)
+// Resolve local-control aliases once at the API boundary. Native Hermes already
+// sends the opaque value, so both routes converge on one exact profile key.
 function normalizeUserId(userId) {
-  return String(userId);
+  const value = String(userId);
+  return CONFIG.sharedIdentityAliases[value] || value;
 }
 
 const sessionCreations = new Map();
@@ -1238,6 +1255,7 @@ function clearSessionLocks(session) {
       if (lock) {
         lock.drain();
         tabLocks.delete(tabId);
+        humanControlledTabs.delete(tabId);
       }
     }
   }
@@ -1263,7 +1281,7 @@ async function closeSession(userId, session, {
     await clearSessionDownloads(session).catch(() => {});
   }
 
-  await pluginEvents.emitAsync('session:destroying', { userId: key, reason });
+  if (!session.sharedIdentity) await pluginEvents.emitAsync('session:destroying', { userId: key, reason });
   if (session.tracePath) {
     try {
       await session.context.tracing.stop({ path: session.tracePath });
@@ -1273,9 +1291,15 @@ async function closeSession(userId, session, {
     }
   }
 
-  await session.context.close().catch(() => {});
+  if (session.sharedIdentity) {
+    await sharedIdentities.close(key, { checkpoint: reason !== 'storage_reset' }).catch((err) => {
+      log('warn', 'shared identity close failed', { userId: key, reason, error: err.message });
+    });
+  } else {
+    await session.context.close().catch(() => {});
+  }
   sessions.delete(key);
-  await pluginEvents.emitAsync('session:destroyed', { userId: key, reason });
+  if (!session.sharedIdentity) await pluginEvents.emitAsync('session:destroyed', { userId: key, reason });
 
   refreshActiveTabsGauge();
 }
@@ -1285,6 +1309,23 @@ async function closeAllSessions(reason, { clearDownloads = true, clearLocks = tr
   for (const [userId, session] of openSessions) {
     await closeSession(userId, session, { reason, clearDownloads, clearLocks });
   }
+}
+
+async function createSharedIdentityContext(profilePath) {
+  const options = await launchOptions({
+    headless: false,
+    os: getHostOS(),
+    humanize: true,
+    enable_cache: true,
+    exclude_addons: CONFIG.disableDefaultAddons ? ['UBO'] : undefined,
+  });
+  options.handleSIGTERM = false;
+  options.handleSIGINT = false;
+  options.handleSIGHUP = false;
+  await pluginEvents.emitAsync('browser:launching', { options });
+  // Persistent launch deliberately receives no storageState. The manager adds
+  // its scoped cookie recovery checkpoint before the first page is opened.
+  return firefox.launchPersistentContext(profilePath, options);
 }
 
 async function getSession(userId, { trace = false } = {}) {
@@ -1333,7 +1374,8 @@ async function getSession(userId, { trace = false } = {}) {
           );
         }
       }
-      const b = await ensureBrowser();
+      const sharedIdentity = sharedIdentities.owns(key);
+      const b = sharedIdentity ? null : await ensureBrowser();
       const contextOptions = {
         viewport: null,
         permissions: ['geolocation'],
@@ -1355,8 +1397,12 @@ async function getSession(userId, { trace = false } = {}) {
         contextOptions.proxy = normalizePlaywrightProxy(sessionProxy);
         log('info', 'session proxy assigned', { userId: key, proxy: sessionProxy.server });
       }
-      await pluginEvents.emitAsync('session:creating', { userId: key, contextOptions });
-      const context = await b.newContext(contextOptions);
+      // The legacy persistence plugin uses storageState and therefore applies
+      // only to ephemeral contexts. Shared profiles restore cookies explicitly.
+      if (!sharedIdentity) await pluginEvents.emitAsync('session:creating', { userId: key, contextOptions });
+      const context = sharedIdentity
+        ? await sharedIdentities.open(key, createSharedIdentityContext)
+        : await b.newContext(contextOptions);
 
       let tracePath = null;
       if (trace) {
@@ -1371,9 +1417,17 @@ async function getSession(userId, { trace = false } = {}) {
         }
       }
 
-      const created = { context, tabGroups: new Map(), pageLeases: new Set(), lastAccess: Date.now(), proxySessionId: sessionProxy?.sessionId || null, tracePath };
+      const created = { context, tabGroups: new Map(), pageLeases: new Set(), lastAccess: Date.now(), proxySessionId: sessionProxy?.sessionId || null, tracePath, sharedIdentity, keepOpen: sharedIdentity };
       sessions.set(key, created);
-      await pluginEvents.emitAsync('session:created', { userId: key, context });
+      if (sharedIdentity) {
+        // Pages opened by the visible Firefox UI are real user tabs, not leaked
+        // automation pages. Register them so handoff can find them and normal
+        // accounting is accurate; keepOpen is a second safety boundary if a
+        // browser event races this listener.
+        context.on('page', (page) => registerSharedIdentityPage(created, key, page));
+        for (const page of context.pages()) registerSharedIdentityPage(created, key, page);
+      }
+      if (!sharedIdentity) await pluginEvents.emitAsync('session:created', { userId: key, context });
       log('info', 'session created', {
         userId: key,
         proxyMode: proxyPool?.mode || null,
@@ -1599,6 +1653,7 @@ function handleRouteError(err, req, res, extraFields = {}) {
 }
 
 function destroyTab(session, tabId, reason, userId) {
+  humanControlledTabs.delete(tabId);
   const lock = tabLocks.get(tabId);
   if (lock) {
     lock.drain();
@@ -1632,6 +1687,7 @@ async function destroyTimedOutTab(session, tabId, reason, userId) {
   } catch (err) {
     log('warn', 'timed-out tab cleanup failed', { tabId, error: err.message });
   } finally {
+    humanControlledTabs.delete(tabId);
     group.delete(tabId);
     if (group.size === 0) session.tabGroups.delete(listItemId);
     const lock = tabLocks.get(tabId);
@@ -1696,6 +1752,16 @@ function findTab(session, tabId) {
     if (group.has(tabId)) {
       const tabState = group.get(tabId);
       return { tabState, listItemId, group };
+    }
+  }
+  return null;
+}
+
+function findTabByPage(session, page) {
+  if (!session || !page) return null;
+  for (const [listItemId, group] of session.tabGroups) {
+    for (const [tabId, tabState] of group) {
+      if (tabState.page === page) return { tabId, tabState, listItemId, group };
     }
   }
   return null;
@@ -1774,6 +1840,25 @@ function attachPopupHandler(page, userId, sessionKey) {
   });
 }
 
+const SHARED_IDENTITY_GROUP = '__shared_identity__';
+
+function registerSharedIdentityPage(session, userId, page) {
+  if (!session?.sharedIdentity || !page || page.isClosed?.()) return null;
+  const group = getTabGroup(session, SHARED_IDENTITY_GROUP);
+  for (const [tabId, tabState] of group) {
+    if (tabState.page === page) return tabId;
+  }
+  const tabId = fly.makeTabId();
+  const tabState = createTabState(page);
+  attachDownloadListener(tabState, tabId, log, pluginEvents, userId);
+  group.set(tabId, tabState);
+  attachPopupHandler(page, userId, SHARED_IDENTITY_GROUP);
+  refreshActiveTabsGauge();
+  log('info', 'shared identity page registered', { userId, tabId });
+  pluginEvents.emit('tab:created', { userId, tabId, page, url: safePageUrl(page) });
+  return tabId;
+}
+
 function pressureHash(value) {
   return crypto.createHash('sha256').update(String(value)).digest('hex').slice(0, 12);
 }
@@ -1806,10 +1891,15 @@ async function camofoxPressureCleanup(options = {}) {
     first_observation: 0,
     recently_active: 0,
     below_min_idle: 0,
+    keep_open: 0,
   };
   const candidates = [];
 
   for (const [userId, session] of sessions) {
+    if (session.keepOpen) {
+      for (const group of session.tabGroups.values()) preserved.keep_open += group.size;
+      continue;
+    }
     for (const [listItemId, group] of session.tabGroups) {
       for (const [tabId, tabState] of group) {
         const lockState = pressureLockState(tabId);
@@ -1894,7 +1984,7 @@ async function camofoxPressureCleanup(options = {}) {
       for (const [listItemId, group] of Array.from(session.tabGroups.entries())) {
         if (group.size === 0) session.tabGroups.delete(listItemId);
       }
-      if (closeEmptySessions && session.tabGroups.size === 0 && !hasActivePageLeases(session)) {
+      if (closeEmptySessions && !session.keepOpen && session.tabGroups.size === 0 && !hasActivePageLeases(session)) {
         session._closing = true;
         await closeSession(userId, session, { reason: 'pressure_cleanup_empty_session', clearDownloads: true, clearLocks: true });
         sessionsExpiredTotal.inc();
@@ -2772,6 +2862,112 @@ app.post('/pressure/cleanup', async (req, res) => {
   }
 });
 
+// Shared visible-identity controls. These are intentionally metadata-only: no
+// cookies, storage state, page text, URLs, or extension data is exposed.
+/**
+ * @openapi
+ * /browser/identities/{userId}/open:
+ *   post:
+ *     tags: [Browser]
+ *     summary: Open or reuse a named shared identity
+ *     parameters:
+ *       - name: userId
+ *         in: path
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200: { description: Shared identity is open. }
+ *       404: { description: Identity is not configured for shared mode. }
+ */
+app.post('/browser/identities/:userId/open', async (req, res) => {
+  const userId = normalizeUserId(req.params.userId);
+  if (!sharedIdentities.owns(userId)) return res.status(404).json({ error: 'Shared identity not configured' });
+  try {
+    const session = await getSession(userId);
+    const page = await sharedIdentities.focus(userId);
+    const tabId = registerSharedIdentityPage(session, userId, page);
+    return res.json({ ok: true, userId, focused: Boolean(page), tabId, keepOpen: true });
+  } catch (err) {
+    return handleRouteError(err, req, res);
+  }
+});
+
+/**
+ * @openapi
+ * /browser/identities/{userId}/focus:
+ *   post:
+ *     tags: [Browser]
+ *     summary: Focus an open named shared identity
+ *     parameters:
+ *       - name: userId
+ *         in: path
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200: { description: Focus result. }
+ *       404: { description: Identity is not configured or is not open. }
+ */
+app.post('/browser/identities/:userId/focus', async (req, res) => {
+  const userId = normalizeUserId(req.params.userId);
+  if (!sharedIdentities.owns(userId)) return res.status(404).json({ error: 'Shared identity not configured' });
+  const page = await sharedIdentities.focus(userId);
+  if (!page) return res.status(404).json({ error: 'Shared identity is not open' });
+  const session = sessions.get(userId);
+  const tabId = registerSharedIdentityPage(session, userId, page);
+  return res.json({ ok: true, userId, focused: true, tabId });
+});
+
+/**
+ * @openapi
+ * /tabs/{tabId}/handoff:
+ *   post:
+ *     tags: [Browser]
+ *     summary: Mark a tab for human or agent control
+ *     parameters:
+ *       - name: tabId
+ *         in: path
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [userId, handoff]
+ *             properties:
+ *               userId: { type: string, description: Shared identity owner. }
+ *               handoff: { type: string, enum: [human, agent] }
+ *     responses:
+ *       200: { description: Handoff recorded. }
+ *       400: { description: Invalid handoff payload. }
+ *       404: { description: Tab not found. }
+ *       409: { description: Tab is not a shared identity tab or is no longer available. }
+ */
+app.post('/tabs/:tabId/handoff', async (req, res) => {
+  const requestedUserId = req.body?.userId;
+  const handoff = req.body?.handoff;
+  if (requestedUserId === undefined || requestedUserId === null || !['human', 'agent'].includes(handoff)) return res.status(400).json({ error: 'userId and handoff (human or agent) required' });
+  const userId = normalizeUserId(requestedUserId);
+  const session = sessions.get(userId);
+  if (!session?.sharedIdentity) return res.status(409).json({ error: 'Handoff is available only for shared identity tabs' });
+  if (!findTab(session, req.params.tabId)) return tabNotFoundResponse(res, req.params.tabId);
+  try {
+    const result = await withTabLock(req.params.tabId, async () => {
+      const current = findTab(session, req.params.tabId);
+      return applySharedTabHandoff({
+        tabId: req.params.tabId,
+        handoff,
+        tabState: current?.tabState,
+        humanControlledTabs,
+      });
+    }, HANDLER_TIMEOUT_MS, undefined, { allowHumanControl: true });
+    return res.json({ ok: true, ...result });
+  } catch (err) {
+    return handleRouteError(err, req, res);
+  }
+});
+
 // Create new tab
 /**
  * @openapi
@@ -2886,12 +3082,22 @@ app.post('/tabs', async (req, res) => {
       const lease = createdPage.lease;
       const group = getTabGroup(session, resolvedSessionKey);
 
-      const tabId = fly.makeTabId();
-      let tabState = createTabState(page);
-      attachDownloadListener(tabState, tabId, log, pluginEvents, userId);
+      // A persistent shared context registers `page` synchronously through
+      // its context `page` event. Reuse that state and move it to the caller's
+      // group instead of registering the same Playwright page under another
+      // tab ID (which would create independent locks and bypass handoff).
+      const registered = session.sharedIdentity && findTabByPage(session, page);
+      const tabId = registered?.tabId || fly.makeTabId();
+      let tabState = registered?.tabState || createTabState(page);
+      if (registered) {
+        registered.group.delete(tabId);
+        if (registered.group.size === 0) session.tabGroups.delete(registered.listItemId);
+      } else {
+        attachDownloadListener(tabState, tabId, log, pluginEvents, userId);
+      }
       group.set(tabId, tabState);
       releasePageLease(session, lease);
-      attachPopupHandler(page, userId, resolvedSessionKey);
+      if (!registered) attachPopupHandler(page, userId, resolvedSessionKey);
       refreshActiveTabsGauge();
       
       if (url) {
@@ -5178,7 +5384,7 @@ app.delete('/tabs/:tabId', async (req, res) => {
       await clearTabDownloads(found.tabState);
       await safePageClose(found.tabState.page);
       found.group.delete(req.params.tabId);
-      { const _l = tabLocks.get(req.params.tabId); if (_l) _l.drain(); tabLocks.delete(req.params.tabId); refreshTabLockQueueDepth(); }
+      { const _l = tabLocks.get(req.params.tabId); if (_l) _l.drain(); tabLocks.delete(req.params.tabId); humanControlledTabs.delete(req.params.tabId); refreshTabLockQueueDepth(); }
       if (found.group.size === 0) {
         session.tabGroups.delete(found.listItemId);
       }
@@ -5243,6 +5449,7 @@ app.delete('/tabs/group/:listItemId', async (req, res) => {
         if (lock) {
           lock.drain();
           tabLocks.delete(tabId);
+        humanControlledTabs.delete(tabId);
         }
       }
       session.tabGroups.delete(req.params.listItemId);
@@ -5525,6 +5732,7 @@ app.delete('/sessions/:userId', async (req, res) => {
 setInterval(() => {
   const now = Date.now();
   for (const [userId, session] of Array.from(sessions.entries())) {
+    if (session.keepOpen) continue;
     if (now - session.lastAccess > SESSION_TIMEOUT_MS) {
       session._closing = true;
       const idleMs = now - session.lastAccess;
@@ -5591,6 +5799,7 @@ if (FLY_MACHINE_ID) {
 setInterval(() => {
   const now = Date.now();
   for (const [userId, session] of sessions) {
+    if (session.keepOpen) continue;
     for (const [listItemId, group] of session.tabGroups) {
       for (const [tabId, tabState] of group) {
         if (!tabState._lastReaperCheck) {
@@ -5635,7 +5844,7 @@ setInterval(() => {
 setInterval(() => {
   let reaped = 0;
   for (const session of sessions.values()) {
-    if (session._closing) continue;
+    if (!isEligibleForAutomaticCleanup(session)) continue;
     let contextPages;
     try {
       contextPages = session.context.pages();

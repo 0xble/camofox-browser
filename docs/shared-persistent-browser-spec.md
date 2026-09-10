@@ -1,0 +1,58 @@
+# Shared persistent Camofox browser
+
+**Status:** implementation contract — 2026-09-10
+
+## Outcome
+
+Camofox remains the single loopback-authenticated browser service at `127.0.0.1:9377`. It can own an interactive, persistent browser context for an explicitly configured allowlist of native Hermes `userId` values; the same opaque identifier is used by Hermes and Camofox for a visible profile.
+
+## Current facts
+
+- Source baseline is `284ae081ff6683e0e2eab1d0746b9492b187dc6f` from `0xble/camofox-browser` `origin/master`.
+- The service currently uses ephemeral Playwright contexts and a separate manual Camoufox process/profile. Storage-state restoration is insufficient for full Firefox profile state and can revive stale login state.
+- The deployed service is loopback-only and bearer-authenticated. Its manually launched profile is `~/.local/share/camofox/state/manual-profile`; it must not be deleted, reused, or imported by this feature.
+
+## Boundaries and authority
+
+| Component | Owns | Must not own |
+| --- | --- | --- |
+| Camofox service | lifecycle lock, persistent profile/context, live tab/session mapping, cookie checkpoint/restore, explicit handoff state | another process using an identity profile |
+| Thin launcher | authenticated request to open/focus or hand off a named identity | browser processes, profile locking, cookie/state files |
+| Hermes | normal Camofox API calls under a named `userId` | direct Firefox process/profile access |
+| Human | visible tabs and any direct interaction after a handoff | service lifecycle internals |
+
+## Settled behavior
+
+1. Only configured opaque Hermes `userId`s may use shared persistent mode. `CAMOFOX_SHARED_IDENTITIES` contains those opaque values. When a local launcher needs aliases, `CAMOFOX_SHARED_IDENTITY_MAP` maps each alias to one configured opaque value; both paths normalize before session/profile lookup. Other `userId`s retain existing isolated ephemeral behavior.
+2. Each configured opaque identity gets a distinct profile directory below `CAMOFOX_SHARED_PROFILE_DIR`. Existing state is never copied into another identity. First creation makes a backup/marker rather than importing Chrome or the old manual profile.
+3. A persistent identity opens as a visible desktop browser. The service serializes create/open/close operations per identity; an existing identity is focused, never launched a second time.
+4. Firefox profile state retains extensions, settings, and persistent cookies. Only session cookies are a scoped recovery layer: a snapshot is eligible solely after a clean service close, is invalidated before a subsequent context launch, and is injected with `context.addCookies()` before the first page is opened. A crash therefore cannot replay a stale session snapshot; exact crash-session recovery is intentionally not promised. Existing `storageState` is not passed to persistent-context launch.
+5. A clean close replaces the session-cookie snapshot, including an empty snapshot. This makes an explicit logout durable. Persistent cookies stay in the Firefox profile and are never overlaid from a checkpoint. Expired cookies are omitted; session snapshots retain the Playwright cookie attributes accepted by `addCookies()`.
+6. A persistent tab is keep-open by default and is excluded from idle, task, pressure, and orphan-page cleanup. Pages opened from the visible Firefox UI are registered under a service-owned shared-identity group; the keep-open exclusion remains a fail-safe for a page-event race. Explicit close/session reset still works. Handoff is available only for a shared tab: human transfer waits behind its current tab operation, focuses that exact page, and blocks later agent tab operations until an explicit agent transfer.
+7. The existing production click issue is explicitly out of scope. Console capture is deferred. No browser-engine source or engine pin changes are permitted.
+
+## Interfaces
+
+Existing `/tabs` calls for a named identity cause the shared context to be opened/reused. New authenticated browser endpoints expose only safe control metadata:
+
+- `POST /browser/identities/:userId/open` — ensure the named context exists, register a visible tab, and focus it.
+- `POST /browser/identities/:userId/focus` — focus and register an existing visible tab; responses include its opaque `tabId` for explicit handoff.
+- `POST /tabs/:tabId/handoff` — set `human` or `agent`; optional human handoff focuses the window.
+
+Responses never contain cookies, stored state, extension data, page body, or titles/URLs beyond the existing tab API contract.
+
+## Test boundary
+
+The primary test boundary is Camofox's authenticated HTTP API backed by a synthetic persistent-context adapter. It verifies: profile/identity isolation; one open under concurrent requests; focus/open behavior; safe cookie persistence and restore ordering; logout-empty snapshot; keep-open cleanup protection; and handoff transitions. One local runtime smoke test uses disposable synthetic identities only; it must not touch browser-account state.
+
+## Migration and rollback
+
+- Migration creates new profile directories only. It preserves `state/manual-profile`, old hashed `state/profiles`, and Chrome profiles untouched.
+- Deployment copies a versioned release and atomically updates only the launcher package target after source verification. A controlled service restart checkpoints active contexts first.
+- Rollback repoints the launcher to the previous immutable release and restarts the LaunchAgent. New profile directories remain preserved, not deleted.
+
+## Non-goals
+
+- No Chrome default-browser/session changes.
+- No real account login, cookie export, or secret output.
+- No VNC/noVNC, console capture, engine fork, or unrelated Hermes restart.

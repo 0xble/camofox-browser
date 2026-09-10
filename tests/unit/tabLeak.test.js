@@ -8,6 +8,7 @@
  */
 import { describe, test, expect } from '@jest/globals';
 import { jest } from '@jest/globals';
+import { isEligibleForAutomaticCleanup } from '../../lib/cleanup-policy.js';
 
 // ============================================================================
 // safePageClose (extracted logic)
@@ -65,7 +66,7 @@ function getTotalTabCount(sessions) {
 function findOrphanPages(sessions) {
   const orphans = [];
   for (const session of sessions.values()) {
-    if (session._closing) continue;
+    if (!isEligibleForAutomaticCleanup(session)) continue;
     let contextPages;
     try {
       contextPages = session.context.pages();
@@ -282,6 +283,15 @@ describe('getTotalTabCount', () => {
 // ============================================================================
 
 describe('findOrphanPages (orphan page reaper)', () => {
+  test('preserves visible shared contexts from automatic cleanup', () => {
+    const shared = { _closing: false, keepOpen: true };
+    const ordinary = { _closing: false, keepOpen: false };
+    const closing = { _closing: true, keepOpen: false };
+    expect(isEligibleForAutomaticCleanup(shared)).toBe(false);
+    expect(isEligibleForAutomaticCleanup(ordinary)).toBe(true);
+    expect(isEligibleForAutomaticCleanup(closing)).toBe(false);
+  });
+
   test('returns empty when no sessions', () => {
     expect(findOrphanPages(new Map())).toEqual([]);
   });
@@ -324,6 +334,19 @@ describe('findOrphanPages (orphan page reaper)', () => {
       ['user1', {
         _closing: true,
         context: { pages: () => [orphan] },
+        tabGroups: new Map(),
+      }],
+    ]);
+    expect(findOrphanPages(sessions)).toEqual([]);
+  });
+
+  test('preserves unregistered pages in a keep-open shared identity session', () => {
+    const manualPage = { id: 'manual' };
+    const sessions = new Map([
+      ['personal', {
+        _closing: false,
+        keepOpen: true,
+        context: { pages: () => [manualPage] },
         tabGroups: new Map(),
       }],
     ]);

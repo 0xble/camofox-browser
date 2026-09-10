@@ -119,4 +119,12 @@ describe('loadConfig', () => {
     expect(config.serverEnv.CAMOFOX_DISABLE_DEFAULT_ADDONS).toBe('true');
   });
 
+  test('resolves launcher aliases to the native Hermes opaque identity allowlist', () => {
+    process.env.CAMOFOX_SHARED_IDENTITIES = 'hermes_camofox_native';
+    process.env.CAMOFOX_SHARED_IDENTITY_MAP = JSON.stringify({ personal: 'hermes_camofox_native' });
+    const config = loadConfig();
+    expect(config.sharedIdentityAliases).toEqual({ personal: 'hermes_camofox_native' });
+    expect(config.sharedIdentityNames).toEqual(['hermes_camofox_native']);
+    expect(config.serverEnv.CAMOFOX_SHARED_IDENTITY_MAP).toBe(process.env.CAMOFOX_SHARED_IDENTITY_MAP);
+  });
 });
