@@ -195,7 +195,9 @@ enum LauncherError: LocalizedError {
     @Published var identities: [Identity] = []
     @Published var selectedIdentity: Identity?
     @Published var tabs: [Tab] = []
-    @Published var selectedTab: Tab?
+    // List selection is keyed by the service-owned tab ID.  Using the stable ID
+    // avoids relying on SwiftUI to infer a Tab value from Identifiable.id.
+    @Published var selectedTabID: String?
     @Published var error: String?
     @Published var loading = false
     private var configuration: LauncherConfiguration?
@@ -223,7 +225,7 @@ enum LauncherError: LocalizedError {
             if let selectedIdentity, !identities.contains(selectedIdentity) {
                 self.selectedIdentity = nil
                 tabs = []
-                selectedTab = nil
+                selectedTabID = nil
             }
         } catch {
             self.error = error.localizedDescription
@@ -241,21 +243,23 @@ enum LauncherError: LocalizedError {
             let openResult = try await request("/browser/identities/\(identity.userId)/open", config: config, method: "POST", body: Optional<String>.none, response: OpenResult.self)
             let loadedTabs = try await request("/tabs?userId=\(identity.userId.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? identity.userId)", config: config, method: "GET", body: Optional<String>.none, response: TabList.self).tabs
             tabs = loadedTabs
-            selectedTab = openResult.tabId.flatMap { openedTabID in loadedTabs.first { $0.tabId == openedTabID } }
+            selectedTabID = openResult.tabId.flatMap { openedTabID in
+                loadedTabs.contains { $0.tabId == openedTabID } ? openedTabID : nil
+            }
         } catch {
             self.error = error.localizedDescription
         }
     }
 
     func handoff(_ handoff: String) async {
-        guard !loading, let identity = selectedIdentity, let tab = selectedTab else { return }
+        guard !loading, let identity = selectedIdentity, let tabID = selectedTabID else { return }
         loading = true
         error = nil
         defer { loading = false }
         do {
             let config = try configured()
             struct Handoff: Encodable { let userId: String; let handoff: String }
-            _ = try await request("/tabs/\(tab.tabId)/handoff", config: config, method: "POST", body: Handoff(userId: identity.userId, handoff: handoff), response: OpenResult.self)
+            _ = try await request("/tabs/\(tabID)/handoff", config: config, method: "POST", body: Handoff(userId: identity.userId, handoff: handoff), response: OpenResult.self)
         } catch {
             self.error = error.localizedDescription
         }
@@ -315,21 +319,33 @@ struct ContentView: View {
                     Button("‹ Profiles") {
                         model.selectedIdentity = nil
                         model.tabs = []
-                        model.selectedTab = nil
+                        model.selectedTabID = nil
                     }.disabled(model.loading)
                     Text(model.selectedIdentity!.displayName).font(.headline)
                 }
-                List(model.tabs, selection: $model.selectedTab) { tab in
-                    VStack(alignment: .leading) {
-                        Text(tab.title ?? "Untitled tab").lineLimit(1)
-                        Text(tab.url ?? "").font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                List(model.tabs) { tab in
+                    Button {
+                        model.selectedTabID = tab.tabId
+                    } label: {
+                        VStack(alignment: .leading) {
+                            Text(tab.title ?? "Untitled tab").lineLimit(1)
+                            Text(tab.url ?? "").font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.vertical, 2)
+                        .background(model.selectedTabID == tab.tabId ? Color.accentColor.opacity(0.18) : .clear)
+                        .clipShape(RoundedRectangle(cornerRadius: 4))
                     }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Tab: \(tab.title ?? "Untitled tab")\(tab.url.map { ", \($0)" } ?? "")")
+                    .accessibilityValue(model.selectedTabID == tab.tabId ? "Selected" : "Not selected")
+                    .accessibilityIdentifier("camofox-tab-\(tab.tabId)")
                 }.disabled(model.loading).frame(minHeight: 150)
                 HStack {
                     Button("Take Control") { Task { await model.handoff("human") } }
-                        .disabled(model.selectedTab == nil || model.loading)
+                        .disabled(model.selectedTabID == nil || model.loading)
                     Button("Return to Agent") { Task { await model.handoff("agent") } }
-                        .disabled(model.selectedTab == nil || model.loading)
+                        .disabled(model.selectedTabID == nil || model.loading)
                 }
             }
         }
