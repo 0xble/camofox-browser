@@ -400,6 +400,22 @@
         }
       }
     },
+    "/browser/identities": {
+      "get": {
+        "tags": [
+          "Browser"
+        ],
+        "summary": "List configured shared identity metadata",
+        "responses": {
+          "200": {
+            "description": "Safe configured identity metadata."
+          },
+          "403": {
+            "description": "Bearer authentication required."
+          }
+        }
+      }
+    },
     "/browser/identities/{userId}/open": {
       "post": {
         "tags": [
