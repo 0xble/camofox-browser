@@ -35,7 +35,7 @@ remote; `upstream` is fetch-only and must never receive pushes. The upstream MIT
 
 ### CAMOFOX-002: shared persistent identity lifecycle
 
-- **Status:** Active, source-only; not approved for installation.
+- **Status:** Active; managed installation is authorized only from the landed fork SHA.
 - **Stable subject:** `Add shared persistent identity lifecycle` (`85d2f3f`).
 - **Behavior:** native Hermes opaque IDs and optional local aliases resolve to one profile; session-only cookies restore only after a clean close; human handoff serializes with tab work and blocks agent operations.
 - **Surfaces:** `server.js`, `lib/shared-identity.js`, `lib/config.js`, `docs/shared-persistent-browser-spec.md`
