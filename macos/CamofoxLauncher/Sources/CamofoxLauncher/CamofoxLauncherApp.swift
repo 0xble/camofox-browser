@@ -35,6 +35,10 @@ struct Tab: Codable, Identifiable, Hashable {
     let title: String?
     let url: String?
     var id: String { tabId }
+    var displayTitle: String {
+        let trimmedTitle = title?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return trimmedTitle.isEmpty ? "Untitled tab" : trimmedTitle
+    }
 }
 struct TabList: Decodable { let tabs: [Tab] }
 struct OpenResult: Decodable { let tabId: String? }
@@ -226,6 +230,12 @@ enum LauncherError: LocalizedError {
                 self.selectedIdentity = nil
                 tabs = []
                 selectedTabID = nil
+            } else if let selectedIdentity {
+                let refreshedTabs = try await request("/tabs?userId=\(selectedIdentity.userId.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? selectedIdentity.userId)", config: config, method: "GET", body: Optional<String>.none, response: TabList.self).tabs
+                tabs = refreshedTabs
+                if let selectedTabID, !refreshedTabs.contains(where: { $0.tabId == selectedTabID }) {
+                    self.selectedTabID = nil
+                }
             }
         } catch {
             self.error = error.localizedDescription
@@ -328,7 +338,7 @@ struct ContentView: View {
                         model.selectedTabID = tab.tabId
                     } label: {
                         VStack(alignment: .leading) {
-                            Text(tab.title ?? "Untitled tab").lineLimit(1)
+                            Text(tab.displayTitle).lineLimit(1)
                             Text(tab.url ?? "").font(.caption).foregroundStyle(.secondary).lineLimit(1)
                         }
                         .frame(maxWidth: .infinity, alignment: .leading)
@@ -337,7 +347,7 @@ struct ContentView: View {
                         .clipShape(RoundedRectangle(cornerRadius: 4))
                     }
                     .buttonStyle(.plain)
-                    .accessibilityLabel("Tab: \(tab.title ?? "Untitled tab")\(tab.url.map { ", \($0)" } ?? "")")
+                    .accessibilityLabel("Tab: \(tab.displayTitle)\(tab.url.map { ", \($0)" } ?? "")")
                     .accessibilityValue(model.selectedTabID == tab.tabId ? "Selected" : "Not selected")
                     .accessibilityIdentifier("camofox-tab-\(tab.tabId)")
                 }.disabled(model.loading).frame(minHeight: 150)
