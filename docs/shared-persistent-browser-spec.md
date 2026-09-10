@@ -28,15 +28,15 @@ Camofox remains the single loopback-authenticated browser service at `127.0.0.1:
 3. A persistent identity opens as a visible desktop browser. The service serializes create/open/close operations per identity; an existing identity is focused, never launched a second time.
 4. Firefox profile state retains extensions and settings. Cookies are checkpointed separately as a deliberately scoped recovery layer. On a service restart, stored cookies are injected with `context.addCookies()` before the first page is opened. Existing `storageState` is not passed to persistent-context launch.
 5. A checkpoint always replaces the prior cookie snapshot, including an empty snapshot. This makes an explicit logout durable instead of resurrecting an older login. Expired cookies are omitted. Checkpoints retain cookie attributes accepted by Playwright (`domain`, `path`, `expires`, `httpOnly`, `secure`, `sameSite`, and `partitionKey` when present).
-6. A persistent tab is keep-open by default and is excluded from idle, task, and pressure cleanup. Explicit close/session reset still works. A handoff changes only a service-owned tab state (`agent` or `human`); it does not clone a profile or start another process.
+6. A persistent tab is keep-open by default and is excluded from idle, task, pressure, and orphan-page cleanup. Pages opened from the visible Firefox UI are registered under a service-owned shared-identity group; the keep-open exclusion remains a fail-safe for a page-event race. Explicit close/session reset still works. A handoff changes only a service-owned tab state (`agent` or `human`); it does not clone a profile or start another process.
 7. The existing production click issue is explicitly out of scope. Console capture is deferred. No browser-engine source or engine pin changes are permitted.
 
 ## Interfaces
 
 Existing `/tabs` calls for a named identity cause the shared context to be opened/reused. New authenticated browser endpoints expose only safe control metadata:
 
-- `POST /browser/identities/:userId/open` — ensure the named context exists, optionally navigate a new tab, and focus it.
-- `POST /browser/identities/:userId/focus` — focus the existing visible window.
+- `POST /browser/identities/:userId/open` — ensure the named context exists, register a visible tab, and focus it.
+- `POST /browser/identities/:userId/focus` — focus and register an existing visible tab; responses include its opaque `tabId` for explicit handoff.
 - `POST /tabs/:tabId/handoff` — set `human` or `agent`; optional human handoff focuses the window.
 
 Responses never contain cookies, stored state, extension data, page body, or titles/URLs beyond the existing tab API contract.

@@ -1410,6 +1410,14 @@ async function getSession(userId, { trace = false } = {}) {
 
       const created = { context, tabGroups: new Map(), pageLeases: new Set(), lastAccess: Date.now(), proxySessionId: sessionProxy?.sessionId || null, tracePath, sharedIdentity, keepOpen: sharedIdentity };
       sessions.set(key, created);
+      if (sharedIdentity) {
+        // Pages opened by the visible Firefox UI are real user tabs, not leaked
+        // automation pages. Register them so handoff can find them and normal
+        // accounting is accurate; keepOpen is a second safety boundary if a
+        // browser event races this listener.
+        context.on('page', (page) => registerSharedIdentityPage(created, key, page));
+        for (const page of context.pages()) registerSharedIdentityPage(created, key, page);
+      }
       if (!sharedIdentity) await pluginEvents.emitAsync('session:created', { userId: key, context });
       log('info', 'session created', {
         userId: key,
@@ -1809,6 +1817,25 @@ function attachPopupHandler(page, userId, sessionKey) {
     // Recursively handle popups from the popup
     attachPopupHandler(popupPage, userId, sessionKey);
   });
+}
+
+const SHARED_IDENTITY_GROUP = '__shared_identity__';
+
+function registerSharedIdentityPage(session, userId, page) {
+  if (!session?.sharedIdentity || !page || page.isClosed?.()) return null;
+  const group = getTabGroup(session, SHARED_IDENTITY_GROUP);
+  for (const [tabId, tabState] of group) {
+    if (tabState.page === page) return tabId;
+  }
+  const tabId = fly.makeTabId();
+  const tabState = createTabState(page);
+  attachDownloadListener(tabState, tabId, log, pluginEvents, userId);
+  group.set(tabId, tabState);
+  attachPopupHandler(page, userId, SHARED_IDENTITY_GROUP);
+  refreshActiveTabsGauge();
+  log('info', 'shared identity page registered', { userId, tabId });
+  pluginEvents.emit('tab:created', { userId, tabId, page, url: safePageUrl(page) });
+  return tabId;
 }
 
 function pressureHash(value) {
@@ -2835,9 +2862,10 @@ app.post('/browser/identities/:userId/open', async (req, res) => {
   const userId = normalizeUserId(req.params.userId);
   if (!sharedIdentities.owns(userId)) return res.status(404).json({ error: 'Shared identity not configured' });
   try {
-    await getSession(userId);
-    const focused = await sharedIdentities.focus(userId);
-    return res.json({ ok: true, userId, focused, keepOpen: true });
+    const session = await getSession(userId);
+    const page = await sharedIdentities.focus(userId);
+    const tabId = registerSharedIdentityPage(session, userId, page);
+    return res.json({ ok: true, userId, focused: Boolean(page), tabId, keepOpen: true });
   } catch (err) {
     return handleRouteError(err, req, res);
   }
@@ -2861,9 +2889,11 @@ app.post('/browser/identities/:userId/open', async (req, res) => {
 app.post('/browser/identities/:userId/focus', async (req, res) => {
   const userId = normalizeUserId(req.params.userId);
   if (!sharedIdentities.owns(userId)) return res.status(404).json({ error: 'Shared identity not configured' });
-  const focused = await sharedIdentities.focus(userId);
-  if (!focused) return res.status(404).json({ error: 'Shared identity is not open' });
-  return res.json({ ok: true, userId, focused: true });
+  const page = await sharedIdentities.focus(userId);
+  if (!page) return res.status(404).json({ error: 'Shared identity is not open' });
+  const session = sessions.get(userId);
+  const tabId = registerSharedIdentityPage(session, userId, page);
+  return res.json({ ok: true, userId, focused: true, tabId });
 });
 
 /**
@@ -5758,7 +5788,7 @@ setInterval(() => {
 setInterval(() => {
   let reaped = 0;
   for (const session of sessions.values()) {
-    if (session._closing) continue;
+    if (session._closing || session.keepOpen) continue;
     let contextPages;
     try {
       contextPages = session.context.pages();

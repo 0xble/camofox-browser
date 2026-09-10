@@ -8,6 +8,12 @@
  */
 import { describe, test, expect } from '@jest/globals';
 import { jest } from '@jest/globals';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const serverSource = fs.readFileSync(path.join(__dirname, '../../server.js'), 'utf8');
 
 // ============================================================================
 // safePageClose (extracted logic)
@@ -65,7 +71,7 @@ function getTotalTabCount(sessions) {
 function findOrphanPages(sessions) {
   const orphans = [];
   for (const session of sessions.values()) {
-    if (session._closing) continue;
+    if (session._closing || session.keepOpen) continue;
     let contextPages;
     try {
       contextPages = session.context.pages();
@@ -282,6 +288,11 @@ describe('getTotalTabCount', () => {
 // ============================================================================
 
 describe('findOrphanPages (orphan page reaper)', () => {
+  test('server registers visible shared pages and exempts keep-open identities', () => {
+    expect(serverSource).toContain("context.on('page', (page) => registerSharedIdentityPage(created, key, page))");
+    expect(serverSource).toContain('if (session._closing || session.keepOpen) continue;');
+  });
+
   test('returns empty when no sessions', () => {
     expect(findOrphanPages(new Map())).toEqual([]);
   });
@@ -324,6 +335,19 @@ describe('findOrphanPages (orphan page reaper)', () => {
       ['user1', {
         _closing: true,
         context: { pages: () => [orphan] },
+        tabGroups: new Map(),
+      }],
+    ]);
+    expect(findOrphanPages(sessions)).toEqual([]);
+  });
+
+  test('preserves unregistered pages in a keep-open shared identity session', () => {
+    const manualPage = { id: 'manual' };
+    const sessions = new Map([
+      ['personal', {
+        _closing: false,
+        keepOpen: true,
+        context: { pages: () => [manualPage] },
         tabGroups: new Map(),
       }],
     ]);

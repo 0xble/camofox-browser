@@ -9,12 +9,13 @@ describe('SharedIdentityManager', () => {
   beforeEach(async () => { root = await fs.mkdtemp(path.join(os.tmpdir(), 'camofox-shared-identities-')); });
   afterEach(async () => { await fs.rm(root, { recursive: true, force: true }); });
 
-  function context(cookies = []) {
+  function context(cookies = [], newPage = undefined) {
     return {
       addCookies: jest.fn(async () => {}),
       cookies: jest.fn(async () => cookies),
       close: jest.fn(async () => {}),
       pages: jest.fn(() => []),
+      newPage: jest.fn(async () => newPage),
     };
   }
 
@@ -58,7 +59,17 @@ describe('SharedIdentityManager', () => {
     const live = context(); live.pages.mockReturnValue([page]);
     const manager = new SharedIdentityManager({ identities: ['personal'], profileDir: root });
     await manager.open('personal', async () => live);
-    await expect(manager.focus('personal')).resolves.toBe(true);
+    await expect(manager.focus('personal')).resolves.toBe(page);
+    expect(page.bringToFront).toHaveBeenCalledTimes(1);
+  });
+
+  test('focus creates and returns one visible page when a persistent context has none', async () => {
+    const page = { isClosed: () => false, bringToFront: jest.fn(async () => {}) };
+    const live = context([], page);
+    const manager = new SharedIdentityManager({ identities: ['personal'], profileDir: root });
+    await manager.open('personal', async () => live);
+    await expect(manager.focus('personal')).resolves.toBe(page);
+    expect(live.newPage).toHaveBeenCalledTimes(1);
     expect(page.bringToFront).toHaveBeenCalledTimes(1);
   });
 });
