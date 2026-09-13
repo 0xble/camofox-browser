@@ -125,8 +125,35 @@ jobs:
         env:
           CI: true
 
+  windows-e2e:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install dependencies
+        run: |
+          npm ci
+          npm install --no-save jest-junit
+
+      - name: Install Camoufox
+        run: npm run fetch-bin
+
+      - name: Run browser E2E tests
+        shell: pwsh
+        run: |
+          $env:NODE_OPTIONS = '--experimental-vm-modules'
+          npx jest --config jest.config.e2e.cjs --runInBand --forceExit
+        env:
+          CI: true
+
   notify-agenthook:
-    needs: [unit, windows-process-cleanup, e2e]
+    needs: [unit, windows-process-cleanup, e2e, windows-e2e]
     if: always()
     runs-on: ubuntu-latest
     steps:
