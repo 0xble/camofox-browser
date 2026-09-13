@@ -282,6 +282,12 @@ function createTestApp() {
     res.send(body);
   });
 
+  app.get('/inline-document.pdf', (req, res) => {
+    // Small valid PDF fixture. No Content-Disposition means Firefox displays it inline.
+    const pdf = '%PDF-1.1\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n2 0 obj<</Type/Pages/Count 0>>endobj\ntrailer<</Root 1 0 R>>\n%%EOF\n';
+    res.type('application/pdf').send(pdf);
+  });
+
   // Page with a direct file input for upload endpoint tests
   app.get('/upload', (req, res) => {
     res.send(`

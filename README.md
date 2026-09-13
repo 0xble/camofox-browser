@@ -602,7 +602,8 @@ Uses [yt-dlp](https://github.com/yt-dlp/yt-dlp) when available (fast, no browser
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| `POST` | `/sessions/:userId/cookies` | Add cookies to a user session (Playwright cookie objects) |
+| `GET` | `/tabs/:tabId/downloads` | List captured browser downloads and saved current-resource PDFs |
+| `POST` | `/tabs/:tabId/fetch-current-resource` | Save the current inline PDF with its browser-session authentication as a download artifact |
 | `GET` | `/sessions/:userId/storage_state` | Export persisted browser storage ([VNC plugin](plugins/vnc/)) |
 | `DELETE` | `/sessions/:userId/storage_state` | Reset the live session and delete its persisted browser storage ([persistence plugin](plugins/persistence/)) |
 
@@ -658,6 +659,7 @@ Browser behavior can be tuned in `camofox.config.json`:
 | `MAX_CONCURRENT_PER_USER` | Concurrent request cap per user | `3` |
 | `MAX_OLD_SPACE_SIZE` | Node.js V8 heap limit (MB) | `128` |
 | `PROXY_STRATEGY` | Proxy mode: `backconnect` (rotating sticky sessions) or blank (single endpoint) | - |
+| `PROXY_PROTOCOL` | Proxy protocol: `http`, `https`, `socks4`, or `socks5`. | `http` |
 | `PROXY_PROVIDER` | Provider name for session format (e.g. `decodo`) | `decodo` |
 | `PROXY_HOST` | Proxy hostname or IP (simple mode) | - |
 | `PROXY_PORT` | Proxy port (simple mode) | - |

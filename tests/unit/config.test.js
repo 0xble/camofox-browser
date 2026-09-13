@@ -42,6 +42,14 @@ describe('loadConfig', () => {
     expect(loadConfig().camoufoxExecutablePath).toBe('/legacy/camoufox');
   });
 
+  test('validates the configured proxy protocol', () => {
+    process.env.PROXY_PROTOCOL = 'socks5';
+    expect(loadConfig().proxy.protocol).toBe('socks5');
+
+    process.env.PROXY_PROTOCOL = 'ftp';
+    expect(() => loadConfig()).toThrow('PROXY_PROTOCOL must be http, https, socks4, or socks5');
+  });
+
   test('configures an optional direct browser identity and forwards it to subprocesses', () => {
     process.env.CAMOFOX_LOCALE = 'en-AU';
     process.env.CAMOFOX_TIMEZONE = 'Australia/Sydney';

@@ -22,6 +22,8 @@ import {
   clearSessionDownloads,
   attachDownloadListener,
   clickWithDownloadGuard,
+  captureFetchedResource,
+  MAX_FETCHED_RESOURCE_BYTES,
   getDownloadsList,
 } from './lib/downloads.js';
 import { extractPageImages } from './lib/images.js';
@@ -52,6 +54,7 @@ import { prepareExternalCamoufoxExecutable } from './lib/camoufox-executable.js'
 import { createVirtualDisplayRegistry } from './lib/plugin-capabilities.js';
 import { killProcessIds } from './lib/browser-processes.js';
 import { snapshotOwnedBrowserProcesses, survivingOwnedBrowserProcesses, profilePathsFromProcessSnapshot } from './lib/process-ownership.js';
+import { killWindowsProcessTree, refreshWindowsProcesses } from './lib/windows-processes.js';
 import {
   safePageUrl, urlDomain, hashIdentifier,
   isDeadContextError, isPageCrashedError, isTimeoutError,
@@ -986,7 +989,7 @@ async function _closeBrowserFullyImpl(reason) {
 
   // Force-kill only survivors captured before this close began.
   if (pid) {
-    await _forceKillProcessTree(pid, reason);
+    await _forceKillProcessTree(pid, reason, ownedBrowserProcesses);
   }
   await _forceKillBrowserProcesses(reason, ownedBrowserProcesses);
 
@@ -1025,8 +1028,17 @@ async function _closeBrowserFullyImpl(reason) {
  * (SIGKILL -pid). Orphan cleanup is deliberately left to the ownership
  * snapshot captured before browser.close(), below.
  */
-async function _forceKillProcessTree(pid, reason) {
+async function _forceKillProcessTree(pid, reason, ownedBrowserProcesses = []) {
   if (!pid || pid <= 1) return;
+
+  if (process.platform === 'win32') {
+    const rootSnapshot = ownedBrowserProcesses.find((proc) => proc.pid === pid);
+    if (rootSnapshot && killWindowsProcessTree(pid, { expectedStartTime: rootSnapshot.startTime })) {
+      log('info', 'killed browser process tree', { pid, reason });
+    }
+    await new Promise(r => setTimeout(r, 500));
+    return;
+  }
 
   // Kill the specific browser process first (positive PID = single process)
   try {
@@ -1055,18 +1067,15 @@ async function _forceKillProcessTree(pid, reason) {
 }
 
 async function _forceKillBrowserProcesses(reason, ownedBrowserProcesses = []) {
-  if (process.platform !== 'linux') return;
-  let victims = [];
   try {
-    victims = survivingOwnedBrowserProcesses(ownedBrowserProcesses).map(proc => proc.pid);
+    const survivors = survivingOwnedBrowserProcesses(ownedBrowserProcesses);
+    const victims = survivors.map(proc => proc.pid);
+    if (victims.length > 0) {
+      log('warn', 'killing browser survivor processes', { reason, victims });
+      await killProcessIds(victims, { signal: 'SIGKILL', delayMs: 300, processSnapshots: survivors });
+    }
   } catch (err) {
     log('warn', 'failed to scan for browser survivor processes', { reason, error: err.message });
-    return;
-  }
-
-  if (victims.length > 0) {
-    log('warn', 'killing browser survivor processes', { reason, victims });
-    await killProcessIds(victims, { signal: 'SIGKILL', delayMs: 300 });
   }
 }
 
@@ -4980,6 +4989,72 @@ app.get('/tabs/:tabId/links', async (req, res) => {
     res.json(result);
   } catch (err) {
     log('error', 'links failed', { reqId: req.reqId, error: err.message });
+    handleRouteError(err, req, res);
+  }
+});
+
+// Fetch the currently displayed PDF through its existing browser context.
+/**
+ * @openapi
+ * /tabs/{tabId}/fetch-current-resource:
+ *   post:
+ *     tags: [Content]
+ *     summary: Save the current tab's PDF as a download artifact
+ *     parameters:
+ *       - name: tabId
+ *         in: path
+ *         required: true
+ *         schema:
+ *           type: string
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [userId]
+ *             properties:
+ *               userId:
+ *                 type: string
+ *     responses:
+ *       200:
+ *         description: Saved PDF download artifact.
+ *       404:
+ *         description: Tab not found.
+ *       415:
+ *         description: Current resource is not a PDF.
+ */
+app.post('/tabs/:tabId/fetch-current-resource', async (req, res) => {
+  try {
+    const userId = req.body?.userId;
+    const session = sessions.get(normalizeUserId(userId));
+    const found = session && findTab(session, req.params.tabId);
+    if (!found) return tabNotFoundResponse(res, req.params.tabId);
+    const { tabState } = found;
+    const url = tabState.page.url();
+    if (!/^https?:\/\//i.test(url)) return res.status(400).json({ error: 'Current tab does not have an HTTP resource' });
+
+    const response = await tabState.page.context().request.get(url);
+    const headers = response.headers();
+    const mimeType = String(headers['content-type'] || '').split(';', 1)[0].toLowerCase();
+    if (mimeType !== 'application/pdf') return res.status(415).json({ error: 'Current resource is not a PDF' });
+    const declaredBytes = Number(headers['content-length']);
+    if (Number.isFinite(declaredBytes) && declaredBytes > MAX_FETCHED_RESOURCE_BYTES) {
+      return res.status(413).json({ error: `Current resource exceeds ${MAX_FETCHED_RESOURCE_BYTES} byte limit` });
+    }
+    const body = await response.body();
+    if (body.length > MAX_FETCHED_RESOURCE_BYTES) {
+      return res.status(413).json({ error: `Current resource exceeds ${MAX_FETCHED_RESOURCE_BYTES} byte limit` });
+    }
+    const pathname = new URL(url).pathname;
+    const filename = pathname.split('/').pop() || 'document.pdf';
+    const download = await captureFetchedResource(tabState, { url, mimeType, filename, body });
+    tabState.toolCalls++;
+    session.lastAccess = Date.now();
+    res.json({ tabId: req.params.tabId, download });
+  } catch (err) {
+    failuresTotal.labels(classifyError(err), 'fetch_current_resource').inc();
+    log('error', 'fetch current resource failed', { reqId: req.reqId, error: err.message });
     handleRouteError(err, req, res);
   }
 });

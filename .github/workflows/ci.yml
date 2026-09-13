@@ -45,8 +45,29 @@ jobs:
         env:
           CI: true
 
-  e2e:
-    runs-on: ubuntu-latest
+
+  windows-process-cleanup:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Verify Windows process cleanup
+        shell: pwsh
+        run: |
+          $env:NODE_OPTIONS = '--experimental-vm-modules'
+          npx jest --runInBand --forceExit tests/unit/windowsProcesses.test.js
+        env:
+          CI: true
+
     strategy:
       matrix:
         node-version: [24]

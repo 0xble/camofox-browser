@@ -167,6 +167,10 @@ class BrowserClient {
     return this.request('GET', `/tabs/${tabId}/downloads?${params}`);
   }
 
+  async fetchCurrentResource(tabId) {
+    return this.request('POST', `/tabs/${tabId}/fetch-current-resource`, { userId: this.userId });
+  }
+
   async getImages(tabId, options = {}) {
     const params = new URLSearchParams({ userId: this.userId });
     if (options.includeData) params.append('includeData', 'true');
