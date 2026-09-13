@@ -62,6 +62,9 @@ jobs:
           npm ci
           npm install --no-save jest-junit
 
+      - name: Install Camoufox
+        run: npm run fetch-bin
+
       - name: Verify Windows process cleanup
         shell: pwsh
         run: |

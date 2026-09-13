@@ -1,5 +1,8 @@
 import { spawn } from 'child_process';
 import { once } from 'events';
+import { launchOptions } from 'camoufox-js';
+import { firefox } from 'playwright-core';
+import { killProcessIds } from '../../lib/browser-processes.js';
 import {
   isWindowsBrowserProcess,
   isWindowsProcessCurrent,
@@ -44,3 +47,37 @@ testOnWindows('taskkill removes a real owned process tree', async () => {
     if (root.exitCode === null) killWindowsProcessTree(root.pid);
   }
 }, 20_000);
+
+async function waitFor(condition, timeoutMs = 10_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (condition()) return;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  throw new Error('condition was not met before timeout');
+}
+
+testOnWindows('production cleanup kills a real Camoufox process tree', async () => {
+  let browser;
+  try {
+    browser = await firefox.launch(await launchOptions({ headless: true, os: 'windows' }));
+    const browserPid = browser.process()?.pid;
+    expect(Number.isInteger(browserPid)).toBe(true);
+
+    const snapshot = snapshotWindowsProcesses();
+    const root = snapshot.find((proc) => proc.pid === browserPid);
+    expect(root).toBeDefined();
+    expect(isWindowsBrowserProcess(root)).toBe(true);
+    const ownedPids = selectWindowsProcessTree(browserPid, snapshot).map((proc) => proc.pid);
+    expect(ownedPids).toContain(browserPid);
+
+    await killProcessIds([browserPid], { delayMs: 0, processSnapshots: snapshot });
+    await waitFor(() => !browser.isConnected());
+    await waitFor(() => {
+      const current = snapshotWindowsProcesses();
+      return ownedPids.every((pid) => !current.some((proc) => proc.pid === pid));
+    });
+  } finally {
+    await browser?.close().catch(() => {});
+  }
+}, 30_000);
