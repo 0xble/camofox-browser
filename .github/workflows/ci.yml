@@ -68,6 +68,8 @@ jobs:
         env:
           CI: true
 
+  e2e:
+    runs-on: ubuntu-latest
     strategy:
       matrix:
         node-version: [24]
