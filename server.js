@@ -9,6 +9,7 @@ import { expandMacro } from './lib/macros.js';
 import { getSearchFallbacks } from './lib/search-fallbacks.js';
 import { hasGoogleOrganicResults } from './lib/google-serp.js';
 import { loadConfig } from './lib/config.js';
+import { contextIdentityOptions, launchLocale } from './lib/browser-identity.js';
 import { normalizePlaywrightProxy, createProxyPool, buildProxyUrl } from './lib/proxy.js';
 import { createFlyHelpers } from './lib/fly.js';
 import { createPluginEvents, loadPlugins, typeEventPayload } from './lib/plugins.js';
@@ -896,7 +897,10 @@ async function probeGoogleSearch(candidateBrowser) {
   try {
     context = await candidateBrowser.newContext({
       viewport: null,
-      permissions: ['geolocation'],
+      ...contextIdentityOptions({
+        hasProxy: !!proxyPool,
+        directIdentity: CONFIG.directIdentity,
+      }),
     });
     const page = await context.newPage();
     await page.goto('https://www.google.com/', { waitUntil: 'domcontentloaded', timeout: 30000 });
@@ -1154,6 +1158,7 @@ async function launchBrowserInstance() {
         enable_cache: true,
         proxy: launchProxy,
         geoip: !!launchProxy,
+        locale: launchLocale({ hasProxy: !!proxyPool, directIdentity: CONFIG.directIdentity }),
         virtual_display: vdDisplay,
         exclude_addons: CONFIG.disableDefaultAddons ? ['UBO'] : undefined,
       }, {
@@ -1369,15 +1374,11 @@ async function getSession(userId, { trace = false } = {}) {
       const b = await ensureBrowser();
       const contextOptions = {
         viewport: null,
-        permissions: ['geolocation'],
+        ...contextIdentityOptions({
+          hasProxy: !!proxyPool,
+          directIdentity: CONFIG.directIdentity,
+        }),
       };
-      // When geoip is active (proxy configured), camoufox auto-configures
-      // locale/timezone/geolocation from the proxy IP. Without proxy, use defaults.
-      if (!CONFIG.proxy.host) {
-        contextOptions.locale = 'en-US';
-        contextOptions.timezoneId = 'America/Los_Angeles';
-        contextOptions.geolocation = { latitude: 37.7749, longitude: -122.4194 };
-      }
       let sessionProxy = null;
       if (proxyPool?.canRotateSessions) {
         sessionProxy = proxyPool.getNext(`ctx-${key}-${crypto.randomUUID().replace(/-/g, '').slice(0, 8)}`);

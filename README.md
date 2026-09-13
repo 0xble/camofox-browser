@@ -386,7 +386,8 @@ When a proxy is configured:
 - All traffic routes through the proxy
 - Camoufox's GeoIP automatically sets `locale`, `timezone`, and `geolocation` to match the proxy's exit IP
 - Browser fingerprint (language, timezone, coordinates) is consistent with the proxy location
-- Without a proxy, defaults to `en-US`, `America/Los_Angeles`, San Francisco coordinates
+
+Without a proxy, Camofox does not claim a geolocation or infer one from the host IP. To use a fixed direct-session identity, set both `CAMOFOX_LOCALE` and `CAMOFOX_TIMEZONE`; otherwise Camoufox keeps its own identity defaults.
 
 ### Telemetry
 
@@ -636,6 +637,8 @@ Browser behavior can be tuned in `camofox.config.json`:
 | `CAMOFOX_ADMIN_KEY` | Required for `POST /stop` | - |
 | `CAMOFOX_ACCESS_KEY` | If set, all routes (except `/health`, cookie import, and `/stop`) require `Authorization: Bearer <key>`. Lets you safely expose the server beyond loopback. | - |
 | `CAMOFOX_EVALUATE_MAX_BODY_SIZE` | Max JSON request body size for `POST /tabs/:tabId/evaluate`; other JSON routes remain limited to `100kb`. | `1mb` |
+| `CAMOFOX_LOCALE` | Locale for an explicitly configured direct-session identity. Must be set with `CAMOFOX_TIMEZONE`. | - |
+| `CAMOFOX_TIMEZONE` | IANA timezone for an explicitly configured direct-session identity. Must be set with `CAMOFOX_LOCALE`. | - |
 | `CAMOUFOX_EXECUTABLE` | External Camoufox executable to use instead of downloading/launching the bundled cache. Must point to a Camoufox bundle with sibling resources. | - |
 | `CAMOUFOX_EXECUTABLE_PATH` | Compatibility alias for `CAMOUFOX_EXECUTABLE` | - |
 | `CAMOFOX_EXECUTABLE_PATH` | Compatibility alias for `CAMOUFOX_EXECUTABLE` | - |

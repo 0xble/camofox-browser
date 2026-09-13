@@ -42,6 +42,29 @@ describe('loadConfig', () => {
     expect(loadConfig().camoufoxExecutablePath).toBe('/legacy/camoufox');
   });
 
+  test('configures an optional direct browser identity and forwards it to subprocesses', () => {
+    process.env.CAMOFOX_LOCALE = 'en-AU';
+    process.env.CAMOFOX_TIMEZONE = 'Australia/Sydney';
+
+    const config = loadConfig();
+
+    expect(config.directIdentity).toEqual({ locale: 'en-AU', timezoneId: 'Australia/Sydney' });
+    expect(config.serverEnv.CAMOFOX_LOCALE).toBe('en-AU');
+    expect(config.serverEnv.CAMOFOX_TIMEZONE).toBe('Australia/Sydney');
+  });
+
+  test('does not set a direct browser identity unless both values are configured', () => {
+    delete process.env.CAMOFOX_LOCALE;
+    delete process.env.CAMOFOX_TIMEZONE;
+    expect(loadConfig().directIdentity).toBeNull();
+
+    process.env.CAMOFOX_LOCALE = 'en-AU';
+    expect(() => loadConfig()).toThrow('CAMOFOX_LOCALE and CAMOFOX_TIMEZONE must be set together');
+
+    process.env.CAMOFOX_TIMEZONE = 'Not/A_Timezone';
+    expect(() => loadConfig()).toThrow('CAMOFOX_TIMEZONE must be a valid IANA timezone');
+  });
+
   test('configures and forwards the upload directory', () => {
     process.env.CAMOFOX_UPLOADS_DIR = '/mounted/uploads';
 
