@@ -60,18 +60,20 @@ async function waitFor(condition, timeoutMs = 10_000) {
 testOnWindows('production cleanup kills a real Camoufox process tree', async () => {
   let browser;
   try {
+    const beforeLaunch = snapshotWindowsProcesses();
+    const existingPids = new Set(beforeLaunch.map((proc) => proc.pid));
     browser = await firefox.launch(await launchOptions({ headless: true, os: 'windows' }));
-    const browserPid = browser.process()?.pid;
-    expect(Number.isInteger(browserPid)).toBe(true);
+    await waitFor(() => snapshotWindowsProcesses().some((proc) => isWindowsBrowserProcess(proc) && !existingPids.has(proc.pid)));
 
     const snapshot = snapshotWindowsProcesses();
-    const root = snapshot.find((proc) => proc.pid === browserPid);
-    expect(root).toBeDefined();
-    expect(isWindowsBrowserProcess(root)).toBe(true);
-    const ownedPids = selectWindowsProcessTree(browserPid, snapshot).map((proc) => proc.pid);
-    expect(ownedPids).toContain(browserPid);
+    const launchedBrowsers = snapshot.filter((proc) => isWindowsBrowserProcess(proc) && !existingPids.has(proc.pid));
+    const roots = launchedBrowsers.filter((proc) => !launchedBrowsers.some((candidate) => candidate.pid === proc.ppid));
+    expect(roots).toHaveLength(1);
+    const root = roots[0];
+    const ownedPids = selectWindowsProcessTree(root.pid, snapshot).map((proc) => proc.pid);
+    expect(ownedPids).toContain(root.pid);
 
-    await killProcessIds([browserPid], { delayMs: 0, processSnapshots: snapshot });
+    await killProcessIds([root.pid], { delayMs: 0, processSnapshots: snapshot });
     await waitFor(() => !browser.isConnected());
     await waitFor(() => {
       const current = snapshotWindowsProcesses();
