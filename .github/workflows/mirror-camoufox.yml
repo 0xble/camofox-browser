@@ -150,3 +150,12 @@ jobs:
             --title "Camoufox backup ${SOURCE_TAG}" \
             --notes-file release-notes.md \
             camoufox-assets/*
+
+  notify-agenthook:
+    needs: [mirror]
+    if: always()
+    uses: ./.github/workflows/agenthook-notify.yml
+    with:
+      kind: release-mirror
+      results: ${{ toJson(needs) }}
+    secrets: inherit
