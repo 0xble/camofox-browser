@@ -41,12 +41,32 @@ describe('launch compatibility source contract', () => {
     );
     const sessionContextOptions = sourceBetween(
       'const contextOptions = {',
-      '// When geoip is active'
+      'let sessionProxy = null;'
     );
 
     expect(googleProbeOptions).toContain('viewport: null');
     expect(sessionContextOptions).toContain('viewport: null');
     expect(`${googleProbeOptions}\n${sessionContextOptions}`).not.toMatch(/viewport\s*:\s*\{\s*width\s*:/);
+  });
+
+  test('does not fake a direct-session location and applies an explicit identity only when configured', () => {
+    const probeOptions = sourceBetween(
+      'async function probeGoogleSearch(candidateBrowser) {',
+      'const page = await context.newPage();'
+    );
+    const sessionContextOptions = sourceBetween(
+      'const contextOptions = {',
+      'let sessionProxy = null;'
+    );
+    const launchBrowser = sourceBetween(
+      'async function launchBrowserInstance()',
+      'async function ensureBrowser()'
+    );
+
+    expect(`${probeOptions}\n${sessionContextOptions}`).toContain('contextIdentityOptions({');
+    expect(`${probeOptions}\n${sessionContextOptions}`).not.toContain('geolocation:');
+    expect(`${probeOptions}\n${sessionContextOptions}`).not.toContain('37.7749');
+    expect(launchBrowser).toContain('locale: launchLocale({ hasProxy: !!proxyPool, directIdentity: CONFIG.directIdentity })');
   });
 
   test('uses a real desktop window only when interactive desktop mode is explicit', () => {

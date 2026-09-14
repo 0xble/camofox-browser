@@ -2,7 +2,7 @@
   "openapi": "3.0.3",
   "info": {
     "title": "camofox-browser",
-    "version": "1.15.0",
+    "version": "1.16.0",
     "description": "Anti-detection browser automation server for AI agents. Accessibility snapshots, element refs, session isolation, cookie import, proxy rotation, and structured logs.",
     "license": {
       "name": "MIT",
@@ -1682,6 +1682,53 @@
                 }
               }
             }
+          }
+        }
+      }
+    },
+    "/tabs/{tabId}/fetch-current-resource": {
+      "post": {
+        "tags": [
+          "Content"
+        ],
+        "summary": "Save the current tab's PDF as a download artifact",
+        "parameters": [
+          {
+            "name": "tabId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "userId"
+                ],
+                "properties": {
+                  "userId": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Saved PDF download artifact."
+          },
+          "404": {
+            "description": "Tab not found."
+          },
+          "415": {
+            "description": "Current resource is not a PDF."
           }
         }
       }
