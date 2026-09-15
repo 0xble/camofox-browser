@@ -6,6 +6,10 @@ on:
   pull_request:
     branches: [master]
 
+concurrency:
+  group: ci-cost-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   unit:
     runs-on: ubuntu-latest
