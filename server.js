@@ -9,6 +9,7 @@ import { expandMacro } from './lib/macros.js';
 import { loadConfig } from './lib/config.js';
 import { normalizePlaywrightProxy, createProxyPool, buildProxyUrl } from './lib/proxy.js';
 import { createFlyHelpers } from './lib/fly.js';
+import { withRequestDeadline } from './lib/request-deadline.js';
 import { createPluginEvents, loadPlugins } from './lib/plugins.js';
 import { requireAuth, accessKeyMiddleware, timingSafeCompare as _timingSafeCompare, isLoopbackAddress as _isLoopbackAddress } from './lib/auth.js';
 import { sharedIdentityMetadata } from './lib/shared-identity-metadata.js';
@@ -1137,7 +1138,9 @@ async function launchBrowserInstance() {
         executable_path: externalCamoufox?.executablePath,
         headless: useVirtualDisplay ? false : !useDesktopWindow,
         os: hostOS,
-        humanize: true,
+        // Camoufox native mouse humanization hangs on macOS (even on a
+        // fresh local button fixture). Preserve the supported default elsewhere.
+        humanize: os.platform() !== 'darwin',
         enable_cache: true,
         proxy: launchProxy,
         geoip: !!launchProxy,
@@ -1316,7 +1319,7 @@ async function createSharedIdentityContext(profilePath) {
   const options = await launchOptions({
     headless: false,
     os: getHostOS(),
-    humanize: true,
+    humanize: os.platform() !== 'darwin',
     enable_cache: true,
     exclude_addons: CONFIG.disableDefaultAddons ? ['UBO'] : undefined,
   });
@@ -1461,7 +1464,7 @@ async function closeLeasedPage(session, page, lease) {
   }
 }
 
-async function createPageWithRecoveryForUser(userId, session, { trace = false } = {}) {
+async function createPageWithRecoveryForUser(userId, session, { trace = false, signal } = {}) {
   const key = normalizeUserId(userId);
   return createPageWithSessionRecovery({
     userId: key,
@@ -1475,6 +1478,12 @@ async function createPageWithRecoveryForUser(userId, session, { trace = false } 
     destroySession,
     getSession,
     log,
+    signal,
+    closePage: async (pageSession, page) => {
+      const found = findTabByPage(pageSession, page);
+      if (found) destroyTab(pageSession, found.tabId, 'abandoned_page_creation', key);
+      else await safePageClose(page);
+    },
   });
 }
 
@@ -1499,6 +1508,11 @@ function handleRouteError(err, req, res, extraFields = {}) {
   const failureType = classifyError(err);
   const action = actionFromReq(req);
   failuresTotal.labels(failureType, action).inc();
+  // These paths already contained the failure. Do not reinterpret their
+  // original timeout/closed-context text as permission to destroy a session.
+  if (err.code === 'shared_page_unavailable' || err.code === 'request_timeout') {
+    return sendError(res, err, extraFields);
+  }
 
   const userId = req.body?.userId || req.query?.userId;
   const tabId = req.body?.tabId || req.query?.tabId || req.params?.tabId;
@@ -3044,6 +3058,12 @@ app.post('/tabs/:tabId/handoff', async (req, res) => {
  *           application/json:
  *             schema:
  *               $ref: '#/components/schemas/Error'
+ *       503:
+ *         description: Page creation unavailable or request deadline exceeded. Shared identity tabs are preserved; abandoned new pages are closed.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
  */
 app.post('/tabs', async (req, res) => {
   try {
@@ -3070,7 +3090,11 @@ app.post('/tabs', async (req, res) => {
       }
     }
 
-    const result = await withTimeout((async () => {
+    const result = await withRequestDeadline(async signal => {
+      let activeTab;
+      signal.addEventListener('abort', () => {
+        if (activeTab) destroyTab(activeTab.session, activeTab.tabId, 'tab_creation_timeout', userId);
+      }, { once: true });
       const existing = sessions.get(normalizeUserId(userId));
       if (trace && existing && !existing.tracePath) {
         throw Object.assign(
@@ -3079,6 +3103,7 @@ app.post('/tabs', async (req, res) => {
         );
       }
       let session = await getSession(userId, { trace: !!trace });
+      signal.throwIfAborted();
       
       let totalTabs = 0;
       for (const group of session.tabGroups.values()) totalTabs += group.size;
@@ -3086,12 +3111,13 @@ app.post('/tabs', async (req, res) => {
       // Recycle oldest tab when limits are reached instead of rejecting
       if (totalTabs >= MAX_TABS_PER_SESSION || getTotalTabCount() >= MAX_TABS_GLOBAL) {
         const recycled = await recycleOldestTab(session, req.reqId, userId);
+        signal.throwIfAborted();
         if (!recycled) {
           throw Object.assign(new Error('Maximum tabs per session reached'), { statusCode: 429 });
         }
       }
       
-      const createdPage = await createPageWithRecoveryForUser(userId, session, { trace: !!trace });
+      const createdPage = await createPageWithRecoveryForUser(userId, session, { trace: !!trace, signal });
       session = createdPage.session;
       const page = createdPage.page;
       const lease = createdPage.lease;
@@ -3111,6 +3137,7 @@ app.post('/tabs', async (req, res) => {
         attachDownloadListener(tabState, tabId, log, pluginEvents, userId);
       }
       group.set(tabId, tabState);
+      activeTab = { session, tabId };
       releasePageLease(session, lease);
       if (!registered) attachPopupHandler(page, userId, resolvedSessionKey);
       refreshActiveTabsGauge();
@@ -3121,8 +3148,10 @@ app.post('/tabs', async (req, res) => {
         tabState.lastRequestedUrl = url;
         try {
           await withPageLoadDuration('open_url', () => navigatePage(page, url));
+          signal.throwIfAborted();
           recordNavSuccess(userId);
         } catch (navErr) {
+          signal.throwIfAborted();
           if ((isProxyError(navErr) || isTimeoutError(navErr)) && proxyPool?.canRotateSessions) {
             log('warn', 'tab create navigate failed, retrying with fresh proxy', {
               reqId: req.reqId, tabId, error: navErr.message,
@@ -3133,17 +3162,25 @@ app.post('/tabs', async (req, res) => {
             if (oldSession) {
               await closeSession(key, oldSession, { reason: 'proxy_retry_rotate', clearDownloads: true, clearLocks: true });
             }
+            signal.throwIfAborted();
             session = await getSession(userId, { trace: !!trace });
+            signal.throwIfAborted();
             const retryGroup = getTabGroup(session, resolvedSessionKey);
             const { page: retryPage, lease: retryLease } = await createLeasedPage(session);
+            if (signal.aborted) {
+              await closeLeasedPage(session, retryPage, retryLease);
+              signal.throwIfAborted();
+            }
             tabState = createTabState(retryPage);
             tabState.lastRequestedUrl = url;
             attachDownloadListener(tabState, tabId, log, pluginEvents, userId);
             retryGroup.set(tabId, tabState);
+            activeTab = { session, tabId };
             releasePageLease(session, retryLease);
             attachPopupHandler(retryPage, userId, resolvedSessionKey);
             refreshActiveTabsGauge();
             await withPageLoadDuration('open_url', () => navigatePage(retryPage, url));
+            signal.throwIfAborted();
             recordNavSuccess(userId);
           } else {
             if (recordNavFailure(userId)) {
@@ -3154,11 +3191,12 @@ app.post('/tabs', async (req, res) => {
         }
         tabState.visitedUrls.add(url);
       }
+      signal.throwIfAborted();
       
       pluginEvents.emit('tab:created', { userId, tabId, page, url: page.url() });
       log('info', 'tab created', { reqId: req.reqId, tabId, userId, sessionKey: resolvedSessionKey, url: page.url() });
       return { tabId, url: page.url() };
-    })(), requestTimeoutMs(), 'tab create');
+    }, requestTimeoutMs(), 'tab create');
 
     res.json(result);
   } catch (err) {
