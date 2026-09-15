@@ -48,6 +48,7 @@ jobs:
             --forceExit
         env:
           CI: true
+          CAMOFOX_PACKAGE_DIR: ${{ github.workspace }}
 
   e2e:
     runs-on: ubuntu-latest
