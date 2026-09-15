@@ -6,6 +6,10 @@ on:
   pull_request:
     branches: [master]
 
+concurrency:
+  group: ci-cost-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   unit:
     runs-on: ubuntu-latest
@@ -40,10 +44,16 @@ jobs:
           npm install --no-save jest-junit
           node --experimental-vm-modules node_modules/.bin/jest \
             --testPathPatterns='tests/unit|plugins' \
-            --testPathIgnorePatterns='security\.test|tabRecycling\.test|cookies\.test' \
+            --testPathIgnorePatterns='security\.test|tabRecycling\.test|cookies\.test|plugins/local-storage-checkpoint/index\.test\.js' \
             --forceExit
         env:
           CI: true
+          CAMOFOX_PACKAGE_DIR: ${{ github.workspace }}
+
+      - name: Run local storage checkpoint tests (Node)
+        run: node --test plugins/local-storage-checkpoint/index.test.js
+        env:
+          CAMOFOX_PACKAGE_DIR: ${{ github.workspace }}
 
   e2e:
     runs-on: ubuntu-latest
