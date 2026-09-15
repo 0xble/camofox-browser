@@ -54,6 +54,28 @@ remote; `upstream` is fetch-only and must never receive pushes. The upstream MIT
 - **Rollback:** revert the patch; do not alter Hermes identities, browser profiles, or the managed service.
 - **Retire when:** a supported upstream launcher provides the same dynamic identity contract.
 
+### CAMOFOX-004: macOS mouse and shared tab creation recovery
+
+- **Status:** Active. Installation and runtime verification remain separate.
+- **Behavior:** disable native mouse humanization on macOS in both launch paths.
+  A disposable local button fixture on engine 152.0.4 beta.30 hung with
+  humanization enabled and completed in 91 ms with it disabled. Other platforms
+  retain humanization. Shared page-creation failures never destroy other tasks'
+  identity tabs. Request deadlines fence late continuations and close late pages.
+- **Surfaces:** `server.js`, `lib/new-page-recovery.js`, `lib/request-deadline.js`,
+  `lib/browser-errors.js`, `openapi.json`.
+- **Upstream issue/PR:** None after bounded searches for new-page and mouse
+  timeouts on 2026-09-15. Upstream master `79d425be2674` still has the same
+  destructive new-page recovery helper. This is an urgent scoped repair, not an
+  upstream synchronization or engine upgrade.
+- **Regression:** focused new-page, request-deadline, native-humanization,
+  browser-error and shared-identity tests, plus disposable browser acceptance.
+- **Rollback:** revert this patch and reinstall a retained verified release.
+  Retain all identity profiles and checkpoints. Old behavior can reintroduce
+  cross-task tab loss, so a rollback is not a recovery guarantee.
+- **Retire when:** supported upstream provides working macOS native input and
+  cancellation-safe shared page creation with equivalent regression evidence.
+
 ## Update
 
 On every maintenance run, fetch `origin` and `upstream` separately, resolve the

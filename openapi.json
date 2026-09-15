@@ -618,6 +618,16 @@
                 }
               }
             }
+          },
+          "503": {
+            "description": "Page creation unavailable or request deadline exceeded. Shared identity tabs are preserved; abandoned new pages are closed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           }
         }
       },
