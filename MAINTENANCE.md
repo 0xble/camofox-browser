@@ -3,7 +3,7 @@
 ## Background
 
 Maintained fork: `0xble/camofox-browser` of `jo-inc/camofox-browser` on
-the canonical `master` branch. Canonical checkout: `/Users/brianle/camofox-browser`.
+the canonical `master` branch. Canonical checkout: `/Users/brianle/Repos/camofox-browser`.
 Accepted deployed baseline: upstream tag `v1.14.0`, commit
 `e5a36f5cd0332fde6597de474329a308a53a0716`. `origin` is the owned publish
 remote; `upstream` is fetch-only and must never receive pushes. The upstream MIT
@@ -77,6 +77,27 @@ remote; `upstream` is fetch-only and must never receive pushes. The upstream MIT
   cancellation-safe shared page creation with equivalent regression evidence.
 
 ## Update
+
+### 2026-09-16 upstream reconciliation
+
+- Upstream default branch: `master`, checked at
+  `79d425be2674` (server version `1.16.0`). The prior fork was
+  `7d6de5d`; the prior installed release was `166c992`.
+- Preserve CAMOFOX-001 through CAMOFOX-004. Merge upstream HTTP navigation
+  status reporting with the existing cancellation fence, and retain shared
+  keep-open exclusions alongside upstream's disabled-session-timeout support.
+- Retain the fork's existing bounded CI layout and Node checkpoint-test lane.
+  Dependency overrides now match upstream, including `fast-uri` 3.1.7.
+- Read upstream `AGENTS.md` and `CONTRIBUTING.md` at the fetched revision.
+  Related upstream persistent-profile PR #6525 is closed. Reliability PR #9538
+  is open and proposes active-session memory restarts and faster crashed-tab
+  cleanup, not a released equivalent of our shared-profile lifecycle. Do not
+  import its session destruction into keep-open identities.
+- Camoufox engine release `v152.0.4-beta.30` remains the latest published
+  engine. Engine issues #719 (unresponsive Juggler pipe) and #762 (content
+  process memory crash) are related reports, not confirmed local root causes.
+- Source synchronization does not prove installation. Deploy a separately
+  verified immutable release from the landed fork and retain profile backups.
 
 On every maintenance run, fetch `origin` and `upstream` separately, resolve the
 live upstream default branch (currently `master`), and reconcile the maintained
