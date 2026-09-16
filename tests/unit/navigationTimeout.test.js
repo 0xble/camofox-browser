@@ -197,6 +197,56 @@ describe('navigation timeout with no proxy to rotate', () => {
   });
 });
 
+// Destroying the session is a proxy-rotation strategy. With no proxy pool there
+// is nothing to rotate to, so the teardown buys nothing and costs every other
+// tab under that userId -- including concurrent callers, who then get 404
+// "Tab not found" (#8559).
+describe('navigation timeout with no proxy to rotate', () => {
+  const timeoutError = new Error('action timed out after 30000ms');
+  const proxyError = new Error('NS_ERROR_PROXY_CONNECTION_REFUSED');
+
+  test.each(['click', 'navigate', 'open_url'])(
+    '%s timeout does NOT destroy the session when sessions cannot rotate',
+    (action) => {
+      const result = simulateErrorHandling(timeoutError, action, 'user-1', {}, false);
+      expect(result.sessionDestroyed).toBe(false);
+      expect(result.tabDestroyed).toBe(false);
+    },
+  );
+
+  test('the navigation failure is still recorded when there is no proxy', () => {
+    const result = simulateErrorHandling(timeoutError, 'navigate', 'user-1', {}, false);
+    expect(result.navFailureRecorded).toBe(true);
+  });
+
+  test('the same timeout still destroys the session when a proxy can rotate', () => {
+    const result = simulateErrorHandling(timeoutError, 'navigate', 'user-1', {}, true);
+    expect(result.sessionDestroyed).toBe(true);
+    expect(result.reason).toBe('navigation_timeout');
+  });
+
+  test('proxy errors also require a rotatable proxy', () => {
+    const result = simulateErrorHandling(proxyError, 'navigate', 'user-1', {}, false);
+    expect(result.sessionDestroyed).toBe(false);
+  });
+
+  test('non-navigation timeouts still track per-tab with no proxy', () => {
+    const tabState = { consecutiveTimeouts: 0 };
+    const result = simulateErrorHandling(timeoutError, 'type', 'user-1', tabState, false);
+    expect(result.sessionDestroyed).toBe(false);
+    expect(tabState.consecutiveTimeouts).toBe(1);
+  });
+
+  test('a stuck tab is still collected after 3 consecutive timeouts with no proxy', () => {
+    const tabState = { consecutiveTimeouts: 0 };
+    simulateErrorHandling(timeoutError, 'type', 'user-1', tabState, false);
+    simulateErrorHandling(timeoutError, 'type', 'user-1', tabState, false);
+    const result = simulateErrorHandling(timeoutError, 'type', 'user-1', tabState, false);
+    expect(result.tabDestroyed).toBe(true);
+    expect(result.sessionDestroyed).toBe(false);
+  });
+});
+
 describe('actionFromReq classifies routes correctly', () => {
   function makeReq(method, routePath) {
     return { method, route: { path: routePath }, path: routePath };
@@ -252,6 +302,12 @@ describe('classifyError categorizes timeout vs proxy', () => {
 
   test('dead context → "dead_context"', () => {
     expect(classifyError(new Error('Target page, context or browser has been closed'))).toBe('dead_context');
+  });
+
+  test('Chromium navigation abort is distinct from network failures', () => {
+    expect(classifyError(new Error('page.goto: net::ERR_ABORTED at https://example.com/'))).toBe('nav_aborted');
+    expect(classifyError(new Error('page.goto: net::ERR_CONNECTION_REFUSED at https://example.com/'))).toBe('network');
+    expect(classifyError(new Error('page.goto: net::ERR_NAME_NOT_RESOLVED at https://example.com/'))).toBe('network');
   });
 
   test('operational browser failures classify without unknown', () => {

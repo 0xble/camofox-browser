@@ -106,14 +106,14 @@ export default function register(api) {
         (async () => {
             const alreadyRunning = await checkServerRunning(baseUrl);
             if (alreadyRunning) {
-                api.log?.info?.(`Camoufox server already running at ${baseUrl}`);
+                api.logger?.info?.(`Camoufox server already running at ${baseUrl}`);
             }
             else {
                 try {
-                    serverProcess = await startServer(pluginDir, port, api.log, cfg);
+                    serverProcess = await startServer(pluginDir, port, api.logger, cfg);
                 }
                 catch (err) {
-                    api.log?.error?.(`Failed to auto-start server: ${err.message}`);
+                    api.logger?.error?.(`Failed to auto-start server: ${err.message}`);
                 }
             }
         })();
@@ -145,96 +145,64 @@ export default function register(api) {
                 case "status":
                     try {
                         const health = await fetchApi(baseUrl, "/health");
-                        api.log?.info?.(`Camoufox server at ${baseUrl}: ${JSON.stringify(health)}`);
+                        api.logger?.info?.(`Camoufox server at ${baseUrl}: ${JSON.stringify(health)}`);
                     }
                     catch {
-                        api.log?.error?.(`Camoufox server at ${baseUrl}: not reachable`);
+                        api.logger?.error?.(`Camoufox server at ${baseUrl}: not reachable`);
                     }
                     break;
                 case "start":
                     if (serverProcess) {
-                        api.log?.info?.("Camoufox server already running (managed)");
+                        api.logger?.info?.("Camoufox server already running (managed)");
                         return;
                     }
                     if (await checkServerRunning(baseUrl)) {
-                        api.log?.info?.(`Camoufox server already running at ${baseUrl}`);
+                        api.logger?.info?.(`Camoufox server already running at ${baseUrl}`);
                         return;
                     }
                     try {
-                        serverProcess = await startServer(pluginDir, port, api.log, cfg);
+                        serverProcess = await startServer(pluginDir, port, api.logger, cfg);
                     }
                     catch (err) {
-                        api.log?.error?.(`Failed to start server: ${err.message}`);
+                        api.logger?.error?.(`Failed to start server: ${err.message}`);
                     }
                     break;
                 case "stop":
                     if (serverProcess) {
                         serverProcess.kill();
                         serverProcess = null;
-                        api.log?.info?.("Stopped camofox-browser server");
+                        api.logger?.info?.("Stopped camofox-browser server");
                     }
                     else {
-                        api.log?.info?.("No managed server process running");
+                        api.logger?.info?.("No managed server process running");
                     }
                     break;
                 default:
-                    api.log?.error?.(`Unknown subcommand: ${subcommand}. Use: status, start, stop`);
+                    api.logger?.error?.(`Unknown subcommand: ${subcommand}. Use: status, start, stop`);
             }
         },
     });
-    // Register health check for openclaw doctor/status
-    if (api.registerHealthCheck) {
-        api.registerHealthCheck("camofox-browser", async () => {
-            try {
-                const health = (await fetchApi(baseUrl, "/health"));
-                return {
-                    status: "ok",
-                    message: `Server running (${health.engine || "camoufox"})`,
-                    details: {
-                        url: baseUrl,
-                        engine: health.engine,
-                        activeTabs: health.activeTabs,
-                        managed: serverProcess !== null,
-                    },
-                };
-            }
-            catch {
-                return {
-                    status: serverProcess ? "warn" : "error",
-                    message: serverProcess
-                        ? "Server starting..."
-                        : `Server not reachable at ${baseUrl}`,
-                    details: {
-                        url: baseUrl,
-                        managed: serverProcess !== null,
-                        hint: "Run: openclaw camofox start",
-                    },
-                };
-            }
+    // Gateway methods expose health/status to gateway clients. Gateway handlers
+    // answer through respond() rather than returning a value.
+    api.registerGatewayMethod("camofox.health", async ({ respond }) => {
+        try {
+            const health = (await fetchApi(baseUrl, "/health"));
+            respond(true, { status: "ok", ...health });
+        }
+        catch (err) {
+            respond(true, { status: "error", error: err.message });
+        }
+    }, { scope: "operator.admin" });
+    api.registerGatewayMethod("camofox.status", async ({ respond }) => {
+        const running = await checkServerRunning(baseUrl);
+        respond(true, {
+            running,
+            managed: serverProcess !== null,
+            pid: serverProcess?.pid || null,
+            url: baseUrl,
+            port,
         });
-    }
-    // Register RPC methods for gateway integration
-    if (api.registerRpc) {
-        api.registerRpc("camofox.health", async () => {
-            try {
-                const health = (await fetchApi(baseUrl, "/health"));
-                return { status: "ok", ...health };
-            }
-            catch (err) {
-                return { status: "error", error: err.message };
-            }
-        });
-        api.registerRpc("camofox.status", async () => {
-            const running = await checkServerRunning(baseUrl);
-            return {
-                running,
-                managed: serverProcess !== null,
-                pid: serverProcess?.pid || null,
-                url: baseUrl,
-                port,
-            };
-        });
-    }
+    }, { scope: "operator.admin" });
     // Register CLI subcommands (openclaw camofox ...)
     if (api.registerCli) {
         api.registerCli(({ program }) => {
@@ -274,7 +242,7 @@ export default function register(api) {
                 }
                 try {
                     console.log(`Starting camofox server on port ${port}...`);
-                    serverProcess = await startServer(pluginDir, port, api.log, cfg);
+                    serverProcess = await startServer(pluginDir, port, api.logger, cfg);
                     console.log(`Camoufox server started at ${baseUrl}`);
                 }
                 catch (err) {
