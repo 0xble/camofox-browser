@@ -29,4 +29,3 @@ Compare both native launch paths and shared page-creation recovery with upstream
   cross-task tab loss, so a rollback is not a recovery guarantee.
 - **Retire when:** supported upstream provides working macOS native input and
   cancellation-safe shared page creation with equivalent regression evidence.
-
