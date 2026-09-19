@@ -17,64 +17,17 @@ remote; `upstream` is fetch-only and must never receive pushes. The upstream MIT
 
 ## Active patches
 
-### CAMOFOX-001: track reviewed local deployment plugins
+This root is the sole enrolled and scheduled contract. Read every linked support
+file on every maintenance run, including no-change runs. Each file keeps the
+patch record, update rule, regression proof, rollback, and retirement condition
+together. Preserve these invariants when applying the shared adoption rules below.
 
-- **Status:** Active
-- **Stable subject:** `Add hardened local deployment plugins` (`b2a15d5ea8fc73e99eb9636968eec5102e404ff6`)
-- **Behavior:** `local-hardening` applies the supported launch hook to disable
-  default-browser checks, telemetry, reporting, and studies. `local-storage-checkpoint`
-  authenticates its storage-state endpoint and returns a snapshot only after persistence.
-- **Surfaces:** `plugins/local-hardening/`, `plugins/local-storage-checkpoint/`,
-  `camofox.config.json`
-- **Upstream issue:** None after checked 2026-09-09
-- **Upstream PR:** None after checked 2026-09-09
-- **Regression:** `npm run test:plugins` and `CAMOFOX_PACKAGE_DIR=$PWD node --test plugins/local-storage-checkpoint/index.test.js`
-- **Rollback:** `git revert <CAMOFOX-001 commit>`
-- **Retire when:** upstream releases equivalent supported plugin behavior and the
-  deployment configuration no longer needs the local plugins.
-
-### CAMOFOX-002: shared persistent identity lifecycle
-
-- **Status:** Active; managed installation is authorized only from the landed fork SHA.
-- **Stable subject:** `Add shared persistent identity lifecycle` (`85d2f3f`).
-- **Behavior:** native Hermes opaque IDs and optional local aliases resolve to one profile; session-only cookies restore only after a clean close; human handoff serializes with tab work and blocks agent operations.
-- **Surfaces:** `server.js`, `lib/shared-identity.js`, `lib/config.js`, `docs/shared-persistent-browser-spec.md`
-- **Upstream issue/PR:** None after checked 2026-09-10.
-- **Regression:** `npm run test:unit` plus the disposable shared-browser acceptance harness.
-- **Rollback:** `git revert <CAMOFOX-002 commit>`; do not delete preserved profiles.
-- **Retire when:** upstream ships equivalent lifecycle and identity-routing semantics.
-
-### CAMOFOX-003: dynamic native launcher metadata and app
-
-- **Status:** Active; source and launcher metadata must evolve together, while app installation and service activation remain separate.
-- **Stable subject:** `Add dynamic native launcher service API` (`becd7eabedfcbe60bc38525e676a630dd2c16305`).
-- **Behavior:** the authenticated loopback API exposes configured shared identity metadata; `macos/CamofoxLauncher/` reads only that API and its credential provider, never aliases or profile state.
-- **Surfaces:** `server.js`, `lib/shared-identity-metadata.js`, `openapi.json`, `tests/unit/sharedIdentityMetadata.test.js`, `macos/CamofoxLauncher/`.
-- **Regression:** `npm test -- --runInBand tests/unit/sharedIdentityMetadata.test.js`, `swift test`, and an isolated GUI fixture before installation.
-- **Rollback:** revert the patch; do not alter Hermes identities, browser profiles, or the managed service.
-- **Retire when:** a supported upstream launcher provides the same dynamic identity contract.
-
-### CAMOFOX-004: macOS mouse and shared tab creation recovery
-
-- **Status:** Active. Installation and runtime verification remain separate.
-- **Behavior:** disable native mouse humanization on macOS in both launch paths.
-  A disposable local button fixture on engine 152.0.4 beta.30 hung with
-  humanization enabled and completed in 91 ms with it disabled. Other platforms
-  retain humanization. Shared page-creation failures never destroy other tasks'
-  identity tabs. Request deadlines fence late continuations and close late pages.
-- **Surfaces:** `server.js`, `lib/new-page-recovery.js`, `lib/request-deadline.js`,
-  `lib/browser-errors.js`, `openapi.json`.
-- **Upstream issue/PR:** None after bounded searches for new-page and mouse
-  timeouts on 2026-09-15. Upstream master `79d425be2674` still has the same
-  destructive new-page recovery helper. This is an urgent scoped repair, not an
-  upstream synchronization or engine upgrade.
-- **Regression:** focused new-page, request-deadline, native-humanization,
-  browser-error and shared-identity tests, plus disposable browser acceptance.
-- **Rollback:** revert this patch and reinstall a retained verified release.
-  Retain all identity profiles and checkpoints. Old behavior can reintroduce
-  cross-task tab loss, so a rollback is not a recovery guarantee.
-- **Retire when:** supported upstream provides working macOS native input and
-  cancellation-safe shared page creation with equivalent regression evidence.
+| Patch | Required invariant | Maintenance detail |
+|---|---|---|
+| CAMOFOX-001 | Supported hardening hooks and authenticated snapshots only after persistence. | [Deployment plugins](maintenance/deployment-plugins.md) |
+| CAMOFOX-002 | Shared identity routing, clean-close cookie restoration, and serialized human handoff. | [Shared identity](maintenance/shared-identity.md) |
+| CAMOFOX-003 | Authenticated dynamic metadata shared by the API and native launcher. | [Native launcher](maintenance/native-launcher.md) |
+| CAMOFOX-004 | Working macOS native input and cancellation-safe creation without cross-task tab loss. | [Page creation recovery](maintenance/page-creation-recovery.md) |
 
 ## Update
 
