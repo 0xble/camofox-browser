@@ -17,6 +17,7 @@ import { createPluginEvents, loadPlugins, typeEventPayload } from './lib/plugins
 import { requireAuth, accessKeyMiddleware, timingSafeCompare as _timingSafeCompare, isLoopbackAddress as _isLoopbackAddress } from './lib/auth.js';
 import { sharedIdentityMetadata } from './lib/shared-identity-metadata.js';
 import { createSharedIdentityWindowOpener } from './lib/shared-identity-window.js';
+import { createSharedIdentityRequestTracker } from './lib/shared-identity-requests.js';
 import { launchSharedIdentityContext } from './lib/shared-identity-launch.js';
 import { windowSnapshot } from './lib/snapshot.js';
 import { extractPageStructure, attachStructureRefs } from './lib/page-structure.js';
@@ -204,25 +205,10 @@ app.use(accessKeyMiddleware(CONFIG));
 // The open route itself is excluded; during a transition, new work fails closed.
 const sharedIdentityRequests = new Map();
 let sharedIdentityWindow;
-app.use((req, res, next) => {
-  const identityPath = req.path.match(/^\/browser\/identities\/([^/]+)\//);
-  const sessionPath = req.path.match(/^\/sessions\/([^/]+)(?:\/|$)/);
-  if (identityPath?.[1] && req.path.endsWith('/open')) return next();
-  const userId = identityPath?.[1] || sessionPath?.[1] || req.body?.userId || req.query?.userId;
-  if (!userId || !sharedIdentities.owns(userId)) return next();
-  const key = normalizeUserId(userId);
-  if (sharedIdentityWindow?.transitioning(key) || sharedIdentities.closings.has(key)) return res.status(409).json({ error: 'identity busy' });
-  sharedIdentityRequests.set(key, (sharedIdentityRequests.get(key) || 0) + 1);
-  const session = sessions.get(key);
-  const tabId = req.path.match(/^\/tabs\/([^/]+)/)?.[1];
-  if (session && tabId) session.lastUsedPage = findTab(session, tabId)?.tabState.page || session.lastUsedPage;
-  res.once('close', () => {
-    const remaining = sharedIdentityRequests.get(key) - 1;
-    if (remaining) sharedIdentityRequests.set(key, remaining);
-    else sharedIdentityRequests.delete(key);
-  });
-  next();
-});
+app.use(createSharedIdentityRequestTracker({
+  getSessions: () => sessions, manager: sharedIdentities, normalizeUserId, findTab,
+  transitioning: key => sharedIdentityWindow?.transitioning(key), requests: sharedIdentityRequests,
+}));
 
 const ALLOWED_URL_SCHEMES = ['http:', 'https:'];
 
@@ -1399,6 +1385,9 @@ async function createSharedIdentityContext(profilePath, { headed = false } = {})
 
 async function getSession(userId, { trace = false, headed = false } = {}) {
   const key = normalizeUserId(userId);
+  if (sharedIdentities.failedClosures.has(key)) {
+    throw Object.assign(new Error('shared identity close failed; profile ownership is unconfirmed'), { statusCode: 409 });
+  }
   let session = sessions.get(key);
   
   // Check if existing session's context is still alive
@@ -2988,7 +2977,7 @@ sharedIdentityWindow = createSharedIdentityWindowOpener({
  *         required: true
  *         schema: { type: string }
  *     responses:
- *       200: { description: Shared identity is visible; restarted is true after a headless transition. }
+ *       200: { description: "Shared identity is visible; restarted is true after a headless transition; restoreFailed is true if bounded URL restoration failed." }
  *       404: { description: Identity is not configured for shared mode. }
  *       409: { description: Identity has work in flight; retry after it finishes. }
  */

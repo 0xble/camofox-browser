@@ -90,6 +90,20 @@ describe('SharedIdentityManager', () => {
     expect(reopened.addCookies).not.toHaveBeenCalled();
   });
 
+  test('a failed close poisons ownership even if a close event fires before rejection', async () => {
+    const manager = new SharedIdentityManager({ identities: ['personal'], profileDir: root });
+    let closed;
+    const live = context();
+    live.on = jest.fn((event, listener) => { if (event === 'close') closed = listener; });
+    live.close.mockImplementationOnce(async () => { closed(); throw new Error('close uncertain'); });
+    const launch = jest.fn(async () => live);
+    await manager.open('personal', launch);
+    await expect(manager.close('personal')).rejects.toThrow('close uncertain');
+    expect(manager.failedClosures.has('personal')).toBe(true);
+    await expect(manager.open('personal', launch)).rejects.toThrow('profile ownership is unconfirmed');
+    expect(launch).toHaveBeenCalledTimes(1);
+  });
+
   test('preserves supported attributes while omitting expired cookies', () => {
     const cookies = safeCookies([
       { name: 'current', value: 'synthetic', domain: 'example.test', path: '/', expires: -1, httpOnly: true, secure: true, sameSite: 'Strict', partitionKey: 'https://example.test' },

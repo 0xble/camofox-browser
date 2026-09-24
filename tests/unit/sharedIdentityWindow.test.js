@@ -65,10 +65,9 @@ describe('shared identity headed transition', () => {
     expect(old.context.close).toHaveBeenCalledTimes(1);
     expect(old.tabGroups.size).toBe(0);
     expect(contexts[1].context.addCookies).toHaveBeenCalledWith([expect.objectContaining({ name: 'session', value: 'retained' })]);
-    expect(contexts[1].context.newPage).toHaveBeenCalledTimes(1);
-    expect(contexts[1].context.newPage.mock.results[0].value).toBeDefined();
+    expect(contexts[1].context.newPage).not.toHaveBeenCalled();
     expect(registerPage).toHaveBeenCalledWith(sessions.get('personal'), 'personal', sessions.get('personal').lastUsedPage);
-    expect(sessions.get('personal').lastUsedPage.goto).toHaveBeenCalledWith('https://example.test/private');
+    expect(sessions.get('personal').lastUsedPage.goto).toHaveBeenCalledWith('https://example.test/private', { timeout: 10000 });
     expect(JSON.parse(await fs.readFile(cookieCheckpointPath(root, 'personal'), 'utf8')).cleanShutdown).toBe(false);
   });
 
@@ -97,8 +96,37 @@ describe('shared identity headed transition', () => {
     const next = await opener.getSession('personal');
     next.context.close.mockRejectedValueOnce(new Error('profile still open'));
     await expect(opener.openWindow('personal')).rejects.toThrow('profile still open');
+    await expect(opener.openWindow('personal')).rejects.toThrow('profile ownership is unconfirmed');
+    await expect(manager.open('personal', () => launcher('unused'))).rejects.toThrow('profile ownership is unconfirmed');
     expect(contexts).toHaveLength(3);
+    expect(sessions.get('personal')).toBe(next);
     expect(original.context.close).toHaveBeenCalledTimes(1);
+  });
+
+  test('failed URL restore still returns the headed page without a stray blank tab', async () => {
+    const old = await opener.getSession('personal');
+    old.lastUsedPage = fakePage('https://example.test/fails');
+    const resultPage = fakePage();
+    resultPage.goto.mockRejectedValueOnce(new Error('navigation failed'));
+    const headed = fakeContext(resultPage);
+    // Substitute the headed launch while retaining the original manager lifecycle.
+    const originalGetSession = opener.getSession;
+    const open = createSharedIdentityWindowOpener({ manager, sessions,
+      getSession: async (userId, options) => {
+        if (options?.headed) {
+          await manager.open(userId, async () => headed);
+          const session = { context: headed, headed: true, sharedIdentity: true, tabGroups: new Map() };
+          sessions.set(userId, session);
+          return session;
+        }
+        return originalGetSession(userId, options);
+      },
+      closeSession: opener.closeSession, registerPage, isBusy: () => false });
+    const result = await open.openWindow('personal');
+    expect(result).toMatchObject({ restarted: true, restoreFailed: true, tabId: 'personal-new-tab' });
+    expect(resultPage.goto).toHaveBeenCalledWith('https://example.test/fails', { timeout: 10000 });
+    expect(headed.newPage).not.toHaveBeenCalled();
+    expect(registerPage).toHaveBeenCalledWith(sessions.get('personal'), 'personal', resultPage);
   });
 
   test('concurrent opens coalesce, and other identities remain untouched', async () => {

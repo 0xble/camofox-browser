@@ -434,7 +434,7 @@
         ],
         "responses": {
           "200": {
-            "description": "Shared identity is visible; restarted is true after a headless transition."
+            "description": "Shared identity is visible; restarted is true after a headless transition; restoreFailed is true if bounded URL restoration failed."
           },
           "404": {
             "description": "Identity is not configured for shared mode."
