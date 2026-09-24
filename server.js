@@ -1475,6 +1475,7 @@ async function getSession(userId, { trace = false, headed = false } = {}) {
       // pages() itself does not detect a closed persistent context.
       if (session.sharedIdentity && sharedIdentities.contexts.get(key) !== session.context) {
         clearSessionLocks(session);
+        await clearSessionDownloads(session).catch(() => {});
         session.tabGroups.clear();
         if (sessions.get(key) === session) sessions.delete(key);
       }
@@ -1566,7 +1567,7 @@ async function getSession(userId, { trace = false, headed = false } = {}) {
         context.on('close', () => {
           if (created._intentionalClose || sessions.get(key) !== created) return;
           clearSessionLocks(created);
-          created.tabGroups.clear();
+          clearSessionDownloads(created).catch(() => {}).finally(() => created.tabGroups.clear());
           sessions.delete(key);
           refreshActiveTabsGauge();
         });
@@ -1906,26 +1907,59 @@ async function recycleOldestTab(session, reqId, userId) {
   return { recycledTabId: oldestTabId, recycledFromGroup: oldestGroupKey };
 }
 
-async function recycleIdleSharedTab(session, reqId, userId) {
-  const tabs = [...session.tabGroups].flatMap(([groupKey, group]) =>
-    [...group].map(([tabId, tab]) => ({ groupKey, group, tabId, tab })));
-  const latest = tabs.reduce((best, item) => !best || item.tab.lastAgentActivityAt > best.tab.lastAgentActivityAt ? item : best, null);
-  const idleMs = CONFIG.hiddenTabIdleMin * 60_000;
-  const candidate = tabs.filter(item => item !== latest && !isPageLeased(session, item.tab.page)
-    && !humanControlledTabs.has(item.tabId) && !item.tab.activeDownloads
-    && !tabLocks.get(item.tabId)?.active && !tabLocks.get(item.tabId)?.queue?.length
-    && Date.now() - item.tab.lastAgentActivityAt >= idleMs)
-    .sort((a, b) => a.tab.lastAgentActivityAt - b.tab.lastAgentActivityAt)[0];
-  if (!candidate) return null;
-  await safePageClose(candidate.tab.page);
-  if (!candidate.tab.page.isClosed?.()) return null;
-  candidate.group.delete(candidate.tabId);
-  if (!candidate.group.size) session.tabGroups.delete(candidate.groupKey);
-  await clearTabDownloads(candidate.tab).catch(() => {});
-  tabsRecycledTotal.inc();
+// A hidden shared tab may be closed only when nothing could be using it right
+// now. Rechecked immediately before close so a request that arrived since
+// candidate selection is never cut off.
+function sharedTabClosable(session, tabId, tab, latestTabId) {
+  const lock = tabLocks.get(tabId);
+  return tabId !== latestTabId && findTab(session, tabId)?.tabState === tab
+    && !isPageLeased(session, tab.page) && !humanControlledTabs.has(tabId) && !(tab.activeDownloads > 0)
+    && !lock?.active && !lock?.queue?.length;
+}
+
+function latestSharedTabId(session) {
+  let latest = null;
+  for (const group of session.tabGroups.values()) {
+    for (const [tabId, tab] of group) if (!latest || tab.lastAgentActivityAt > latest[1].lastAgentActivityAt) latest = [tabId, tab];
+  }
+  return latest?.[0];
+}
+
+async function closeSharedTab(session, tabId, tab, { userId, reason, reqId }) {
+  await safePageClose(tab.page);
+  if (!tab.page.isClosed?.()) return false;
+  const found = findTab(session, tabId);
+  if (found?.tabState === tab) {
+    found.group.delete(tabId);
+    if (!found.group.size) session.tabGroups.delete(found.listItemId);
+  }
+  const lock = tabLocks.get(tabId);
+  if (lock) { lock.drain(); tabLocks.delete(tabId); }
+  refreshTabLockQueueDepth();
+  await clearTabDownloads(tab).catch(() => {});
   refreshActiveTabsGauge();
-  log('info', 'shared idle tab recycled', { reqId, userId, tabId: candidate.tabId });
-  return { recycledTabId: candidate.tabId, recycledFromGroup: candidate.groupKey };
+  pluginEvents.emit(reason === 'idle_cap' ? 'tab:recycled' : 'tab:reaped',
+    reason === 'idle_cap' ? { userId: userId || null, tabId } : { userId: userId || null, tabId, listItemId: found?.listItemId, reason });
+  log('info', 'shared idle tab closed', { reqId, userId, tabId, reason });
+  return true;
+}
+
+async function recycleIdleSharedTab(session, reqId, userId) {
+  // 0 disables idle-tab cleanup entirely, including cap eviction.
+  if (!CONFIG.hiddenTabIdleMin) return null;
+  const latestTabId = latestSharedTabId(session);
+  const candidates = [...session.tabGroups.values()].flatMap(group => [...group])
+    .filter(([tabId, tab]) => sharedIdentityIdlePolicy.agentIdle(tab.lastAgentActivityAt, CONFIG.hiddenTabIdleMin)
+      && sharedTabClosable(session, tabId, tab, latestTabId))
+    .sort((a, b) => a[1].lastAgentActivityAt - b[1].lastAgentActivityAt);
+  for (const [tabId, tab] of candidates) {
+    if (!sharedTabClosable(session, tabId, tab, latestTabId)) continue;
+    if (await closeSharedTab(session, tabId, tab, { userId, reason: 'idle_cap', reqId })) {
+      tabsRecycledTotal.inc();
+      return { recycledTabId: tabId, recycledFromGroup: null };
+    }
+  }
+  return null;
 }
 
 async function destroySession(userId, { reason = 'destroy_session' } = {}) {
@@ -3145,8 +3179,9 @@ async function cleanIdleSharedSessions() {
   const tabThreshold = CONFIG.hiddenTabIdleMin * 60_000;
   // Native HID is required for releasing a visible window. Hidden contexts do
   // not represent human input, and are governed by agent activity instead.
+  // A headed window the agent is still driving is not released mid-task.
   const headedCandidates = CONFIG.headedIdleReleaseMin ? [...sessions].filter(([key, session]) => session.sharedIdentity && session.headed
-    && !identityTransitions.has(key)) : [];
+    && !identityTransitions.has(key) && sharedIdentityIdlePolicy.agentIdle(session.lastAccess, CONFIG.headedIdleReleaseMin)) : [];
   if (headedCandidates.length && await sharedIdentityIdlePolicy.shouldReleaseHeaded(CONFIG.headedIdleReleaseMin)) {
     for (const [key, original] of headedCandidates) {
       if (sessions.get(key) !== original || !original.headed) continue;
@@ -3158,22 +3193,13 @@ async function cleanIdleSharedSessions() {
   for (const [key, original] of [...sessions]) {
     if (sessions.get(key) !== original || !original.sharedIdentity || original.headed || identityTransitions.has(key)) continue;
     if (tabThreshold) {
+      const latestTabId = latestSharedTabId(original);
       const tabs = [...original.tabGroups.values()].flatMap(group => [...group.entries()]);
-      const mostRecent = tabs.reduce((best, item) => !best || item[1].lastAgentActivityAt > best[1].lastAgentActivityAt ? item : best, null);
       for (const [tabId, tab] of tabs) {
-        if (tabId === mostRecent?.[0] || !sharedIdentityIdlePolicy.agentIdle(tab.lastAgentActivityAt, CONFIG.hiddenTabIdleMin)
-          || identityBusy(key, original) || humanControlledTabs.has(tabId) || tab.activeDownloads > 0) continue;
-        if (sessions.get(key) !== original || original.headed || findTab(original, tabId)?.tabState !== tab) break;
-        await safePageClose(tab.page);
-        if (!tab.page.isClosed?.()) continue;
-        const found = findTab(original, tabId);
-        if (found?.tabState === tab) {
-          found.group.delete(tabId);
-          if (!found.group.size) original.tabGroups.delete(found.listItemId);
-        }
-        await clearTabDownloads(tab).catch(() => {});
-        tabsReapedTotal.inc();
-        refreshActiveTabsGauge();
+        if (sessions.get(key) !== original || original.headed || identityTransitions.has(key)) break;
+        if (!sharedIdentityIdlePolicy.agentIdle(tab.lastAgentActivityAt, CONFIG.hiddenTabIdleMin)
+          || sharedIdentityRequests.get(key) || !sharedTabClosable(original, tabId, tab, latestTabId)) continue;
+        if (await closeSharedTab(original, tabId, tab, { userId: key, reason: 'shared_idle' })) tabsReapedTotal.inc();
       }
     }
     if (CONFIG.hiddenSessionIdleMin && sessions.get(key) === original && !original.headed

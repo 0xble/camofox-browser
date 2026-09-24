@@ -27,7 +27,6 @@ describe('shared persistent identity lifecycle over HTTP', () => {
       CAMOFOX_SHARED_IDENTITIES: userId,
       CAMOFOX_SHARED_PROFILE_DIR: profileDir,
       MAX_TABS_PER_SESSION: '3',
-      CAMOFOX_HIDDEN_TAB_IDLE_MIN: '0',
     });
     await startTestSite();
     testSiteUrl = getTestSiteUrl();
@@ -169,18 +168,23 @@ describe('shared persistent identity lifecycle over HTTP', () => {
     await request('DELETE', `/sessions/${userId}`);
   }, 90000);
 
-  test('headless cap evicts the oldest idle tab but preserves the most recent', async () => {
+  test('headless cap refuses a new tab when no tab is idle, closing none', async () => {
     const ids = [];
-    for (let index = 0; index < 4; index++) {
-      const tab = await request('POST', '/tabs', { userId, sessionKey: 'cap-test' });
-      expect(tab.response.status).toBe(200);
-      ids.push(tab.data.tabId);
+    let refused;
+    try {
+      // The persistent context may already hold a blank page, so fill to the cap.
+      for (let index = 0; index < 4 && !refused; index++) {
+        const tab = await request('POST', '/tabs', { userId, sessionKey: 'cap-test' });
+        if (tab.response.status === 429) refused = tab;
+        else { expect(tab.response.status).toBe(200); ids.push(tab.data.tabId); }
+      }
+      expect(ids.length).toBeGreaterThan(0);
+      expect(refused?.response.status).toBe(429);
+      const listed = await request('GET', `/tabs?userId=${userId}`);
+      for (const id of ids) expect(listed.data.tabs.map(tab => tab.tabId)).toContain(id);
+    } finally {
+      await request('DELETE', `/sessions/${userId}`);
     }
-    const listed = await request('GET', `/tabs?userId=${userId}`);
-    expect(listed.data.tabs.map(tab => tab.tabId)).not.toContain(ids[0]);
-    expect(listed.data.tabs.map(tab => tab.tabId)).toContain(ids[2]);
-    expect(listed.data.tabs.map(tab => tab.tabId)).toContain(ids[3]);
-    await request('DELETE', `/sessions/${userId}`);
   }, 90000);
 
   test('normal use launches headless, and /focus refuses a headless identity', async () => {
