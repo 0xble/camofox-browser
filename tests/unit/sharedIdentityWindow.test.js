@@ -81,12 +81,35 @@ describe('shared identity headed transition', () => {
     expect(contexts[1].options.headless).toBe(true);
   });
 
-  test('busy identity refuses without close or relaunch', async () => {
-    await opener.getSession('personal'); busy.add('personal');
-    expect(await opener.openWindow('personal')).toEqual({ busy: true });
-    expect(contexts[0].context.close).not.toHaveBeenCalled();
-    expect(contexts).toHaveLength(1);
+  test('already headed relaunches when the headed window has been closed', async () => {
+    await opener.openWindow('personal');
+    const oldSession = sessions.get('personal');
+    const visible = await manager.focus('personal');
+    visible.isClosed.mockReturnValue(true);
+    const focus = jest.spyOn(manager, 'focus').mockResolvedValueOnce(null).mockResolvedValueOnce(await contexts[0].context.newPage());
+    const result = await opener.openWindow('personal');
+    expect(result).toMatchObject({ restarted: true, focused: true, tabId: 'personal-new-tab' });
+    expect(opener.closeSession).toHaveBeenCalledWith('personal', oldSession, { reason: 'headed_transition' });
+    expect(contexts).toHaveLength(2);
+    focus.mockRestore();
   });
+
+  test('unsupported URL schemes skip restore and report restoreFailed', async () => {
+    const old = await opener.getSession('personal');
+    old.lastUsedPage = fakePage('file:///tmp/private.html');
+    const result = await opener.openWindow('personal');
+    expect(result).toMatchObject({ restarted: true, restoreFailed: true });
+    expect(contexts[1].context.newPage).not.toHaveBeenCalled();
+  });
+
+  test('open returns busy after a bounded request drain', async () => {
+    const bounded = createSharedIdentityWindowOpener({ manager, sessions, getSession: opener.getSession,
+      closeSession: opener.closeSession, registerPage, isBusy: () => true, drainTimeoutMs: 10 });
+    const started = Date.now();
+    await expect(bounded.openWindow('personal')).resolves.toEqual({ busy: true });
+    expect(Date.now() - started).toBeLessThan(500);
+  });
+
 
   test('skips about:blank and does not relaunch when checkpoint close fails', async () => {
     const original = await opener.getSession('personal');

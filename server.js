@@ -1355,7 +1355,7 @@ async function closeSession(userId, session, {
   }
 
   if (session.sharedIdentity) {
-    const close = sharedIdentities.close(key, { checkpoint: reason !== 'storage_reset' });
+    const close = sharedIdentities.close(key, { checkpoint: reason !== 'storage_reset', reason });
     if (reason === 'headed_transition') await close;
     else await close.catch((err) => {
       log('warn', 'shared identity close failed', { userId: key, reason, error: err.message });

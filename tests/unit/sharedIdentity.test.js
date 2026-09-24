@@ -90,18 +90,53 @@ describe('SharedIdentityManager', () => {
     expect(reopened.addCookies).not.toHaveBeenCalled();
   });
 
-  test('a failed close poisons ownership even if a close event fires before rejection', async () => {
+  test('a close rejection poisons ownership until a real close event confirms shutdown', async () => {
     const manager = new SharedIdentityManager({ identities: ['personal'], profileDir: root });
     let closed;
     const live = context();
     live.on = jest.fn((event, listener) => { if (event === 'close') closed = listener; });
-    live.close.mockImplementationOnce(async () => { closed(); throw new Error('close uncertain'); });
+    live.close.mockRejectedValueOnce(new Error('close uncertain'));
     const launch = jest.fn(async () => live);
     await manager.open('personal', launch);
     await expect(manager.close('personal')).rejects.toThrow('close uncertain');
     expect(manager.failedClosures.has('personal')).toBe(true);
-    await expect(manager.open('personal', launch)).rejects.toThrow('profile ownership is unconfirmed');
-    expect(launch).toHaveBeenCalledTimes(1);
+    closed();
+    expect(manager.failedClosures.has('personal')).toBe(false);
+  });
+
+  test('a cookie snapshot failure aborts headed transition without closing the live context', async () => {
+    const manager = new SharedIdentityManager({ identities: ['personal'], profileDir: root });
+    const live = context();
+    live.cookies.mockRejectedValueOnce(new Error('cookies unavailable'));
+    await manager.open('personal', async () => live);
+    await expect(manager.close('personal', { reason: 'headed_transition' })).rejects.toThrow('cookies unavailable');
+    expect(live.close).not.toHaveBeenCalled();
+    expect(manager.contexts.get('personal')).toBe(live);
+    expect(manager.failedClosures.has('personal')).toBe(false);
+  });
+
+  test('a cookie snapshot failure on non-transition closes without poisoning', async () => {
+    const logger = { warn: jest.fn() };
+    const manager = new SharedIdentityManager({ identities: ['personal'], profileDir: root, logger });
+    const live = context();
+    live.cookies.mockRejectedValueOnce(new Error('cookies unavailable'));
+    await manager.open('personal', async () => live);
+    await expect(manager.close('personal', { reason: 'session_closed' })).resolves.toBe(true);
+    expect(live.close).toHaveBeenCalledTimes(1);
+    expect(manager.failedClosures.has('personal')).toBe(false);
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('cookie snapshot failed'), expect.anything());
+  });
+
+  test('a checkpoint write failure removes the closed context without poisoning ownership', async () => {
+    const manager = new SharedIdentityManager({ identities: ['personal'], profileDir: root });
+    const live = context();
+    await manager.open('personal', async () => live);
+    const checkpointDir = path.dirname(cookieCheckpointPath(root, 'personal'));
+    await fs.rm(checkpointDir, { recursive: true, force: true });
+    await fs.writeFile(checkpointDir, 'blocking file');
+    await expect(manager.close('personal')).rejects.toThrow();
+    expect(manager.contexts.has('personal')).toBe(false);
+    expect(manager.failedClosures.has('personal')).toBe(false);
   });
 
   test('preserves supported attributes while omitting expired cookies', () => {
