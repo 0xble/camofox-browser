@@ -136,9 +136,11 @@ describe('lib/downloads', () => {
       expect(tabState.downloadEventSequence).toBe(1);
       expect(downloadEventOccurredSince(tabState, 0)).toBe(true);
       expect(tabState.downloads).toEqual([]);
+      expect(tabState.activeDownloads).toBe(1);
 
       releaseSave();
       await save;
+      expect(tabState.activeDownloads).toBe(0);
       await clearTabDownloads(tabState);
     });
   });

@@ -104,6 +104,103 @@ describe('SharedIdentityManager', () => {
     expect(manager.failedClosures.has('personal')).toBe(false);
   });
 
+  test('retries a profile-lock launch after a confirmed clean close with bounded backoff and coalesced callers', async () => {
+    const manager = new SharedIdentityManager({ identities: ['personal'], profileDir: root });
+    const original = context();
+    await manager.open('personal', async () => original);
+    await manager.close('personal');
+    const successor = context();
+    const locked = new Error('Firefox profile is in use by another process');
+    const launch = jest.fn()
+      .mockRejectedValueOnce(locked)
+      .mockRejectedValueOnce(locked)
+      .mockResolvedValue(successor);
+    const first = manager.open('personal', launch);
+    const second = manager.open('personal', launch);
+    await Promise.all([expect(first).resolves.toBe(successor), expect(second).resolves.toBe(successor)]);
+    expect(launch).toHaveBeenCalledTimes(3);
+    expect(launch.mock.calls.every(([profile]) => profile === manager.profileFor('personal'))).toBe(true);
+  });
+
+  test('stops profile-lock retries at the deadline measured from close, not from each open', async () => {
+    const manager = new SharedIdentityManager({ identities: ['personal'], profileDir: root });
+    await manager.open('personal', async () => context());
+    await manager.close('personal');
+    manager.closedAt.set('personal', Date.now() - 44_850);
+    const locked = new Error('Firefox is already running, but is not responding');
+    const launch = jest.fn(async () => { throw locked; });
+    await expect(manager.open('personal', launch)).rejects.toBe(locked);
+    expect(launch).toHaveBeenCalledTimes(2);
+    await expect(manager.open('personal', launch)).rejects.toBe(locked);
+    expect(launch).toHaveBeenCalledTimes(3);
+  });
+
+  test('does not retry profile locks without an observed close or after uncertain close', async () => {
+    const manager = new SharedIdentityManager({ identities: ['personal'], profileDir: root });
+    const locked = new Error('profile locked');
+    const launch = jest.fn(async () => { throw locked; });
+    await expect(manager.open('personal', launch)).rejects.toBe(locked);
+    expect(launch).toHaveBeenCalledTimes(1);
+    const live = context();
+    live.close.mockRejectedValueOnce(new Error('close uncertain'));
+    await manager.open('personal', async () => live);
+    await expect(manager.close('personal')).rejects.toThrow('close uncertain');
+    await expect(manager.open('personal', launch)).rejects.toThrow('ownership is unconfirmed');
+    expect(launch).toHaveBeenCalledTimes(1);
+  });
+
+  test('does not retry unrelated launch failures after a confirmed close', async () => {
+    const manager = new SharedIdentityManager({ identities: ['personal'], profileDir: root });
+    await manager.open('personal', async () => context());
+    await manager.close('personal');
+    const launch = jest.fn(async () => { throw new Error('missing browser executable'); });
+    await expect(manager.open('personal', launch)).rejects.toThrow('missing browser executable');
+    expect(launch).toHaveBeenCalledTimes(1);
+  });
+
+  test('does not open during a close whose profile release is still pending', async () => {
+    const manager = new SharedIdentityManager({ identities: ['personal'], profileDir: root });
+    const live = context();
+    let finishClose;
+    live.close.mockImplementation(() => new Promise(resolve => { finishClose = resolve; }));
+    await manager.open('personal', async () => live);
+    const closing = manager.close('personal', { checkpoint: false });
+    const launch = jest.fn(async () => context());
+    await expect(manager.open('personal', launch)).rejects.toThrow('close in progress');
+    expect(launch).not.toHaveBeenCalled();
+    finishClose();
+    await closing;
+  });
+
+  test('a failed cleanup after cookie recovery does not allow a second profile owner', async () => {
+    const manager = new SharedIdentityManager({ identities: ['personal'], profileDir: root });
+    await fs.mkdir(path.dirname(cookieCheckpointPath(root, 'personal')), { recursive: true });
+    await fs.writeFile(cookieCheckpointPath(root, 'personal'), JSON.stringify({
+      version: 2, cleanShutdown: true,
+      cookies: [{ name: 'session', value: 'synthetic', domain: 'example.test', path: '/', expires: -1 }],
+    }));
+    const partiallyOpened = context();
+    partiallyOpened.addCookies.mockRejectedValueOnce(new Error('cookie recovery failed'));
+    partiallyOpened.close.mockRejectedValueOnce(new Error('close uncertain'));
+    await expect(manager.open('personal', async () => partiallyOpened)).rejects.toThrow('cookie recovery failed');
+    const another = jest.fn(async () => context());
+    await expect(manager.open('personal', another)).rejects.toThrow('ownership is unconfirmed');
+    expect(another).not.toHaveBeenCalled();
+  });
+
+  test('an external context close removes only that context from manager ownership', async () => {
+    const manager = new SharedIdentityManager({ identities: ['personal'], profileDir: root });
+    const live = context();
+    let signalClose;
+    live.on = jest.fn((event, listener) => { if (event === 'close') signalClose = listener; });
+    await manager.open('personal', async () => live);
+    signalClose();
+    expect(manager.contexts.has('personal')).toBe(false);
+    expect(manager.closedAt.has('personal')).toBe(true);
+    expect(manager.failedClosures.has('personal')).toBe(false);
+    // The server's session registry is separate; this manager cannot purge it.
+  });
+
   test('a cookie snapshot failure aborts headed transition without closing the live context', async () => {
     const manager = new SharedIdentityManager({ identities: ['personal'], profileDir: root });
     const live = context();

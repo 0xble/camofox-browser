@@ -82,6 +82,68 @@
     }
   },
   "paths": {
+    "/browser/identities/{userId}/release": {
+      "post": {
+        "tags": [
+          "Browser"
+        ],
+        "summary": "Checkpoint and release a shared identity session",
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "userId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Session cleanly released or already absent.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "released"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "enum": [
+                        true
+                      ]
+                    },
+                    "released": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Bearer authentication required."
+          },
+          "404": {
+            "description": "Shared identity is not configured."
+          },
+          "409": {
+            "description": "Identity is busy with work, human control, or a download; error is identity busy."
+          },
+          "500": {
+            "description": "Cookie snapshot or checkpoint/close failed."
+          }
+        }
+      }
+    },
     "/sessions/{userId}/cookies": {
       "post": {
         "tags": [

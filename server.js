@@ -57,6 +57,8 @@ import { mountDocs } from './lib/openapi.js';
 import { initSentry, captureException as sentryCaptureException, setupExpressErrorHandler as setupSentryErrorHandler, flush as sentryFlush } from './lib/sentry.js';
 import { prepareExternalCamoufoxExecutable } from './lib/camoufox-executable.js';
 import { SharedIdentityManager } from './lib/shared-identity.js';
+import { readHidIdleSeconds } from './lib/macos-hid-idle.js';
+import { createSharedIdentityIdlePolicy } from './lib/shared-identity-idle.js';
 import { isEligibleForAutomaticCleanup } from './lib/cleanup-policy.js';
 import { applySharedTabHandoff } from './lib/shared-tab-handoff.js';
 import { createVirtualDisplayRegistry } from './lib/plugin-capabilities.js';
@@ -205,10 +207,66 @@ app.use(accessKeyMiddleware(CONFIG));
 // The open route itself is excluded; during a transition, new work fails closed.
 const sharedIdentityRequests = new Map();
 let sharedIdentityWindow;
+const identityTransitions = new Map();
+/**
+ * @openapi
+ * /browser/identities/{userId}/release:
+ *   post:
+ *     tags: [Browser]
+ *     summary: Checkpoint and release a shared identity session
+ *     security:
+ *       - BearerAuth: []
+ *     parameters:
+ *       - name: userId
+ *         in: path
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: Session cleanly released or already absent.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               required: [ok, released]
+ *               properties:
+ *                 ok: { type: boolean, enum: [true] }
+ *                 released: { type: boolean }
+ *       403: { description: Bearer authentication required. }
+ *       404: { description: Shared identity is not configured. }
+ *       409: { description: "Identity is busy with work, human control, or a download; error is identity busy." }
+ *       500: { description: Cookie snapshot or checkpoint/close failed. }
+ */
+app.post('/browser/identities/:userId/release', authMiddleware(), async (req, res) => {
+  const userId = normalizeUserId(req.params.userId);
+  if (!sharedIdentities.owns(userId)) return res.status(404).json({ error: 'Shared identity not configured' });
+  try {
+    const result = await transitionIdentity(userId, 'release', () => releaseIdentity(userId));
+    if (result.busy) return res.status(409).json({ error: 'identity busy' });
+    return res.json(result);
+  } catch (err) { return handleRouteError(err, req, res); }
+});
 app.use(createSharedIdentityRequestTracker({
   getSessions: () => sessions, manager: sharedIdentities, normalizeUserId, findTab,
-  transitioning: key => sharedIdentityWindow?.transitioning(key), requests: sharedIdentityRequests,
+  transitioning: key => identityTransitions.has(key) || sharedIdentityWindow?.transitioning(key), requests: sharedIdentityRequests,
 }));
+// Agent requests, not browser focus or passive page events, determine hidden-tab
+// recency. Record before the handler so long-running actions count as active.
+app.use((req, res, next) => {
+  const tabId = req.path.match(/^\/tabs\/([^/]+)/)?.[1];
+  if (tabId && tabId !== 'group') {
+    for (const session of sessions.values()) {
+      if (!session.sharedIdentity) continue;
+      const found = findTab(session, tabId);
+      if (found) {
+        found.tabState.lastAgentActivityAt = Date.now();
+        session.lastAccess = Date.now();
+        break;
+      }
+    }
+  }
+  next();
+});
 
 const ALLOWED_URL_SCHEMES = ['http:', 'https:'];
 
@@ -1309,6 +1367,7 @@ function normalizeUserId(userId) {
 }
 
 const sessionCreations = new Map();
+const sharedIdentityLastUrls = new Map();
 
 function clearSessionLocks(session) {
   if (!session?.tabGroups) return;
@@ -1333,7 +1392,7 @@ async function closeSession(userId, session, {
   if (!session) return;
 
   const key = normalizeUserId(userId);
-  const transition = reason === 'headed_transition' && session.sharedIdentity;
+  const transition = (reason === 'headed_transition' || reason === 'headed_release') && session.sharedIdentity;
   // A headed transition must be able to abort with the session untouched, so the
   // only fallible pre-close step (the cookie snapshot) runs before any teardown.
   const transitionCookies = transition ? await sharedIdentities.snapshotCookies(key) : undefined;
@@ -1359,10 +1418,12 @@ async function closeSession(userId, session, {
   }
 
   if (session.sharedIdentity) {
+    session._intentionalClose = true;
     const close = sharedIdentities.close(key, { checkpoint: reason !== 'storage_reset', reason, cookies: transitionCookies });
     if (transition) {
       try { await close; }
       catch (err) {
+        session._intentionalClose = false;
         // Once the context is confirmed closed (e.g. only the checkpoint write
         // failed), drop the dead session so stale tab IDs return 404.
         if (!sharedIdentities.contexts.has(key) && !sharedIdentities.failedClosures.has(key)) {
@@ -1373,13 +1434,15 @@ async function closeSession(userId, session, {
         throw err;
       }
     } else await close.catch((err) => {
+      session._intentionalClose = false;
       log('warn', 'shared identity close failed', { userId: key, reason, error: err.message });
     });
   } else {
     await session.context.close().catch(() => {});
   }
   if (transition) session.tabGroups.clear();
-  sessions.delete(key);
+  if (session.sharedIdentity) sharedIdentityLastUrls.delete(key);
+  if (sessions.get(key) === session) sessions.delete(key);
   if (!session.sharedIdentity) await pluginEvents.emitAsync('session:destroyed', { userId: key, reason });
 
   refreshActiveTabsGauge();
@@ -1407,8 +1470,14 @@ async function getSession(userId, { trace = false, headed = false } = {}) {
   
   // Check if existing session's context is still alive
   if (session) {
-    if (session._closing) {
-      // Session is being torn down by reaper/expiry -- treat as dead
+    if (session._closing || (session.sharedIdentity && sharedIdentities.contexts.get(key) !== session.context)) {
+      // The manager forgets an externally closed context on its close event.
+      // pages() itself does not detect a closed persistent context.
+      if (session.sharedIdentity && sharedIdentities.contexts.get(key) !== session.context) {
+        clearSessionLocks(session);
+        session.tabGroups.clear();
+        if (sessions.get(key) === session) sessions.delete(key);
+      }
       session = null;
     } else {
       try {
@@ -1494,7 +1563,26 @@ async function getSession(userId, { trace = false, headed = false } = {}) {
         // accounting is accurate; keepOpen is a second safety boundary if a
         // browser event races this listener.
         context.on('page', (page) => registerSharedIdentityPage(created, key, page));
+        context.on('close', () => {
+          if (created._intentionalClose || sessions.get(key) !== created) return;
+          clearSessionLocks(created);
+          created.tabGroups.clear();
+          sessions.delete(key);
+          refreshActiveTabsGauge();
+        });
         for (const page of context.pages()) registerSharedIdentityPage(created, key, page);
+        if (!headed && sharedIdentityLastUrls.has(key)) {
+          const url = sharedIdentityLastUrls.get(key);
+          const page = context.pages().find(candidate => !candidate.isClosed?.() && candidate.url?.() === 'about:blank')
+            || await context.newPage();
+          try {
+            await page.goto(url, { timeout: 10_000 });
+            created.lastUsedPage = page;
+            sharedIdentityLastUrls.delete(key);
+          } catch (err) {
+            log('warn', 'shared identity URL restoration failed', { userId: key, error: err.message });
+          }
+        }
       }
       if (!sharedIdentity) await pluginEvents.emitAsync('session:created', { userId: key, context });
       log('info', 'session created', {
@@ -1818,6 +1906,28 @@ async function recycleOldestTab(session, reqId, userId) {
   return { recycledTabId: oldestTabId, recycledFromGroup: oldestGroupKey };
 }
 
+async function recycleIdleSharedTab(session, reqId, userId) {
+  const tabs = [...session.tabGroups].flatMap(([groupKey, group]) =>
+    [...group].map(([tabId, tab]) => ({ groupKey, group, tabId, tab })));
+  const latest = tabs.reduce((best, item) => !best || item.tab.lastAgentActivityAt > best.tab.lastAgentActivityAt ? item : best, null);
+  const idleMs = CONFIG.hiddenTabIdleMin * 60_000;
+  const candidate = tabs.filter(item => item !== latest && !isPageLeased(session, item.tab.page)
+    && !humanControlledTabs.has(item.tabId) && !item.tab.activeDownloads
+    && !tabLocks.get(item.tabId)?.active && !tabLocks.get(item.tabId)?.queue?.length
+    && Date.now() - item.tab.lastAgentActivityAt >= idleMs)
+    .sort((a, b) => a.tab.lastAgentActivityAt - b.tab.lastAgentActivityAt)[0];
+  if (!candidate) return null;
+  await safePageClose(candidate.tab.page);
+  if (!candidate.tab.page.isClosed?.()) return null;
+  candidate.group.delete(candidate.tabId);
+  if (!candidate.group.size) session.tabGroups.delete(candidate.groupKey);
+  await clearTabDownloads(candidate.tab).catch(() => {});
+  tabsRecycledTotal.inc();
+  refreshActiveTabsGauge();
+  log('info', 'shared idle tab recycled', { reqId, userId, tabId: candidate.tabId });
+  return { recycledTabId: candidate.tabId, recycledFromGroup: candidate.groupKey };
+}
+
 async function destroySession(userId, { reason = 'destroy_session' } = {}) {
   const key = normalizeUserId(userId);
   const session = sessions.get(key);
@@ -1890,6 +2000,7 @@ function createTabState(page) {
     googleRetryCount: 0,
     navigateAbort: null,
     pressureObservedAt: Date.now(),
+    lastAgentActivityAt: Date.now(),
     pressureObservedToolCalls: 0,
     crashed: false,
   };
@@ -1937,6 +2048,16 @@ function registerSharedIdentityPage(session, userId, page) {
   attachDownloadListener(tabState, tabId, log, pluginEvents, userId);
   group.set(tabId, tabState);
   attachPopupHandler(page, userId, SHARED_IDENTITY_GROUP);
+  page.on?.('close', () => {
+    const found = findTab(session, tabId);
+    if (found?.tabState !== tabState) return;
+    found.group.delete(tabId);
+    if (!found.group.size) session.tabGroups.delete(found.listItemId);
+    humanControlledTabs.delete(tabId);
+    const lock = tabLocks.get(tabId);
+    if (lock) { lock.drain(); tabLocks.delete(tabId); refreshTabLockQueueDepth(); }
+    refreshActiveTabsGauge();
+  });
   refreshActiveTabsGauge();
   log('info', 'shared identity page registered', { userId, tabId });
   pluginEvents.emit('tab:created', { userId, tabId, page, url: safePageUrl(page) });
@@ -2963,21 +3084,114 @@ app.get('/browser/identities', authMiddleware(), (req, res) => {
   res.json({ identities: sharedIdentityMetadata(CONFIG.sharedIdentityAliases) });
 });
 
+// Serialize opposite operations without returning an open result to a release
+// caller (or vice versa). A queued operation installs its gate immediately.
+function transitionIdentity(userId, action, operation) {
+  const previous = identityTransitions.get(userId);
+  if (previous?.action === action) return previous.promise;
+  const promise = (async () => {
+    if (previous) await previous.promise.catch(() => {});
+    return operation();
+  })();
+  const entry = { action, promise };
+  identityTransitions.set(userId, entry);
+  promise.finally(() => {
+    if (identityTransitions.get(userId) === entry) identityTransitions.delete(userId);
+  }).catch(() => {});
+  return promise;
+}
+
+function identityBusy(userId, session) {
+  return Boolean(
+    sharedIdentityRequests.get(userId) || sessionCreations.has(userId) || sharedIdentities.closings.has(userId)
+    || userConcurrency.get(userId)?.active || userConcurrency.get(userId)?.queue.length
+    || session?._closing || (session && hasActivePageLeases(session))
+    || (session && [...session.tabGroups.values()].some(group => [...group].some(([tabId, tab]) => {
+      const lock = tabLocks.get(tabId);
+      return lock?.active || lock?.queue?.length || humanControlledTabs.has(tabId) || tab.activeDownloads > 0;
+    })))
+  );
+}
+
+async function releaseIdentity(userId, { headedOnly = false } = {}) {
+  const deadline = Date.now() + 3000;
+  let session = sessions.get(userId);
+  while (!session && sessionCreations.has(userId) && Date.now() < deadline) {
+    await new Promise(resolve => setTimeout(resolve, Math.min(25, deadline - Date.now())));
+    session = sessions.get(userId);
+  }
+  if (!session && sessionCreations.has(userId)) return { busy: true };
+  if (!session || (headedOnly && !session.headed)) return { ok: true, released: false };
+  while (identityBusy(userId, session) && Date.now() < deadline) {
+    await new Promise(resolve => setTimeout(resolve, Math.min(25, deadline - Date.now())));
+    session = sessions.get(userId);
+    if (!session || (headedOnly && !session.headed)) return { ok: true, released: false };
+  }
+  if (identityBusy(userId, session)) return { busy: true };
+  const recent = session.lastUsedPage && !session.lastUsedPage.isClosed?.()
+    ? session.lastUsedPage
+    : [...session.tabGroups.values()].flatMap(group => [...group.values()])
+      .map(tab => tab.page).filter(page => !page.isClosed?.()).at(-1);
+  const url = recent?.url?.();
+  await closeSession(userId, session, { reason: 'headed_release' });
+  if (url && /^https?:\/\//i.test(url)) sharedIdentityLastUrls.set(userId, url);
+  else sharedIdentityLastUrls.delete(userId);
+  log('info', 'shared identity released', { userId, headed: session.headed });
+  return { ok: true, released: true };
+}
+
+const sharedIdentityIdlePolicy = createSharedIdentityIdlePolicy({ readIdleSeconds: readHidIdleSeconds });
+async function cleanIdleSharedSessions() {
+  const tabThreshold = CONFIG.hiddenTabIdleMin * 60_000;
+  // Native HID is required for releasing a visible window. Hidden contexts do
+  // not represent human input, and are governed by agent activity instead.
+  const headedCandidates = CONFIG.headedIdleReleaseMin ? [...sessions].filter(([key, session]) => session.sharedIdentity && session.headed
+    && !identityTransitions.has(key)) : [];
+  if (headedCandidates.length && await sharedIdentityIdlePolicy.shouldReleaseHeaded(CONFIG.headedIdleReleaseMin)) {
+    for (const [key, original] of headedCandidates) {
+      if (sessions.get(key) !== original || !original.headed) continue;
+      await transitionIdentity(key, 'release', () => releaseIdentity(key, { headedOnly: true })).catch(err => {
+        log('warn', 'headed idle release failed', { userId: key, error: err.message });
+      });
+    }
+  }
+  for (const [key, original] of [...sessions]) {
+    if (sessions.get(key) !== original || !original.sharedIdentity || original.headed || identityTransitions.has(key)) continue;
+    if (tabThreshold) {
+      const tabs = [...original.tabGroups.values()].flatMap(group => [...group.entries()]);
+      const mostRecent = tabs.reduce((best, item) => !best || item[1].lastAgentActivityAt > best[1].lastAgentActivityAt ? item : best, null);
+      for (const [tabId, tab] of tabs) {
+        if (tabId === mostRecent?.[0] || !sharedIdentityIdlePolicy.agentIdle(tab.lastAgentActivityAt, CONFIG.hiddenTabIdleMin)
+          || identityBusy(key, original) || humanControlledTabs.has(tabId) || tab.activeDownloads > 0) continue;
+        if (sessions.get(key) !== original || original.headed || findTab(original, tabId)?.tabState !== tab) break;
+        await safePageClose(tab.page);
+        if (!tab.page.isClosed?.()) continue;
+        const found = findTab(original, tabId);
+        if (found?.tabState === tab) {
+          found.group.delete(tabId);
+          if (!found.group.size) original.tabGroups.delete(found.listItemId);
+        }
+        await clearTabDownloads(tab).catch(() => {});
+        tabsReapedTotal.inc();
+        refreshActiveTabsGauge();
+      }
+    }
+    if (CONFIG.hiddenSessionIdleMin && sessions.get(key) === original && !original.headed
+      && sharedIdentityIdlePolicy.agentIdle(original.lastAccess, CONFIG.hiddenSessionIdleMin) && !identityBusy(key, original)) {
+      await transitionIdentity(key, 'release', () => releaseIdentity(key)).catch(err => {
+        log('warn', 'hidden idle session close failed', { userId: key, error: err.message });
+      });
+    }
+  }
+}
+
 sharedIdentityWindow = createSharedIdentityWindowOpener({
   manager: sharedIdentities,
   sessions,
   getSession,
   closeSession,
   registerPage: registerSharedIdentityPage,
-  isBusy: (userId, session) => Boolean(
-    sharedIdentityRequests.get(userId) || sessionCreations.has(userId) || sharedIdentities.closings.has(userId)
-    || userConcurrency.get(userId)?.active || userConcurrency.get(userId)?.queue.length
-    || session?._closing || (session && hasActivePageLeases(session))
-    || (session && [...session.tabGroups.values()].some(group => [...group.keys()].some(tabId => {
-      const lock = tabLocks.get(tabId);
-      return lock?.active || lock?.queue?.length;
-    })))
-  ),
+  isBusy: identityBusy,
 });
 
 /**
@@ -3000,7 +3214,7 @@ app.post('/browser/identities/:userId/open', async (req, res) => {
   const userId = normalizeUserId(req.params.userId);
   if (!sharedIdentities.owns(userId)) return res.status(404).json({ error: 'Shared identity not configured' });
   try {
-    const result = await sharedIdentityWindow.openWindow(userId);
+    const result = await transitionIdentity(userId, 'open', () => sharedIdentityWindow.openWindow(userId));
     if (result.busy) return res.status(409).json({ error: 'identity busy' });
     return res.json(result);
   } catch (err) {
@@ -3206,7 +3420,9 @@ app.post('/tabs', async (req, res) => {
       
       // Recycle oldest tab when limits are reached instead of rejecting
       if (totalTabs >= MAX_TABS_PER_SESSION || getTotalTabCount() >= MAX_TABS_GLOBAL) {
-        const recycled = await recycleOldestTab(session, req.reqId, userId);
+        const recycled = session.sharedIdentity
+          ? (session.headed ? null : await recycleIdleSharedTab(session, req.reqId, userId))
+          : await recycleOldestTab(session, req.reqId, userId);
         signal.throwIfAborted();
         if (!recycled) {
           throw Object.assign(new Error('Maximum tabs per session reached'), { statusCode: 429 });
@@ -6273,6 +6489,14 @@ app.delete('/sessions/:userId', async (req, res) => {
 });
 
 // Cleanup stale sessions
+let sharedIdleSweepRunning = false;
+const sharedIdleInterval = setInterval(() => {
+  if (sharedIdleSweepRunning) return;
+  sharedIdleSweepRunning = true;
+  cleanIdleSharedSessions().catch(err => log('warn', 'shared identity idle sweep failed', { error: err.message }))
+    .finally(() => { sharedIdleSweepRunning = false; });
+}, 60_000);
+sharedIdleInterval.unref();
 setInterval(() => {
   const now = Date.now();
   for (const [userId, session] of Array.from(sessions.entries())) {
@@ -7345,6 +7569,7 @@ async function gracefulShutdown(signal) {
 
   server.close();
   stopMemoryReporter();
+  clearInterval(sharedIdleInterval);
 
   await pluginEvents.emitAsync('server:shutdown', { signal }).catch((err) => {
     log('error', 'server:shutdown listener failed', { error: err.message });
