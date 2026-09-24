@@ -20,7 +20,7 @@ describe('macOS HID idle reader', () => {
     const spawn = fakeSpawn({ output: '"HIDIdleTime" = 2500000000 ns\n' });
 
     await expect(readHidIdleSeconds({ platform: 'darwin', spawn })).resolves.toBe(2.5);
-    expect(spawn).toHaveBeenCalledWith('ioreg', ['-c', 'IOHIDSystem'], { stdio: ['ignore', 'pipe', 'ignore'] });
+    expect(spawn).toHaveBeenCalledWith('/usr/sbin/ioreg', ['-c', 'IOHIDSystem'], { stdio: ['ignore', 'pipe', 'ignore'] });
   });
 
   test('returns null on non-macOS without spawning a process', async () => {
@@ -48,8 +48,11 @@ describe('macOS HID idle reader', () => {
     expect(child.kill).toHaveBeenCalledWith('SIGKILL');
   });
 
-  (process.platform === 'darwin' ? test : test.skip)('real ioreg returns a finite idle duration', async () => {
-    const seconds = await readHidIdleSeconds();
+  (process.platform === 'darwin' ? test : test.skip)('real ioreg returns a finite idle duration without /usr/sbin on PATH', async () => {
+    const originalPath = process.env.PATH;
+    process.env.PATH = '/usr/bin:/bin';
+    let seconds;
+    try { seconds = await readHidIdleSeconds(); } finally { process.env.PATH = originalPath; }
     expect(Number.isFinite(seconds)).toBe(true);
     expect(seconds).toBeGreaterThanOrEqual(0);
   });
