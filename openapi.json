@@ -421,7 +421,7 @@
         "tags": [
           "Browser"
         ],
-        "summary": "Open or reuse a named shared identity",
+        "summary": "Show a named shared identity in a headed window (restarting headless sessions)",
         "parameters": [
           {
             "name": "userId",
@@ -434,10 +434,13 @@
         ],
         "responses": {
           "200": {
-            "description": "Shared identity is open."
+            "description": "Shared identity is visible; restarted is true after a headless transition."
           },
           "404": {
             "description": "Identity is not configured for shared mode."
+          },
+          "409": {
+            "description": "Identity has work in flight; retry after it finishes."
           }
         }
       }
@@ -464,6 +467,9 @@
           },
           "404": {
             "description": "Identity is not configured or is not open."
+          },
+          "409": {
+            "description": "Identity is headless; use open to show it."
           }
         }
       }

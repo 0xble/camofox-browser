@@ -16,6 +16,8 @@ import { withRequestDeadline } from './lib/request-deadline.js';
 import { createPluginEvents, loadPlugins, typeEventPayload } from './lib/plugins.js';
 import { requireAuth, accessKeyMiddleware, timingSafeCompare as _timingSafeCompare, isLoopbackAddress as _isLoopbackAddress } from './lib/auth.js';
 import { sharedIdentityMetadata } from './lib/shared-identity-metadata.js';
+import { createSharedIdentityWindowOpener } from './lib/shared-identity-window.js';
+import { launchSharedIdentityContext } from './lib/shared-identity-launch.js';
 import { windowSnapshot } from './lib/snapshot.js';
 import { extractPageStructure, attachStructureRefs } from './lib/page-structure.js';
 import {
@@ -197,6 +199,30 @@ app.use('/tabs/:tabId', fly.replayMiddleware(log));
 // dedicated keys (cookie import -> CAMOFOX_API_KEY, /stop -> CAMOFOX_ADMIN_KEY)
 // so each key gates a distinct surface. When unset, behavior is unchanged.
 app.use(accessKeyMiddleware(CONFIG));
+
+// Track the whole HTTP lifetime, including handlers outside withUserLimit.
+// The open route itself is excluded; during a transition, new work fails closed.
+const sharedIdentityRequests = new Map();
+let sharedIdentityWindow;
+app.use((req, res, next) => {
+  const identityPath = req.path.match(/^\/browser\/identities\/([^/]+)\//);
+  const sessionPath = req.path.match(/^\/sessions\/([^/]+)(?:\/|$)/);
+  if (identityPath?.[1] && req.path.endsWith('/open')) return next();
+  const userId = identityPath?.[1] || sessionPath?.[1] || req.body?.userId || req.query?.userId;
+  if (!userId || !sharedIdentities.owns(userId)) return next();
+  const key = normalizeUserId(userId);
+  if (sharedIdentityWindow?.transitioning(key) || sharedIdentities.closings.has(key)) return res.status(409).json({ error: 'identity busy' });
+  sharedIdentityRequests.set(key, (sharedIdentityRequests.get(key) || 0) + 1);
+  const session = sessions.get(key);
+  const tabId = req.path.match(/^\/tabs\/([^/]+)/)?.[1];
+  if (session && tabId) session.lastUsedPage = findTab(session, tabId)?.tabState.page || session.lastUsedPage;
+  res.once('close', () => {
+    const remaining = sharedIdentityRequests.get(key) - 1;
+    if (remaining) sharedIdentityRequests.set(key, remaining);
+    else sharedIdentityRequests.delete(key);
+  });
+  next();
+});
 
 const ALLOWED_URL_SCHEMES = ['http:', 'https:'];
 
@@ -1306,8 +1332,8 @@ function clearSessionLocks(session) {
       if (lock) {
         lock.drain();
         tabLocks.delete(tabId);
-        humanControlledTabs.delete(tabId);
       }
+      humanControlledTabs.delete(tabId);
     }
   }
   refreshTabLockQueueDepth();
@@ -1343,12 +1369,15 @@ async function closeSession(userId, session, {
   }
 
   if (session.sharedIdentity) {
-    await sharedIdentities.close(key, { checkpoint: reason !== 'storage_reset' }).catch((err) => {
+    const close = sharedIdentities.close(key, { checkpoint: reason !== 'storage_reset' });
+    if (reason === 'headed_transition') await close;
+    else await close.catch((err) => {
       log('warn', 'shared identity close failed', { userId: key, reason, error: err.message });
     });
   } else {
     await session.context.close().catch(() => {});
   }
+  if (reason === 'headed_transition') session.tabGroups.clear();
   sessions.delete(key);
   if (!session.sharedIdentity) await pluginEvents.emitAsync('session:destroyed', { userId: key, reason });
 
@@ -1362,24 +1391,13 @@ async function closeAllSessions(reason, { clearDownloads = true, clearLocks = tr
   }
 }
 
-async function createSharedIdentityContext(profilePath) {
-  const options = await launchOptions({
-    headless: false,
-    os: getHostOS(),
-    humanize: os.platform() !== 'darwin',
-    enable_cache: true,
-    exclude_addons: CONFIG.disableDefaultAddons ? ['UBO'] : undefined,
+async function createSharedIdentityContext(profilePath, { headed = false } = {}) {
+  return launchSharedIdentityContext(profilePath, {
+    headed, launchOptions, firefox, os, getHostOS, config: CONFIG, events: pluginEvents,
   });
-  options.handleSIGTERM = false;
-  options.handleSIGINT = false;
-  options.handleSIGHUP = false;
-  await pluginEvents.emitAsync('browser:launching', { options });
-  // Persistent launch deliberately receives no storageState. The manager adds
-  // its scoped cookie recovery checkpoint before the first page is opened.
-  return firefox.launchPersistentContext(profilePath, options);
 }
 
-async function getSession(userId, { trace = false } = {}) {
+async function getSession(userId, { trace = false, headed = false } = {}) {
   const key = normalizeUserId(userId);
   let session = sessions.get(key);
   
@@ -1448,7 +1466,7 @@ async function getSession(userId, { trace = false } = {}) {
       // only to ephemeral contexts. Shared profiles restore cookies explicitly.
       if (!sharedIdentity) await pluginEvents.emitAsync('session:creating', { userId: key, contextOptions });
       const context = sharedIdentity
-        ? await sharedIdentities.open(key, createSharedIdentityContext)
+        ? await sharedIdentities.open(key, profilePath => createSharedIdentityContext(profilePath, { headed }))
         : await b.newContext(contextOptions);
 
       let tracePath = null;
@@ -1464,7 +1482,7 @@ async function getSession(userId, { trace = false } = {}) {
         }
       }
 
-      const created = { context, tabGroups: new Map(), pageLeases: new Set(), lastAccess: Date.now(), proxySessionId: sessionProxy?.sessionId || null, tracePath, sharedIdentity, keepOpen: sharedIdentity };
+      const created = { context, tabGroups: new Map(), pageLeases: new Set(), lastAccess: Date.now(), proxySessionId: sessionProxy?.sessionId || null, tracePath, sharedIdentity, headed: sharedIdentity && headed, keepOpen: sharedIdentity };
       sessions.set(key, created);
       if (sharedIdentity) {
         // Pages opened by the visible Firefox UI are real user tabs, not leaked
@@ -2941,29 +2959,46 @@ app.get('/browser/identities', authMiddleware(), (req, res) => {
   res.json({ identities: sharedIdentityMetadata(CONFIG.sharedIdentityAliases) });
 });
 
+sharedIdentityWindow = createSharedIdentityWindowOpener({
+  manager: sharedIdentities,
+  sessions,
+  getSession,
+  closeSession,
+  registerPage: registerSharedIdentityPage,
+  isBusy: (userId, session) => Boolean(
+    sharedIdentityRequests.get(userId) || sessionCreations.has(userId) || sharedIdentities.closings.has(userId)
+    || userConcurrency.get(userId)?.active || userConcurrency.get(userId)?.queue.length
+    || session?._closing || (session && hasActivePageLeases(session))
+    || (session && [...session.tabGroups.values()].some(group => [...group.keys()].some(tabId => {
+      const lock = tabLocks.get(tabId);
+      return lock?.active || lock?.queue?.length;
+    })))
+  ),
+});
+
 /**
  * @openapi
  * /browser/identities/{userId}/open:
  *   post:
  *     tags: [Browser]
- *     summary: Open or reuse a named shared identity
+ *     summary: Show a named shared identity in a headed window (restarting headless sessions)
  *     parameters:
  *       - name: userId
  *         in: path
  *         required: true
  *         schema: { type: string }
  *     responses:
- *       200: { description: Shared identity is open. }
+ *       200: { description: Shared identity is visible; restarted is true after a headless transition. }
  *       404: { description: Identity is not configured for shared mode. }
+ *       409: { description: Identity has work in flight; retry after it finishes. }
  */
 app.post('/browser/identities/:userId/open', async (req, res) => {
   const userId = normalizeUserId(req.params.userId);
   if (!sharedIdentities.owns(userId)) return res.status(404).json({ error: 'Shared identity not configured' });
   try {
-    const session = await getSession(userId);
-    const page = await sharedIdentities.focus(userId);
-    const tabId = registerSharedIdentityPage(session, userId, page);
-    return res.json({ ok: true, userId, focused: Boolean(page), tabId, keepOpen: true });
+    const result = await sharedIdentityWindow.openWindow(userId);
+    if (result.busy) return res.status(409).json({ error: 'identity busy' });
+    return res.json(result);
   } catch (err) {
     return handleRouteError(err, req, res);
   }
@@ -2983,13 +3018,15 @@ app.post('/browser/identities/:userId/open', async (req, res) => {
  *     responses:
  *       200: { description: Focus result. }
  *       404: { description: Identity is not configured or is not open. }
+ *       409: { description: Identity is headless; use open to show it. }
  */
 app.post('/browser/identities/:userId/focus', async (req, res) => {
   const userId = normalizeUserId(req.params.userId);
   if (!sharedIdentities.owns(userId)) return res.status(404).json({ error: 'Shared identity not configured' });
+  const session = sessions.get(userId);
+  if (session && !session.headed) return res.status(409).json({ error: 'identity is headless; use open' });
   const page = await sharedIdentities.focus(userId);
   if (!page) return res.status(404).json({ error: 'Shared identity is not open' });
-  const session = sessions.get(userId);
   const tabId = registerSharedIdentityPage(session, userId, page);
   return res.json({ ok: true, userId, focused: true, tabId });
 });

@@ -12,9 +12,9 @@ Compare upstream identity routing, cookie restoration, and handoff behavior with
 
 - **Status:** Active; managed installation is authorized only from the landed fork SHA.
 - **Stable subject:** `Add shared persistent identity lifecycle` (`85d2f3f`).
-- **Behavior:** native Hermes opaque IDs and optional local aliases resolve to one profile; session-only cookies restore only after a clean close; human handoff serializes with tab work and blocks agent operations.
+- **Behavior:** native Hermes opaque IDs and optional local aliases resolve to one profile; normal agent sessions are headless and explicit `/browser/identities/:userId/open` transitions to headed with a clean-close cookie checkpoint, most-recent URL restoration, busy refusal, and stale-tab invalidation; session-only cookies restore only after a clean close; human handoff serializes with tab work and blocks agent operations.
 - **Surfaces:** `server.js`, `lib/shared-identity.js`, `lib/config.js`, `docs/shared-persistent-browser-spec.md`
-- **Upstream issue/PR:** None after checked 2026-09-10.
+- **Upstream issue/PR:** jo-inc/camofox-browser issue #7990 covers native headed mode; open PR #10992 proposes persistent-profile preservation across expiry and VNC handoff. Neither supplies this fork's headless-to-headed named identity transition; assess compatibility before adopting either.
 - **Regression:** `npm run test:unit` plus the disposable shared-browser acceptance harness.
 - **Rollback:** `git revert <CAMOFOX-002 commit>`; do not delete preserved profiles.
 - **Retire when:** upstream ships equivalent lifecycle and identity-routing semantics.

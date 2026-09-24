@@ -4,7 +4,7 @@
 
 ## Outcome
 
-Camofox remains the single loopback-authenticated browser service at `127.0.0.1:9377`. It can own an interactive, persistent browser context for an explicitly configured allowlist of native Hermes `userId` values; the same opaque identifier is used by Hermes and Camofox for a visible profile.
+Camofox remains the single loopback-authenticated browser service at `127.0.0.1:9377`. It owns a persistent browser context for an explicitly configured allowlist of native Hermes `userId` values; sessions start headless and an explicit open request shows the same opaque identity in a headed window.
 
 ## Current facts
 
@@ -25,7 +25,7 @@ Camofox remains the single loopback-authenticated browser service at `127.0.0.1:
 
 1. Only configured opaque Hermes `userId`s may use shared persistent mode. `CAMOFOX_SHARED_IDENTITIES` contains those opaque values. When a local launcher needs aliases, `CAMOFOX_SHARED_IDENTITY_MAP` maps each alias to one configured opaque value; both paths normalize before session/profile lookup. Other `userId`s retain existing isolated ephemeral behavior.
 2. Each configured opaque identity gets a distinct profile directory below `CAMOFOX_SHARED_PROFILE_DIR`. Existing state is never copied into another identity. First creation makes a backup/marker rather than importing Chrome or the old manual profile.
-3. A persistent identity opens as a visible desktop browser. The service serializes create/open/close operations per identity; an existing identity is focused, never launched a second time.
+3. Normal agent session use launches a headless persistent context on the identity's existing profile. `POST /browser/identities/:userId/open` creates a headed window (or focuses an existing headed window). A headless-to-headed transition refuses with HTTP 409 `{ "error": "identity busy" }` while that identity has work in flight, clean-closes the profile with a session-cookie checkpoint, relaunches it headed, and restores the most recently used page URL except `about:blank`. Concurrent opens coalesce. Previous tab IDs are discarded and return 404; clients must use the returned `tabId`. Ending the headed session resets the next normal session launch to headless. Firefox may briefly retain a profile lock after context close; a failed relaunch is reported rather than opening a second profile owner.
 4. Firefox profile state retains extensions, settings, and persistent cookies. Only session cookies are a scoped recovery layer: a snapshot is eligible solely after a clean service close, is invalidated before a subsequent context launch, and is injected with `context.addCookies()` before the first page is opened. A crash therefore cannot replay a stale session snapshot; exact crash-session recovery is intentionally not promised. Existing `storageState` is not passed to persistent-context launch.
 5. A clean close replaces the session-cookie snapshot, including an empty snapshot. This makes an explicit logout durable. Persistent cookies stay in the Firefox profile and are never overlaid from a checkpoint. Expired cookies are omitted; session snapshots retain the Playwright cookie attributes accepted by `addCookies()`.
 6. A persistent tab is keep-open by default and is excluded from idle, task, pressure, and orphan-page cleanup. Pages opened from the visible Firefox UI are registered under a service-owned shared-identity group; the keep-open exclusion remains a fail-safe for a page-event race. Explicit close/session reset still works. Handoff is available only for a shared tab: human transfer waits behind its current tab operation, focuses that exact page, and blocks later agent tab operations until an explicit agent transfer.
@@ -35,8 +35,8 @@ Camofox remains the single loopback-authenticated browser service at `127.0.0.1:
 
 Existing `/tabs` calls for a named identity cause the shared context to be opened/reused. New authenticated browser endpoints expose only safe control metadata:
 
-- `POST /browser/identities/:userId/open` — ensure the named context exists, register a visible tab, and focus it.
-- `POST /browser/identities/:userId/focus` — focus and register an existing visible tab; responses include its opaque `tabId` for explicit handoff.
+- `POST /browser/identities/:userId/open` — show the named profile headed; if it was headless, clean-close/relaunch with session cookies and recent URL, returning `restarted: true` and a new `tabId`. Busy identities return 409 without closing.
+- `POST /browser/identities/:userId/focus` — focus and register an existing headed tab; a headless identity returns 409 and must be shown through `/open`.
 - `POST /tabs/:tabId/handoff` — set `human` or `agent`; optional human handoff focuses the window.
 
 Responses never contain cookies, stored state, extension data, page body, or titles/URLs beyond the existing tab API contract.

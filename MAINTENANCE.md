@@ -25,7 +25,7 @@ together. Preserve these invariants when applying the shared adoption rules belo
 | Patch | Required invariant | Maintenance detail |
 |---|---|---|
 | CAMOFOX-001 | Supported hardening hooks and authenticated snapshots only after persistence. | [Deployment plugins](maintenance/deployment-plugins.md) |
-| CAMOFOX-002 | Shared identity routing, clean-close cookie restoration, and serialized human handoff. | [Shared identity](maintenance/shared-identity.md) |
+| CAMOFOX-002 | Shared identity routing, headless-by-default profiles, explicit headed handoff with clean-close cookie restoration, and serialized human control. | [Shared identity](maintenance/shared-identity.md) |
 | CAMOFOX-003 | Authenticated dynamic metadata shared by the API and native launcher. | [Native launcher](maintenance/native-launcher.md) |
 | CAMOFOX-004 | Working macOS native input and cancellation-safe creation without cross-task tab loss. | [Page creation recovery](maintenance/page-creation-recovery.md) |
 
