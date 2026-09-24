@@ -38,6 +38,16 @@ describe('macOS HID idle reader', () => {
     await expect(readHidIdleSeconds({ platform: 'darwin', spawn: malformedSpawn })).resolves.toBeNull();
   });
 
+  test('times out a hung ioreg, kills it, and fails closed', async () => {
+    const child = new EventEmitter();
+    child.stdout = new EventEmitter();
+    child.kill = jest.fn();
+    const spawn = jest.fn(() => child);
+
+    await expect(readHidIdleSeconds({ platform: 'darwin', spawn, timeoutMs: 20 })).resolves.toBeNull();
+    expect(child.kill).toHaveBeenCalledWith('SIGKILL');
+  });
+
   (process.platform === 'darwin' ? test : test.skip)('real ioreg returns a finite idle duration', async () => {
     const seconds = await readHidIdleSeconds();
     expect(Number.isFinite(seconds)).toBe(true);
