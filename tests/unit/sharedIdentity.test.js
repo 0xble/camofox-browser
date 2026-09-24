@@ -115,6 +115,21 @@ describe('SharedIdentityManager', () => {
     expect(manager.failedClosures.has('personal')).toBe(false);
   });
 
+  test('a pre-teardown cookie snapshot is reused by close and its failure leaves the context live', async () => {
+    const manager = new SharedIdentityManager({ identities: ['personal'], profileDir: root });
+    const live = context();
+    await manager.open('personal', async () => live);
+    live.cookies.mockRejectedValueOnce(new Error('cookies unavailable'));
+    await expect(manager.snapshotCookies('personal')).rejects.toThrow('cookies unavailable');
+    expect(manager.contexts.get('personal')).toBe(live);
+    expect(manager.closings.has('personal')).toBe(false);
+    const snapshot = await manager.snapshotCookies('personal');
+    live.cookies.mockClear();
+    await expect(manager.close('personal', { reason: 'headed_transition', cookies: snapshot })).resolves.toBe(true);
+    expect(live.cookies).not.toHaveBeenCalled();
+    expect(live.close).toHaveBeenCalledTimes(1);
+  });
+
   test('a cookie snapshot failure on non-transition closes without poisoning', async () => {
     const logger = { warn: jest.fn() };
     const manager = new SharedIdentityManager({ identities: ['personal'], profileDir: root, logger });

@@ -1333,6 +1333,10 @@ async function closeSession(userId, session, {
   if (!session) return;
 
   const key = normalizeUserId(userId);
+  const transition = reason === 'headed_transition' && session.sharedIdentity;
+  // A headed transition must be able to abort with the session untouched, so the
+  // only fallible pre-close step (the cookie snapshot) runs before any teardown.
+  const transitionCookies = transition ? await sharedIdentities.snapshotCookies(key) : undefined;
 
   // Drain locks BEFORE closing context — queued operations get clean "Tab destroyed"
   // (410) instead of messy "Target page closed" (500) errors.
@@ -1355,15 +1359,26 @@ async function closeSession(userId, session, {
   }
 
   if (session.sharedIdentity) {
-    const close = sharedIdentities.close(key, { checkpoint: reason !== 'storage_reset', reason });
-    if (reason === 'headed_transition') await close;
-    else await close.catch((err) => {
+    const close = sharedIdentities.close(key, { checkpoint: reason !== 'storage_reset', reason, cookies: transitionCookies });
+    if (transition) {
+      try { await close; }
+      catch (err) {
+        // Once the context is confirmed closed (e.g. only the checkpoint write
+        // failed), drop the dead session so stale tab IDs return 404.
+        if (!sharedIdentities.contexts.has(key) && !sharedIdentities.failedClosures.has(key)) {
+          session.tabGroups.clear();
+          if (sessions.get(key) === session) sessions.delete(key);
+          refreshActiveTabsGauge();
+        }
+        throw err;
+      }
+    } else await close.catch((err) => {
       log('warn', 'shared identity close failed', { userId: key, reason, error: err.message });
     });
   } else {
     await session.context.close().catch(() => {});
   }
-  if (reason === 'headed_transition') session.tabGroups.clear();
+  if (transition) session.tabGroups.clear();
   sessions.delete(key);
   if (!session.sharedIdentity) await pluginEvents.emitAsync('session:destroyed', { userId: key, reason });
 

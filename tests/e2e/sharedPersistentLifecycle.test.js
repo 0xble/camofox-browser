@@ -88,4 +88,13 @@ describe('shared persistent identity lifecycle over HTTP', () => {
     const checkpoint = JSON.parse(await fs.readFile(cookieCheckpointPath(profileDir, userId), 'utf8'));
     expect(checkpoint).toEqual(expect.objectContaining({ cleanShutdown: false }));
   }, 90000);
+
+  test('normal use launches headless, and /focus refuses a headless identity', async () => {
+    const created = await request('POST', '/tabs', { userId, sessionKey: 'headless-focus', url: `${testSiteUrl}/pageA` });
+    expect(created.response.status).toBe(200);
+    const focus = await request('POST', `/browser/identities/${userId}/focus`);
+    expect(focus.response.status).toBe(409);
+    expect(focus.data).toEqual({ error: 'identity is headless; use open' });
+    await request('DELETE', `/sessions/${userId}`);
+  }, 90000);
 });

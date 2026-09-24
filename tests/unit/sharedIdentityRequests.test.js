@@ -45,10 +45,4 @@ describe('shared identity HTTP tracking and transition gate', () => {
     f.setBusy(true);
     expect((await f.post('/tabs/tab-1/evaluate', { userId: 'other' })).status).toBe(409);
   });
-
-  test('headless focus returns 409', async () => {
-    const response = await f.post('/browser/identities/alias/focus', {});
-    expect(response.status).toBe(409);
-    expect(await response.json()).toEqual({ error: 'identity is headless; use open' });
-  });
 });
