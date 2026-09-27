@@ -25,7 +25,11 @@ leaves human-installed extensions alone.
   this module installed earlier but no longer configured are removed.
   A file already present for a configured id that this module did not install is treated as human-owned: skipped, never adopted, overwritten or removed. Ownership is recorded in
   `<profile>/camofox-managed-extensions.json`. Unset configuration writes
-  nothing. Ephemeral (non-shared) contexts are unaffected.
+  nothing. Invalid configuration (malformed JSON, or an invalid list for an
+  identity) never prunes: the affected profiles are launched with their
+  extensions left exactly as they were. When an identity pins
+  `uBlock0@raymondhill.net`, Camoufox's launch-time UBO download is excluded
+  for that launch, so uBlock Origin comes only from the pinned local copy. Ephemeral (non-shared) contexts are unaffected.
 - **Why profile install, not `addons`:** Camoufox's `addons` launch option loads
   unpacked temporary add-ons. Temporary add-ons can get a fresh internal UUID
   each launch, which orphans their extension storage. A signed `<id>.xpi` in

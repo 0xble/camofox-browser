@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import {
   MANAGED_EXTENSIONS_FILE,
+  extensionsForIdentity,
   parseSharedIdentityExtensions,
   syncProfileExtensions,
 } from '../../lib/profile-extensions.js';
@@ -57,14 +58,21 @@ describe('parseSharedIdentityExtensions', () => {
   ])('rejects only the identity with an invalid entry: %s', (_label, bad) => {
     const log = jest.fn();
     const parsed = parseSharedIdentityExtensions(JSON.stringify({ bad: [bad], good: [spec] }), {}, log);
-    expect(parsed).toEqual({ good: [spec] });
+    expect(parsed).toEqual({ bad: null, good: [spec] });
     expect(log).toHaveBeenCalledWith('error', expect.any(String), { identity: 'bad' });
   });
 
-  test('duplicate ids and malformed JSON fail closed', () => {
-    expect(parseSharedIdentityExtensions(JSON.stringify({ a: [spec, spec] }), {}, () => {})).toEqual({});
-    expect(parseSharedIdentityExtensions('{nope', {}, () => {})).toEqual({});
-    expect(parseSharedIdentityExtensions('[]', {}, () => {})).toEqual({});
+  test('duplicate ids mark the identity invalid; malformed JSON invalidates all', () => {
+    expect(parseSharedIdentityExtensions(JSON.stringify({ a: [spec, spec] }), {}, () => {})).toEqual({ a: null });
+    expect(parseSharedIdentityExtensions('{nope', {}, () => {})).toBeNull();
+    expect(parseSharedIdentityExtensions('[]', {}, () => {})).toBeNull();
+  });
+
+  test('extensionsForIdentity distinguishes unconfigured from invalid', () => {
+    expect(extensionsForIdentity({}, 'x')).toEqual([]);
+    expect(extensionsForIdentity({ x: [spec] }, 'x')).toEqual([spec]);
+    expect(extensionsForIdentity({ x: null }, 'x')).toBeNull();
+    expect(extensionsForIdentity(null, 'x')).toBeNull();
   });
 
   test('loadConfig exposes the parsed map and forwards the raw variable', () => {
@@ -202,5 +210,42 @@ describe('launchSharedIdentityContext', () => {
       getHostOS: () => 'macos', config: {}, events: { emitAsync: async () => {} },
     });
     expect(order).toEqual([['launch', ['a@test.xpi']]]);
+  });
+
+  const launchDeps = captured => ({
+    firefox: { launchPersistentContext: jest.fn(async () => ({})) },
+    launchOptions: async options => { captured.push(options); return { ...options }; },
+    os: { platform: () => 'darwin' }, getHostOS: () => 'macos', config: {},
+    events: { emitAsync: async () => {} },
+  });
+
+  test.each([
+    ['one identity list is invalid', env => JSON.stringify({ me: [{ ...env, sha256: 'typo' }] })],
+    ['the whole value is malformed JSON', () => '{nope'],
+  ])('invalid configuration never prunes managed extensions: %s', async (_label, makeEnv) => {
+    const a = await artifact('a.xpi', 'alpha');
+    await syncProfileExtensions(profile, [{ id: 'a@test', ...a }]);
+    const parsed = parseSharedIdentityExtensions(makeEnv({ id: 'a@test', ...a }), {}, () => {});
+    const log = jest.fn();
+    await launchSharedIdentityContext(profile, {
+      extensions: extensionsForIdentity(parsed, 'me'), log, ...launchDeps([]),
+    });
+    expect(await installed()).toEqual(['a@test.xpi']);
+    expect(log).toHaveBeenCalledWith('warn', expect.stringContaining('left unchanged'), { profilePath: profile });
+  });
+
+  test('a pinned local uBlock Origin disables the launch-time UBO download', async () => {
+    const ubo = await artifact('ubo.xpi', 'ubo');
+    const captured = [];
+    await launchSharedIdentityContext(profile, {
+      extensions: [{ id: 'uBlock0@raymondhill.net', ...ubo }], ...launchDeps(captured),
+    });
+    expect(captured[0].exclude_addons).toEqual(['UBO']);
+
+    const other = path.join(root, 'other');
+    await fs.mkdir(other);
+    const withoutUbo = [];
+    await launchSharedIdentityContext(other, { extensions: [], ...launchDeps(withoutUbo) });
+    expect(withoutUbo[0].exclude_addons).toBeUndefined();
   });
 });

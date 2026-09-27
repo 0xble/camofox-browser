@@ -19,6 +19,7 @@ import { sharedIdentityMetadata } from './lib/shared-identity-metadata.js';
 import { createSharedIdentityWindowOpener } from './lib/shared-identity-window.js';
 import { createSharedIdentityRequestTracker } from './lib/shared-identity-requests.js';
 import { launchSharedIdentityContext } from './lib/shared-identity-launch.js';
+import { extensionsForIdentity } from './lib/profile-extensions.js';
 import { windowSnapshot } from './lib/snapshot.js';
 import { extractPageStructure, attachStructureRefs } from './lib/page-structure.js';
 import {
@@ -1457,7 +1458,7 @@ async function closeAllSessions(reason, { clearDownloads = true, clearLocks = tr
 
 async function createSharedIdentityContext(userId, profilePath, { headed = false } = {}) {
   return launchSharedIdentityContext(profilePath, {
-    headed, extensions: CONFIG.sharedIdentityExtensions[userId] || [],
+    headed, extensions: extensionsForIdentity(CONFIG.sharedIdentityExtensions, userId),
     launchOptions, firefox, os, getHostOS, config: CONFIG, events: pluginEvents, log,
   });
 }
