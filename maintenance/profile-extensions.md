@@ -47,7 +47,10 @@ leaves human-installed extensions alone.
   launch does a brief headless warm-up launch and close first, so the real
   launch runs the extensions immediately. A `camofox-extensions-pending-activation`
   marker is written before the sync and removed only after the warm-up closes,
-  so a failed attempt, crash, or process restart still warms up on retry. Verified on 2026-09-26 against engine
+  so a failed attempt, crash, or process restart still warms up on retry. If the
+  warm-up browser's close is rejected without a close event, the error is
+  flagged `profileOwnershipUnconfirmed` and `SharedIdentityManager` blocks further
+  opens of that identity, as for any other unconfirmed close. Verified on 2026-09-26 against engine
   152.0.4-beta.30: without warm-up, launch 1 showed the Le Monde consent wall
   and loaded doubleclick. With warm-up, both were handled on the first real launch.
 - **Surfaces:** `lib/profile-extensions.js`, `lib/shared-identity-launch.js`,

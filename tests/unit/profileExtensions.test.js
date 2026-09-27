@@ -10,6 +10,7 @@ import {
   syncProfileExtensions,
 } from '../../lib/profile-extensions.js';
 import { PENDING_ACTIVATION_FILE, launchSharedIdentityContext } from '../../lib/shared-identity-launch.js';
+import { SharedIdentityManager } from '../../lib/shared-identity.js';
 import { loadConfig } from '../../lib/config.js';
 
 const ORIGINAL_ENV = { ...process.env };
@@ -344,6 +345,44 @@ describe('launchSharedIdentityContext', () => {
     const retry = [];
     await launchSharedIdentityContext(profile, { headed: true, extensions, ...launchDeps(retry) });
     expect(retry.map(options => options.headless)).toEqual([true, false]);
+  });
+
+  test('an unconfirmed warm-up close blocks further opens through SharedIdentityManager', async () => {
+    const a = await artifact('a.xpi', 'alpha');
+    const extensions = [{ id: 'a@test', ...a }];
+    const profileDir = path.join(root, 'shared-profiles');
+    const manager = new SharedIdentityManager({ identities: ['personal'], profileDir, logger: null });
+    const captured = [];
+    const deps = launchDeps(captured);
+    deps.firefox.launchPersistentContext = jest.fn(async () => ({
+      on: () => {},
+      close: async () => { throw new Error('close rejected'); },
+    }));
+    const create = profilePath => launchSharedIdentityContext(profilePath, { extensions, ...deps });
+    await expect(manager.open('personal', create)).rejects.toThrow('close rejected');
+    expect(manager.failedClosures.has('personal')).toBe(true);
+    await expect(manager.open('personal', create)).rejects.toThrow('profile ownership is unconfirmed');
+    // Only the warm-up browser was ever started.
+    expect(deps.firefox.launchPersistentContext).toHaveBeenCalledTimes(1);
+  });
+
+  test('a warm-up whose close rejects after the close event proceeds normally', async () => {
+    const a = await artifact('a.xpi', 'alpha');
+    const captured = [];
+    const deps = launchDeps(captured);
+    let calls = 0;
+    deps.firefox.launchPersistentContext = jest.fn(async () => {
+      calls += 1;
+      if (calls > 1) return { close: async () => {} };
+      const listeners = [];
+      return {
+        on: (event, fn) => { if (event === 'close') listeners.push(fn); },
+        close: async () => { listeners.forEach(fn => fn()); throw new Error('late rejection'); },
+      };
+    });
+    await launchSharedIdentityContext(profile, { extensions: [{ id: 'a@test', ...a }], ...deps });
+    expect(deps.firefox.launchPersistentContext).toHaveBeenCalledTimes(2);
+    await expect(fs.access(path.join(profile, PENDING_ACTIVATION_FILE))).rejects.toThrow();
   });
 
   test('no extensions, no warm-up launch', async () => {
