@@ -41,6 +41,18 @@ leaves human-installed extensions alone.
   A 2026-09-26 spike confirmed Mozilla-signed 1Password, I Still Don't Care
   About Cookies, and uBlock Origin XPIs installed with `active=true`,
   `location=app-profile`, and `signedState=2`.
+- **First-launch activation:** Firefox registers an extension newly sideloaded
+  into an existing profile during the startup that discovers it, but only runs
+  it from the next startup. Whenever a sync installs or replaces a file, the
+  launch does a brief headless warm-up launch and close first, so the real
+  launch runs the extensions immediately. A `camofox-extensions-pending-activation`
+  marker is written before the sync and removed only after the warm-up closes,
+  so a failed attempt, crash, or process restart still warms up on retry. If the
+  warm-up browser's close is rejected without a close event, the error is
+  flagged `profileOwnershipUnconfirmed` and `SharedIdentityManager` blocks further
+  opens of that identity, as for any other unconfirmed close. Verified on 2026-09-26 against engine
+  152.0.4-beta.30: without warm-up, launch 1 showed the Le Monde consent wall
+  and loaded doubleclick. With warm-up, both were handled on the first real launch.
 - **Surfaces:** `lib/profile-extensions.js`, `lib/shared-identity-launch.js`,
   `lib/config.js`, `server.js` (`createSharedIdentityContext`),
   `tests/unit/profileExtensions.test.js`.
