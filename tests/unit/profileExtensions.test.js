@@ -1,0 +1,169 @@
+import { afterEach, beforeEach, describe, expect, jest, test } from '@jest/globals';
+import crypto from 'node:crypto';
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import {
+  MANAGED_EXTENSIONS_FILE,
+  parseSharedIdentityExtensions,
+  syncProfileExtensions,
+} from '../../lib/profile-extensions.js';
+import { launchSharedIdentityContext } from '../../lib/shared-identity-launch.js';
+import { loadConfig } from '../../lib/config.js';
+
+const ORIGINAL_ENV = { ...process.env };
+const sha = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
+
+let root, artifacts, profile;
+beforeEach(async () => {
+  root = await fs.mkdtemp(path.join(os.tmpdir(), 'profile-extensions-'));
+  artifacts = path.join(root, 'artifacts');
+  profile = path.join(root, 'profile');
+  await fs.mkdir(artifacts);
+  await fs.mkdir(profile);
+});
+afterEach(async () => {
+  process.env = { ...ORIGINAL_ENV };
+  await fs.rm(root, { recursive: true, force: true });
+});
+
+async function artifact(name, content) {
+  const file = path.join(artifacts, name);
+  await fs.writeFile(file, content);
+  return { path: file, sha256: sha(Buffer.from(content)) };
+}
+const installed = async () => (await fs.readdir(path.join(profile, 'extensions')).catch(() => [])).sort();
+
+describe('parseSharedIdentityExtensions', () => {
+  const spec = { id: 'uBlock0@raymondhill.net', path: '/abs/ubo.xpi', sha256: 'a'.repeat(64) };
+
+  test('resolves aliases to the exact server-visible userId', () => {
+    const parsed = parseSharedIdentityExtensions(
+      JSON.stringify({ brianle: [spec], hermes_camofox_raw: [spec] }),
+      { brianle: 'hermes_camofox_personal' },
+    );
+    expect(parsed).toEqual({ hermes_camofox_personal: [spec], hermes_camofox_raw: [spec] });
+  });
+
+  test('unset or empty configuration manages nothing', () => {
+    expect(parseSharedIdentityExtensions(undefined)).toEqual({});
+    expect(parseSharedIdentityExtensions('')).toEqual({});
+  });
+
+  test.each([
+    ['relative artifact path', { ...spec, path: 'ubo.xpi' }],
+    ['non-hex checksum', { ...spec, sha256: 'not-a-checksum' }],
+    ['path-like extension id', { ...spec, id: '../escape' }],
+  ])('rejects only the identity with an invalid entry: %s', (_label, bad) => {
+    const log = jest.fn();
+    const parsed = parseSharedIdentityExtensions(JSON.stringify({ bad: [bad], good: [spec] }), {}, log);
+    expect(parsed).toEqual({ good: [spec] });
+    expect(log).toHaveBeenCalledWith('error', expect.any(String), { identity: 'bad' });
+  });
+
+  test('duplicate ids and malformed JSON fail closed', () => {
+    expect(parseSharedIdentityExtensions(JSON.stringify({ a: [spec, spec] }), {}, () => {})).toEqual({});
+    expect(parseSharedIdentityExtensions('{nope', {}, () => {})).toEqual({});
+    expect(parseSharedIdentityExtensions('[]', {}, () => {})).toEqual({});
+  });
+
+  test('loadConfig exposes the parsed map and forwards the raw variable', () => {
+    process.env.CAMOFOX_SHARED_IDENTITY_MAP = JSON.stringify({ brianle: 'hermes_camofox_personal' });
+    process.env.CAMOFOX_SHARED_IDENTITY_EXTENSIONS = JSON.stringify({ brianle: [spec] });
+    const config = loadConfig();
+    expect(config.sharedIdentityExtensions).toEqual({ hermes_camofox_personal: [spec] });
+    expect(config.serverEnv.CAMOFOX_SHARED_IDENTITY_EXTENSIONS).toBe(process.env.CAMOFOX_SHARED_IDENTITY_EXTENSIONS);
+  });
+
+  test('loadConfig defaults to no managed extensions', () => {
+    delete process.env.CAMOFOX_SHARED_IDENTITY_EXTENSIONS;
+    expect(loadConfig().sharedIdentityExtensions).toEqual({});
+  });
+});
+
+describe('syncProfileExtensions', () => {
+  test('no configuration and no prior record leaves the profile untouched', async () => {
+    const summary = await syncProfileExtensions(profile, []);
+    expect(summary).toEqual({ installed: [], unchanged: [], removed: [], rejected: [] });
+    expect(await fs.readdir(profile)).toEqual([]);
+  });
+
+  test('installs verified artifacts as <id>.xpi and records ownership', async () => {
+    const a = await artifact('a.xpi', 'alpha');
+    const b = await artifact('b.xpi', 'beta');
+    const summary = await syncProfileExtensions(profile, [
+      { id: 'a@test', ...a }, { id: '{00000000-0000-0000-0000-000000000000}', ...b },
+    ]);
+    expect(summary.installed).toHaveLength(2);
+    expect(await installed()).toEqual(['a@test.xpi', '{00000000-0000-0000-0000-000000000000}.xpi']);
+    expect(await fs.readFile(path.join(profile, 'extensions', 'a@test.xpi'), 'utf8')).toBe('alpha');
+    const record = JSON.parse(await fs.readFile(path.join(profile, MANAGED_EXTENSIONS_FILE), 'utf8'));
+    expect(record.ids.sort()).toEqual(['a@test', '{00000000-0000-0000-0000-000000000000}']);
+  });
+
+  test('checksum mismatch is never installed and keeps any prior copy', async () => {
+    const good = await artifact('a.xpi', 'v1');
+    await syncProfileExtensions(profile, [{ id: 'a@test', ...good }]);
+    await fs.writeFile(good.path, 'tampered');
+    const log = jest.fn();
+    const summary = await syncProfileExtensions(profile, [{ id: 'a@test', ...good }], log);
+    expect(summary.rejected).toEqual(['a@test']);
+    expect(await fs.readFile(path.join(profile, 'extensions', 'a@test.xpi'), 'utf8')).toBe('v1');
+    expect(log).toHaveBeenCalledWith('error', expect.stringContaining('checksum mismatch'), { id: 'a@test' });
+
+    const fresh = path.join(root, 'fresh');
+    await fs.mkdir(fresh);
+    await syncProfileExtensions(fresh, [{ id: 'a@test', ...good }], () => {});
+    expect(await fs.readdir(path.join(fresh, 'extensions'))).toEqual([]);
+  });
+
+  test('unchanged installs are not rewritten, so Firefox keeps its state', async () => {
+    const a = await artifact('a.xpi', 'alpha');
+    await syncProfileExtensions(profile, [{ id: 'a@test', ...a }]);
+    const target = path.join(profile, 'extensions', 'a@test.xpi');
+    const before = (await fs.stat(target)).ino;
+    const summary = await syncProfileExtensions(profile, [{ id: 'a@test', ...a }]);
+    expect(summary.unchanged).toEqual(['a@test']);
+    expect((await fs.stat(target)).ino).toBe(before);
+  });
+
+  test('a pinned version bump replaces the installed file', async () => {
+    const v1 = await artifact('a1.xpi', 'v1');
+    await syncProfileExtensions(profile, [{ id: 'a@test', ...v1 }]);
+    const v2 = await artifact('a2.xpi', 'v2');
+    const summary = await syncProfileExtensions(profile, [{ id: 'a@test', ...v2 }]);
+    expect(summary.installed).toEqual(['a@test']);
+    expect(await fs.readFile(path.join(profile, 'extensions', 'a@test.xpi'), 'utf8')).toBe('v2');
+  });
+
+  test('prunes only extensions it previously managed', async () => {
+    const a = await artifact('a.xpi', 'alpha');
+    const b = await artifact('b.xpi', 'beta');
+    await syncProfileExtensions(profile, [{ id: 'a@test', ...a }, { id: 'b@test', ...b }]);
+    await fs.writeFile(path.join(profile, 'extensions', 'human@installed.xpi'), 'mine');
+    const summary = await syncProfileExtensions(profile, [{ id: 'a@test', ...a }]);
+    expect(summary.removed).toEqual(['b@test']);
+    expect(await installed()).toEqual(['a@test.xpi', 'human@installed.xpi']);
+
+    const cleared = await syncProfileExtensions(profile, []);
+    expect(cleared.removed).toEqual(['a@test']);
+    expect(await installed()).toEqual(['human@installed.xpi']);
+  });
+});
+
+describe('launchSharedIdentityContext', () => {
+  test('synchronizes the identity extensions before Firefox starts', async () => {
+    const a = await artifact('a.xpi', 'alpha');
+    const order = [];
+    const firefox = { launchPersistentContext: jest.fn(async () => {
+      order.push(['launch', await installed()]);
+      return {};
+    }) };
+    await launchSharedIdentityContext(profile, {
+      extensions: [{ id: 'a@test', ...a }],
+      firefox, launchOptions: async options => ({ ...options }), os: { platform: () => 'darwin' },
+      getHostOS: () => 'macos', config: {}, events: { emitAsync: async () => {} },
+    });
+    expect(order).toEqual([['launch', ['a@test.xpi']]]);
+  });
+});

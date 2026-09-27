@@ -1455,9 +1455,10 @@ async function closeAllSessions(reason, { clearDownloads = true, clearLocks = tr
   }
 }
 
-async function createSharedIdentityContext(profilePath, { headed = false } = {}) {
+async function createSharedIdentityContext(userId, profilePath, { headed = false } = {}) {
   return launchSharedIdentityContext(profilePath, {
-    headed, launchOptions, firefox, os, getHostOS, config: CONFIG, events: pluginEvents,
+    headed, extensions: CONFIG.sharedIdentityExtensions[userId] || [],
+    launchOptions, firefox, os, getHostOS, config: CONFIG, events: pluginEvents, log,
   });
 }
 
@@ -1540,7 +1541,7 @@ async function getSession(userId, { trace = false, headed = false } = {}) {
       // only to ephemeral contexts. Shared profiles restore cookies explicitly.
       if (!sharedIdentity) await pluginEvents.emitAsync('session:creating', { userId: key, contextOptions });
       const context = sharedIdentity
-        ? await sharedIdentities.open(key, profilePath => createSharedIdentityContext(profilePath, { headed }))
+        ? await sharedIdentities.open(key, profilePath => createSharedIdentityContext(key, profilePath, { headed }))
         : await b.newContext(contextOptions);
 
       let tracePath = null;
