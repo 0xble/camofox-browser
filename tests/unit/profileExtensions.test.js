@@ -293,6 +293,18 @@ describe('launchSharedIdentityContext', () => {
   });
 
   test.each([
+    ['a managed extension set', [{ id: 'a@test' }], { allowAddonNewtab: true }],
+    ['an empty extension set', [], undefined],
+    ['an invalid configuration', null, undefined],
+  ])('Camoufox lets extensions open their own tabs only for %s', async (_label, specs, expected) => {
+    const extensions = specs && await Promise.all(specs.map(async spec => ({ ...spec, ...await artifact('a.xpi', 'alpha') })));
+    const captured = [];
+    await launchSharedIdentityContext(profile, { extensions, log: () => {}, ...launchDeps(captured) });
+    expect(captured.length).toBeGreaterThan(0);
+    for (const options of captured) expect(options.config).toEqual(expected);
+  });
+
+  test.each([
     ['launch options fail before Firefox starts', 'options'],
     ['the warm-up launch itself fails', 'warmup'],
     ['closing the warm-up browser fails', 'close'],

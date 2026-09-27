@@ -32,6 +32,14 @@ leaves human-installed extensions alone.
   extensions left exactly as they were. When an identity pins
   `uBlock0@raymondhill.net`, Camoufox's launch-time UBO download is excluded
   for that launch, so uBlock Origin comes only from the pinned local copy. Ephemeral (non-shared) contexts are unaffected.
+- **Extension-opened tabs:** the Camoufox engine rejects `tabs.create` and
+  `runtime.openOptionsPage` from extensions ("Rejected by Camoufox.") unless
+  its `allowAddonNewtab` config is set. 1Password awaits those calls while
+  starting, so without the flag its popup and full page stay blank (confirmed
+  2026-09-26 with the same XPI: welcome page with the flag, blank without).
+  Launches for an identity with a non-empty managed extension set therefore
+  pass `config: { allowAddonNewtab: true }`. Empty, unset, invalid and
+  ephemeral launches keep the engine default.
 - **Why profile install, not `addons`:** Camoufox's `addons` launch option loads
   unpacked temporary add-ons. Temporary add-ons can get a fresh internal UUID
   each launch, which orphans their extension storage. A signed `<id>.xpi` in
