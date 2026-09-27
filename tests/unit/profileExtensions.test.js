@@ -249,21 +249,52 @@ describe('launchSharedIdentityContext', () => {
     const order = [];
     const firefox = { launchPersistentContext: jest.fn(async () => {
       order.push(['launch', await installed()]);
-      return {};
+      return { close: async () => {} };
     }) };
     await launchSharedIdentityContext(profile, {
       extensions: [{ id: 'a@test', ...a }],
       firefox, launchOptions: async options => ({ ...options }), os: { platform: () => 'darwin' },
       getHostOS: () => 'macos', config: {}, events: { emitAsync: async () => {} },
     });
-    expect(order).toEqual([['launch', ['a@test.xpi']]]);
+    expect(order).toEqual([['launch', ['a@test.xpi']], ['launch', ['a@test.xpi']]]);
   });
 
   const launchDeps = captured => ({
-    firefox: { launchPersistentContext: jest.fn(async () => ({})) },
+    firefox: { launchPersistentContext: jest.fn(async () => ({ close: async () => {} })) },
     launchOptions: async options => { captured.push(options); return { ...options }; },
     os: { platform: () => 'darwin' }, getHostOS: () => 'macos', config: {},
     events: { emitAsync: async () => {} },
+  });
+
+  test('new or replaced extensions get a headless warm-up launch before the real one', async () => {
+    const a = await artifact('a.xpi', 'alpha');
+    const captured = [];
+    const deps = launchDeps(captured);
+    const closes = [];
+    deps.firefox.launchPersistentContext = jest.fn(async () => {
+      const context = { close: jest.fn(async () => closes.push(context)) };
+      return context;
+    });
+    const log = jest.fn();
+    const result = await launchSharedIdentityContext(profile, {
+      headed: true, extensions: [{ id: 'a@test', ...a }], log, ...deps,
+    });
+    expect(captured.map(options => options.headless)).toEqual([true, false]);
+    expect(deps.firefox.launchPersistentContext).toHaveBeenCalledTimes(2);
+    expect(closes).toHaveLength(1);
+    expect(closes[0]).not.toBe(result);
+    expect(log).toHaveBeenCalledWith('info', 'extension warm-up launch completed', { installed: ['a@test'] });
+
+    // Already-installed extensions start normally: a single launch only.
+    const again = [];
+    await launchSharedIdentityContext(profile, { extensions: [{ id: 'a@test', ...a }], ...launchDeps(again) });
+    expect(again).toHaveLength(1);
+  });
+
+  test('no extensions, no warm-up launch', async () => {
+    const captured = [];
+    await launchSharedIdentityContext(profile, { extensions: [], ...launchDeps(captured) });
+    expect(captured).toHaveLength(1);
   });
 
   test.each([
