@@ -68,6 +68,21 @@ describe('parseSharedIdentityExtensions', () => {
     expect(parseSharedIdentityExtensions('[]', {}, () => {})).toBeNull();
   });
 
+  test.each([
+    ['alias then raw userId, invalid first', { brianle: [{ ...spec, sha256: 'typo' }], hermes_camofox_personal: [] }],
+    ['raw userId then alias, invalid last', { hermes_camofox_personal: [], brianle: [{ ...spec, sha256: 'typo' }] }],
+    ['alias and raw userId both valid', { brianle: [spec], hermes_camofox_personal: [] }],
+    ['two aliases for one userId', { brianle: [spec], me: [] }],
+  ])('duplicate resolved identities are invalid regardless of order: %s', (_label, config) => {
+    const log = jest.fn();
+    const parsed = parseSharedIdentityExtensions(
+      JSON.stringify(config), { brianle: 'hermes_camofox_personal', me: 'hermes_camofox_personal' }, log,
+    );
+    expect(parsed).toEqual({ hermes_camofox_personal: null });
+    expect(extensionsForIdentity(parsed, 'hermes_camofox_personal')).toBeNull();
+    expect(log).toHaveBeenCalledWith('error', expect.stringContaining('more than once'), expect.any(Object));
+  });
+
   test('extensionsForIdentity distinguishes unconfigured from invalid', () => {
     expect(extensionsForIdentity({}, 'x')).toEqual([]);
     expect(extensionsForIdentity({ x: [spec] }, 'x')).toEqual([spec]);
