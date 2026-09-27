@@ -19,6 +19,7 @@ import { sharedIdentityMetadata } from './lib/shared-identity-metadata.js';
 import { createSharedIdentityWindowOpener } from './lib/shared-identity-window.js';
 import { createSharedIdentityRequestTracker } from './lib/shared-identity-requests.js';
 import { launchSharedIdentityContext } from './lib/shared-identity-launch.js';
+import { extensionsForIdentity } from './lib/profile-extensions.js';
 import { windowSnapshot } from './lib/snapshot.js';
 import { extractPageStructure, attachStructureRefs } from './lib/page-structure.js';
 import {
@@ -1455,9 +1456,10 @@ async function closeAllSessions(reason, { clearDownloads = true, clearLocks = tr
   }
 }
 
-async function createSharedIdentityContext(profilePath, { headed = false } = {}) {
+async function createSharedIdentityContext(userId, profilePath, { headed = false } = {}) {
   return launchSharedIdentityContext(profilePath, {
-    headed, launchOptions, firefox, os, getHostOS, config: CONFIG, events: pluginEvents,
+    headed, extensions: extensionsForIdentity(CONFIG.sharedIdentityExtensions, userId),
+    launchOptions, firefox, os, getHostOS, config: CONFIG, events: pluginEvents, log,
   });
 }
 
@@ -1540,7 +1542,7 @@ async function getSession(userId, { trace = false, headed = false } = {}) {
       // only to ephemeral contexts. Shared profiles restore cookies explicitly.
       if (!sharedIdentity) await pluginEvents.emitAsync('session:creating', { userId: key, contextOptions });
       const context = sharedIdentity
-        ? await sharedIdentities.open(key, profilePath => createSharedIdentityContext(profilePath, { headed }))
+        ? await sharedIdentities.open(key, profilePath => createSharedIdentityContext(key, profilePath, { headed }))
         : await b.newContext(contextOptions);
 
       let tracePath = null;
