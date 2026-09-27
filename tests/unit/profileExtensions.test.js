@@ -196,6 +196,38 @@ describe('syncProfileExtensions', () => {
     expect(await fs.readFile(path.join(profile, 'extensions', 'a@test.xpi'), 'utf8')).toBe('alpha');
   });
 
+  test.each([
+    ['the ownership claim before install', target => target.endsWith(MANAGED_EXTENSIONS_FILE), 1],
+    ['the final ownership record write', target => target.endsWith(MANAGED_EXTENSIONS_FILE), 2],
+    ['the extension file commit', target => target.endsWith('example@test.xpi'), 1],
+  ])('an interrupted install stays recoverable: failure at %s', async (_label, isTarget, failOnCall) => {
+    const a = await artifact('a.xpi', 'alpha');
+    const spec = [{ id: 'example@test', ...a }];
+    const realRename = fs.rename;
+    let calls = 0;
+    const spy = jest.spyOn(fs, 'rename').mockImplementation(async (from, to) => {
+      if (isTarget(to) && ++calls === failOnCall) {
+        throw Object.assign(new Error('injected'), { code: 'EIO' });
+      }
+      return realRename(from, to);
+    });
+    try {
+      await expect(syncProfileExtensions(profile, spec)).rejects.toThrow('injected');
+    } finally {
+      spy.mockRestore();
+    }
+    expect((await installed()).filter(name => name.includes('.tmp-'))).toEqual([]);
+
+    const retry = await syncProfileExtensions(profile, spec);
+    expect(retry.skipped).toEqual([]);
+    expect([...retry.installed, ...retry.unchanged]).toEqual(['example@test']);
+    expect(await installed()).toEqual(['example@test.xpi']);
+
+    const cleared = await syncProfileExtensions(profile, []);
+    expect(cleared.removed).toEqual(['example@test']);
+    expect(await installed()).toEqual([]);
+  });
+
   test('prunes only extensions it previously managed', async () => {
     const a = await artifact('a.xpi', 'alpha');
     const b = await artifact('b.xpi', 'beta');

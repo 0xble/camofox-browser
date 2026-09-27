@@ -24,7 +24,9 @@ leaves human-installed extensions alone.
   unreadable artifact is never installed, and any prior copy is kept. The bytes written are the bytes that were hashed. Extensions
   this module installed earlier but no longer configured are removed.
   A file already present for a configured id that this module did not install is treated as human-owned: skipped, never adopted, overwritten or removed. Ownership is recorded in
-  `<profile>/camofox-managed-extensions.json`. Unset configuration writes
+  `<profile>/camofox-managed-extensions.json` and journaled: an id is claimed
+  before its file is committed and released only after its file is removed, so
+  an interrupted sync never makes a Camofox-installed file look human-owned. Unset configuration writes
   nothing. Invalid configuration (malformed JSON, or an invalid list for an
   identity, including an alias and its userId both listed) never prunes: the affected profiles are launched with their
   extensions left exactly as they were. When an identity pins
