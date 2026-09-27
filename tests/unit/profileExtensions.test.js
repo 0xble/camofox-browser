@@ -9,7 +9,7 @@ import {
   parseSharedIdentityExtensions,
   syncProfileExtensions,
 } from '../../lib/profile-extensions.js';
-import { launchSharedIdentityContext } from '../../lib/shared-identity-launch.js';
+import { PENDING_ACTIVATION_FILE, launchSharedIdentityContext } from '../../lib/shared-identity-launch.js';
 import { loadConfig } from '../../lib/config.js';
 
 const ORIGINAL_ENV = { ...process.env };
@@ -289,6 +289,61 @@ describe('launchSharedIdentityContext', () => {
     const again = [];
     await launchSharedIdentityContext(profile, { extensions: [{ id: 'a@test', ...a }], ...launchDeps(again) });
     expect(again).toHaveLength(1);
+  });
+
+  test.each([
+    ['launch options fail before Firefox starts', 'options'],
+    ['the warm-up launch itself fails', 'warmup'],
+    ['closing the warm-up browser fails', 'close'],
+  ])('warm-up eligibility survives a failed attempt: %s', async (_label, failAt) => {
+    const a = await artifact('a.xpi', 'alpha');
+    const extensions = [{ id: 'a@test', ...a }];
+    const failing = [];
+    const deps = launchDeps(failing);
+    let armed = true;
+    const disarm = () => { const fire = armed; armed = false; return fire; };
+    const realOptions = deps.launchOptions;
+    deps.launchOptions = async options => {
+      if (failAt === 'options' && disarm()) throw new Error('injected');
+      return realOptions(options);
+    };
+    deps.firefox.launchPersistentContext = jest.fn(async () => {
+      if (failAt === 'warmup' && disarm()) throw new Error('injected');
+      return { close: async () => { if (failAt === 'close' && disarm()) throw new Error('injected'); } };
+    });
+    await expect(launchSharedIdentityContext(profile, { headed: true, extensions, ...deps })).rejects.toThrow('injected');
+    await expect(fs.access(path.join(profile, PENDING_ACTIVATION_FILE))).resolves.toBeUndefined();
+
+    // Retry (as after a failed attempt or process restart): files are now
+    // unchanged, yet the retry still warms up before the real headed launch.
+    const retry = [];
+    await launchSharedIdentityContext(profile, { headed: true, extensions, ...launchDeps(retry) });
+    expect(retry.map(options => options.headless)).toEqual([true, false]);
+    await expect(fs.access(path.join(profile, PENDING_ACTIVATION_FILE))).rejects.toThrow();
+
+    // Once activated, later launches start once.
+    const later = [];
+    await launchSharedIdentityContext(profile, { extensions, ...launchDeps(later) });
+    expect(later).toHaveLength(1);
+  });
+
+  test('a sync that dies after committing files still warms up on retry', async () => {
+    const a = await artifact('a.xpi', 'alpha');
+    const extensions = [{ id: 'a@test', ...a }];
+    const realRename = fs.rename;
+    const spy = jest.spyOn(fs, 'rename').mockImplementation(async (from, to) => {
+      const result = await realRename(from, to);
+      if (to.endsWith('a@test.xpi')) throw new Error('crash after commit');
+      return result;
+    });
+    try {
+      await expect(launchSharedIdentityContext(profile, { extensions, ...launchDeps([]) })).rejects.toThrow('crash after commit');
+    } finally {
+      spy.mockRestore();
+    }
+    const retry = [];
+    await launchSharedIdentityContext(profile, { headed: true, extensions, ...launchDeps(retry) });
+    expect(retry.map(options => options.headless)).toEqual([true, false]);
   });
 
   test('no extensions, no warm-up launch', async () => {
