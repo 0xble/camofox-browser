@@ -21,9 +21,9 @@ leaves human-installed extensions alone.
   to `<profile>/extensions/<id>.xpi`. Firefox then installs it as a normal
   profile extension, so its storage (for example a password manager's sign-in)
   persists across restarts. Unchanged files are not rewritten. A mismatched or
-  unreadable artifact is never installed, and any prior copy is kept. Extensions
+  unreadable artifact is never installed, and any prior copy is kept. The bytes written are the bytes that were hashed. Extensions
   this module installed earlier but no longer configured are removed.
-  Human-installed extensions are never touched. Ownership is recorded in
+  A file already present for a configured id that this module did not install is treated as human-owned: skipped, never adopted, overwritten or removed. Ownership is recorded in
   `<profile>/camofox-managed-extensions.json`. Unset configuration writes
   nothing. Ephemeral (non-shared) contexts are unaffected.
 - **Why profile install, not `addons`:** Camoufox's `addons` launch option loads

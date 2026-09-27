@@ -84,7 +84,7 @@ describe('parseSharedIdentityExtensions', () => {
 describe('syncProfileExtensions', () => {
   test('no configuration and no prior record leaves the profile untouched', async () => {
     const summary = await syncProfileExtensions(profile, []);
-    expect(summary).toEqual({ installed: [], unchanged: [], removed: [], rejected: [] });
+    expect(summary).toEqual({ installed: [], unchanged: [], removed: [], rejected: [], skipped: [] });
     expect(await fs.readdir(profile)).toEqual([]);
   });
 
@@ -134,6 +134,43 @@ describe('syncProfileExtensions', () => {
     const summary = await syncProfileExtensions(profile, [{ id: 'a@test', ...v2 }]);
     expect(summary.installed).toEqual(['a@test']);
     expect(await fs.readFile(path.join(profile, 'extensions', 'a@test.xpi'), 'utf8')).toBe('v2');
+  });
+
+  test.each([
+    ['identical bytes', 'alpha'],
+    ['different bytes', 'human copy'],
+  ])('never claims a pre-existing human install (%s)', async (_label, humanBytes) => {
+    const a = await artifact('a.xpi', 'alpha');
+    await fs.mkdir(path.join(profile, 'extensions'));
+    const target = path.join(profile, 'extensions', 'a@test.xpi');
+    await fs.writeFile(target, humanBytes);
+    const log = jest.fn();
+    const summary = await syncProfileExtensions(profile, [{ id: 'a@test', ...a }], log);
+    expect(summary.skipped).toEqual(['a@test']);
+    expect(summary.installed).toEqual([]);
+    expect(await fs.readFile(target, 'utf8')).toBe(humanBytes);
+    expect(log).toHaveBeenCalledWith('warn', expect.stringContaining('outside Camofox management'), { id: 'a@test' });
+
+    const cleared = await syncProfileExtensions(profile, []);
+    expect(cleared.removed).toEqual([]);
+    expect(await fs.readFile(target, 'utf8')).toBe(humanBytes);
+  });
+
+  test('installs exactly the verified bytes even if the artifact changes afterwards', async () => {
+    const a = await artifact('a.xpi', 'alpha');
+    const realReadFile = fs.readFile;
+    const spy = jest.spyOn(fs, 'readFile').mockImplementation(async (file, ...rest) => {
+      const result = await realReadFile(file, ...rest);
+      if (file === a.path) await fs.writeFile(a.path, 'swapped after hashing');
+      return result;
+    });
+    try {
+      const summary = await syncProfileExtensions(profile, [{ id: 'a@test', ...a }]);
+      expect(summary.installed).toEqual(['a@test']);
+    } finally {
+      spy.mockRestore();
+    }
+    expect(await fs.readFile(path.join(profile, 'extensions', 'a@test.xpi'), 'utf8')).toBe('alpha');
   });
 
   test('prunes only extensions it previously managed', async () => {
