@@ -20,8 +20,9 @@
  *
  * Each userId gets a deterministic SHA256-hashed subdirectory under profileDir.
  * Storage state is checkpointed on cookie import, session close, and shutdown.
- * On session creation, saved state is restored into the new Playwright context
- * via the session:creating hook (mutates contextOptions.storageState).
+ * On session creation, saved cookies are restored immediately. When IndexedDB
+ * persistence is disabled, localStorage is installed lazily by an init script so
+ * large multi-origin snapshots do not block context creation.
  *
  * indexedDB (default: false): opt in to capturing all serializable IndexedDB
  * records in storageState(). This can preserve IndexedDB-backed logins, but
@@ -32,6 +33,7 @@ import fs from 'node:fs/promises';
 import {
   getUserPersistencePaths,
   loadPersistedStorageState,
+  readPersistedStorageState,
   persistStorageState,
 } from '../../lib/persistence.js';
 import { importBootstrapCookies } from '../../lib/cookies.js';
@@ -65,11 +67,21 @@ export async function register(app, ctx, pluginConfig = {}) {
     warn: (msg, fields = {}) => log('warn', msg, fields),
   };
 
+  function localStorageByOrigin(storageState) {
+    const deferred = {};
+    for (const entry of storageState.origins || []) {
+      const localStorage = Array.isArray(entry?.localStorage) ? entry.localStorage : [];
+      if (entry?.origin && localStorage.length > 0) deferred[entry.origin] = localStorage;
+    }
+    return deferred;
+  }
+
   log('info', 'persistence plugin enabled', { profileDir, indexedDB });
 
   // Track active sessions and serialize checkpoints per user. Resetting users
   // skip new checkpoints until their live context and saved state are gone.
   const activeSessions = new Map(); // userId -> context
+  const deferredOriginSnapshots = new Map(); // userId -> persisted origins
   const checkpointPromises = new Map(); // userId -> latest queued checkpoint
   const resettingUsers = new Set();
 
@@ -82,11 +94,20 @@ export async function register(app, ctx, pluginConfig = {}) {
     const previous = checkpointPromises.get(userId) || Promise.resolve();
     const current = previous.catch(() => {}).then(async () => {
       if (resettingUsers.has(userId)) return;
+      let checkpointState = storageState;
+      if (!checkpointState && context && !indexedDB && deferredOriginSnapshots.has(userId)) {
+        checkpointState = await context.storageState();
+        const origins = new Map((checkpointState.origins || []).map(origin => [origin.origin, origin]));
+        for (const origin of deferredOriginSnapshots.get(userId) || []) {
+          if (origin?.origin && !origins.has(origin.origin)) origins.set(origin.origin, origin);
+        }
+        checkpointState = { ...checkpointState, origins: [...origins.values()] };
+      }
       const result = await persistStorageState({
         profileDir,
         userId,
-        context,
-        storageState,
+        context: checkpointState ? undefined : context,
+        storageState: checkpointState,
         logger,
         indexedDB,
       });
@@ -108,10 +129,29 @@ export async function register(app, ctx, pluginConfig = {}) {
   // Before session context is created: inject storageState if we have one saved
   events.on('session:creating', async ({ userId, contextOptions }) => {
     if (resettingUsers.has(userId)) return;
-    const storageStatePath = await loadPersistedStorageState(profileDir, userId, logger);
-    if (storageStatePath) {
-      contextOptions.storageState = storageStatePath;
-      log('info', 'restoring persisted storage state', { userId, storageStatePath });
+    deferredOriginSnapshots.delete(userId);
+    const persisted = await readPersistedStorageState(profileDir, userId, logger);
+    if (persisted) {
+      if (indexedDB) {
+        deferredOriginSnapshots.delete(userId);
+        contextOptions.storageState = persisted.storageStatePath;
+      } else {
+        // Playwright restores every origin in storageState synchronously while
+        // creating a context. Keep cookies on the fast path and install the
+        // localStorage snapshot lazily before the first page is created.
+        deferredOriginSnapshots.set(userId, persisted.storageState.origins || []);
+        contextOptions.storageState = {
+          cookies: persisted.storageState.cookies,
+          origins: [],
+        };
+        const deferred = localStorageByOrigin(persisted.storageState);
+        if (Object.keys(deferred).length > 0) contextOptions.__camofoxLocalStorage = deferred;
+      }
+      log('info', 'restoring persisted storage state', {
+        userId,
+        storageStatePath: persisted.storageStatePath,
+        deferredOrigins: Object.keys(contextOptions.__camofoxLocalStorage || {}).length,
+      });
     }
   });
 
@@ -159,12 +199,14 @@ export async function register(app, ctx, pluginConfig = {}) {
         await checkpoint(userId, context, reason).catch(() => {});
       }
       activeSessions.delete(userId);
+      deferredOriginSnapshots.delete(userId);
     }
   });
 
   // On session destroyed (post-close): cleanup tracking if not already done
   events.on('session:destroyed', async ({ userId }) => {
     activeSessions.delete(userId);
+    deferredOriginSnapshots.delete(userId);
   });
 
   // On shutdown: checkpoint all remaining sessions

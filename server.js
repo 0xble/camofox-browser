@@ -51,6 +51,7 @@ import { selectOption } from './lib/select-option.js';
 import { visibleSelectorCandidate } from './lib/visible-selector.js';
 import { normalizeBrowserKey } from './lib/browser-key.js';
 import { createPageWithSessionRecovery } from './lib/new-page-recovery.js';
+import { installDeferredLocalStorage } from './lib/deferred-local-storage.js';
 import { resolveUploadPaths } from './lib/upload-paths.js';
 import { acquirePageLease, hasActivePageLeases, isPageLeased, releasePageLease, setLeasedPage } from './lib/page-lease.js';
 import { createReporter, createTabHealthTracker, collectResourceSnapshot, classifyProxyError, browserProcessTreeRssMb, browserProcessNameRssMb } from './lib/reporter.js';
@@ -60,6 +61,7 @@ import { prepareExternalCamoufoxExecutable } from './lib/camoufox-executable.js'
 import { SharedIdentityManager } from './lib/shared-identity.js';
 import { readHidIdleSeconds } from './lib/macos-hid-idle.js';
 import { createSharedIdentityIdlePolicy } from './lib/shared-identity-idle.js';
+import { shouldCloseEmptySession } from './lib/session-reaper.js';
 import { isEligibleForAutomaticCleanup } from './lib/cleanup-policy.js';
 import { applySharedTabHandoff } from './lib/shared-tab-handoff.js';
 import { createVirtualDisplayRegistry } from './lib/plugin-capabilities.js';
@@ -1538,12 +1540,16 @@ async function getSession(userId, { trace = false, headed = false } = {}) {
         contextOptions.proxy = normalizePlaywrightProxy(sessionProxy);
         log('info', 'session proxy assigned', { userId: key, proxy: sessionProxy.server });
       }
-      // The legacy persistence plugin uses storageState and therefore applies
-      // only to ephemeral contexts. Shared profiles restore cookies explicitly.
-      if (!sharedIdentity) await pluginEvents.emitAsync('session:creating', { userId: key, contextOptions });
+      let deferredLocalStorage;
+      if (!sharedIdentity) {
+        await pluginEvents.emitAsync('session:creating', { userId: key, contextOptions });
+        deferredLocalStorage = contextOptions.__camofoxLocalStorage;
+        delete contextOptions.__camofoxLocalStorage;
+      }
       const context = sharedIdentity
         ? await sharedIdentities.open(key, profilePath => createSharedIdentityContext(key, profilePath, { headed }))
         : await b.newContext(contextOptions);
+      if (deferredLocalStorage) await installDeferredLocalStorage(context, deferredLocalStorage);
 
       let tracePath = null;
       if (trace) {
@@ -2075,10 +2081,9 @@ const SHARED_IDENTITY_GROUP = '__shared_identity__';
 
 function registerSharedIdentityPage(session, userId, page) {
   if (!session?.sharedIdentity || !page || page.isClosed?.()) return null;
+  const existing = findTabByPage(session, page);
+  if (existing) return existing.tabId;
   const group = getTabGroup(session, SHARED_IDENTITY_GROUP);
-  for (const [tabId, tabState] of group) {
-    if (tabState.page === page) return tabId;
-  }
   const tabId = fly.makeTabId();
   const tabState = createTabState(page);
   attachDownloadListener(tabState, tabId, log, pluginEvents, userId);
@@ -3397,7 +3402,7 @@ app.post('/tabs/:tabId/handoff', async (req, res) => {
  *             schema:
  *               $ref: '#/components/schemas/Error'
  *       503:
- *         description: Page creation unavailable or request deadline exceeded. Shared identity tabs are preserved; abandoned new pages are closed.
+ *         description: Page creation unavailable or request deadline exceeded. Shared identity tabs are preserved; late shared pages are retained for the next request and abandoned managed pages are closed.
  *         content:
  *           application/json:
  *             schema:
@@ -6528,7 +6533,7 @@ sharedIdleInterval.unref();
 setInterval(() => {
   const now = Date.now();
   for (const [userId, session] of Array.from(sessions.entries())) {
-    if (session.keepOpen) continue;
+    if (session.keepOpen || session._closing) continue;
     if (SESSION_TIMEOUT_MS > 0 && now - session.lastAccess > SESSION_TIMEOUT_MS) {
       session._closing = true;
       const idleMs = now - session.lastAccess;
@@ -6624,9 +6629,12 @@ setInterval(() => {
       }
     }
     // Clean up sessions with zero tabs remaining -- free browser context memory
-    if (session.tabGroups.size === 0 && !hasActivePageLeases(session)) {
+    if (shouldCloseEmptySession(session, Date.now(), { sessionTimeoutMs: SESSION_TIMEOUT_MS })) {
       session._closing = true;
-      log('info', 'session empty after tab reaper, closing', { userId });
+      log('info', 'session empty after tab reaper, closing', {
+        userId,
+        idleMs: Date.now() - session.lastAccess,
+      });
       closeSession(userId, session, { reason: 'tab_reaper_empty_session', clearDownloads: true, clearLocks: true }).catch(() => {});
       sessionsExpiredTotal.inc();
     }

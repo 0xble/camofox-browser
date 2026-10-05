@@ -79,14 +79,15 @@ test('expired session acquisition never creates or navigates a tab later', async
   expect(f.emitted).toEqual([]);
 });
 
-test('late new page is closed without registration or navigation', async () => {
+test('late shared new page is kept for a later request without registration or navigation', async () => {
   const pendingPage = deferred();
   const f = fixture({ pendingPage });
   await f.run();
   expect(f.res.statusCode).toBe(503);
   pendingPage.resolve(f.page);
   await flush();
-  expect(f.page.close).toHaveBeenCalledTimes(1);
+  expect(f.page.close).not.toHaveBeenCalled();
+  expect(f.session.pendingSharedPages).toEqual([f.page]);
   expect(f.session.tabGroups.has('new-task')).toBe(false);
   expect(f.scope.navigatePage).not.toHaveBeenCalled();
   expect(f.destroySession).not.toHaveBeenCalled();

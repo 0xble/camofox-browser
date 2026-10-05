@@ -4,6 +4,7 @@ import path from 'node:path';
 import { jest } from '@jest/globals';
 import { createPluginEvents } from '../../lib/plugins.js';
 import { register } from './index.js';
+import { getUserPersistencePaths } from '../../lib/persistence.js';
 
 describe('persistence plugin', () => {
   let tmpDir, events, ctx, mockApp;
@@ -45,13 +46,35 @@ describe('persistence plugin', () => {
     await fs.mkdir(userDir, { recursive: true });
     await fs.writeFile(storageStatePath, JSON.stringify({
       cookies: [{ name: 'sid', value: 'abc', domain: '.example.com', path: '/' }],
-      origins: [],
+      origins: [{ origin: 'https://example.com', localStorage: [{ name: 'token', value: 'abc' }] }],
     }));
 
     const contextOptions = { viewport: { width: 1280, height: 720 } };
     await events.emitAsync('session:creating', { userId: 'user-1', contextOptions });
 
+    expect(contextOptions.storageState).toEqual({
+      cookies: [{ name: 'sid', value: 'abc', domain: '.example.com', path: '/' }],
+      origins: [],
+    });
+    expect(contextOptions.__camofoxLocalStorage).toEqual({
+      'https://example.com': [{ name: 'token', value: 'abc' }],
+    });
+  });
+
+  test('keeps the storage-state file path when IndexedDB restore is enabled', async () => {
+    await register(mockApp, ctx, { profileDir: tmpDir, indexedDB: true });
+    const { userDir, storageStatePath } = getUserPersistencePaths(tmpDir, 'user-indexeddb');
+    await fs.mkdir(userDir, { recursive: true });
+    await fs.writeFile(storageStatePath, JSON.stringify({
+      cookies: [],
+      origins: [{ origin: 'https://example.com', localStorage: [{ name: 'token', value: 'abc' }] }],
+    }));
+
+    const contextOptions = {};
+    await events.emitAsync('session:creating', { userId: 'user-indexeddb', contextOptions });
+
     expect(contextOptions.storageState).toBe(storageStatePath);
+    expect(contextOptions.__camofoxLocalStorage).toBeUndefined();
   });
 
   test('checkpoints on session:cookies:import', async () => {
@@ -107,6 +130,36 @@ describe('persistence plugin', () => {
     await events.emitAsync('session:destroying', { userId: 'user-3', reason: 'test' });
 
     expect(mockContext.storageState).toHaveBeenCalled();
+  });
+
+  test('preserves deferred origins that were not opened before checkpoint', async () => {
+    await register(mockApp, ctx, { profileDir: tmpDir });
+    const { userDir, storageStatePath } = getUserPersistencePaths(tmpDir, 'user-roundtrip');
+    await fs.mkdir(userDir, { recursive: true });
+    await fs.writeFile(storageStatePath, JSON.stringify({
+      cookies: [{ name: 'sid', value: 'abc', domain: '.example.com', path: '/' }],
+      origins: [
+        { origin: 'https://opened.example', localStorage: [{ name: 'token', value: 'updated' }] },
+        { origin: 'https://untouched.example', localStorage: [{ name: 'token', value: 'preserve' }] },
+      ],
+    }));
+
+    const contextOptions = {};
+    await events.emitAsync('session:creating', { userId: 'user-roundtrip', contextOptions });
+    const context = {
+      storageState: jest.fn(async () => ({
+        cookies: [{ name: 'sid', value: 'abc', domain: '.example.com', path: '/' }],
+        origins: [{ origin: 'https://opened.example', localStorage: [{ name: 'token', value: 'changed' }] }],
+      })),
+    };
+    await events.emitAsync('session:created', { userId: 'user-roundtrip', context });
+    await events.emitAsync('session:destroying', { userId: 'user-roundtrip', reason: 'test' });
+
+    const saved = JSON.parse(await fs.readFile(storageStatePath, 'utf8'));
+    expect(saved.origins).toEqual([
+      { origin: 'https://opened.example', localStorage: [{ name: 'token', value: 'changed' }] },
+      { origin: 'https://untouched.example', localStorage: [{ name: 'token', value: 'preserve' }] },
+    ]);
   });
 
   test('DELETE storage_state destroys the live session without checkpointing and removes persisted state', async () => {

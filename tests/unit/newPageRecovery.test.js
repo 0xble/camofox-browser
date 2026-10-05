@@ -51,6 +51,62 @@ describe('createPageWithSessionRecovery', () => {
     expect(session.pageLeases.size).toBe(0);
   });
 
+  test('shared page creation can outlive the fixed inner timeout while the request remains active', async () => {
+    const timeoutError = Object.assign(new Error('new page timed out'), { code: 'timeout' });
+    const page = { id: 'slow-shared-page' };
+    const session = { sharedIdentity: true, context: { newPage: jest.fn().mockResolvedValue(page) } };
+
+    const result = await createPageWithSessionRecovery(recoveryOptions({
+      session,
+      signal: new AbortController().signal,
+      currentSession: () => session,
+      destroySession: jest.fn(),
+      getSession: jest.fn(),
+      withTimeout: jest.fn().mockRejectedValue(timeoutError),
+    }));
+
+    expect(result.page).toBe(page);
+    expect(result.session).toBe(session);
+  });
+
+  test('keeps a late shared page for the next request instead of closing it', async () => {
+    let resolvePage;
+    const pendingPage = new Promise(resolve => { resolvePage = resolve; });
+    const timeoutError = Object.assign(new Error('new page timed out'), { code: 'timeout' });
+    const expired = Object.assign(new Error('tab create timed out'), { code: 'request_timeout' });
+    const session = { sharedIdentity: true, context: { newPage: jest.fn(() => pendingPage) } };
+    const controller = new AbortController();
+
+    const first = createPageWithSessionRecovery(recoveryOptions({
+      session,
+      signal: controller.signal,
+      currentSession: () => session,
+      destroySession: jest.fn(),
+      getSession: jest.fn(),
+      withTimeout: jest.fn().mockRejectedValue(timeoutError),
+    }));
+    await new Promise(resolve => setImmediate(resolve));
+    controller.abort(expired);
+    await expect(first).rejects.toBe(expired);
+
+    const page = { id: 'late-shared-page', close: jest.fn() };
+    resolvePage(page);
+    await new Promise(resolve => setImmediate(resolve));
+
+    const next = await createPageWithSessionRecovery(recoveryOptions({
+      session,
+      signal: new AbortController().signal,
+      currentSession: () => session,
+      destroySession: jest.fn(),
+      getSession: jest.fn(),
+      withTimeout: jest.fn(() => { throw new Error('newPage should not be called'); }),
+    }));
+
+    expect(next.page).toBe(page);
+    expect(page.close).not.toHaveBeenCalled();
+    expect(session.context.newPage).toHaveBeenCalledTimes(1);
+  });
+
   test('preserves other tabs when a shared identity cannot create a page', async () => {
     const timeoutError = Object.assign(new Error('new page timed out'), { code: 'timeout' });
     const existingPage = { id: 'other-task-page' };

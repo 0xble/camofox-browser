@@ -2,7 +2,7 @@ import { jest } from '@jest/globals';
 import { withRequestDeadline } from '../../lib/request-deadline.js';
 import { createPageWithSessionRecovery } from '../../lib/new-page-recovery.js';
 
-test('aborts pending page creation and cleans up a late page without reopening the shared session', async () => {
+test('aborts pending shared page creation and keeps a late page for the next request', async () => {
   let resolvePage;
   const pending = new Promise(resolve => { resolvePage = resolve; });
   const session = { sharedIdentity: true, context: { newPage: () => pending } };
@@ -21,8 +21,8 @@ test('aborts pending page creation and cleans up a late page without reopening t
   const page = { id: 'late' };
   resolvePage(page);
   await new Promise(resolve => setImmediate(resolve));
-  expect(closePage).toHaveBeenCalledWith(session, page);
-  expect(closePage).toHaveBeenCalledTimes(1);
+  expect(closePage).not.toHaveBeenCalled();
+  expect(session.pendingSharedPages).toEqual([page]);
   expect(registerPage).not.toHaveBeenCalled();
   expect(destroySession).not.toHaveBeenCalled();
 });
