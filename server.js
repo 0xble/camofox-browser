@@ -1632,7 +1632,12 @@ async function createPageWithRecoveryForUser(userId, session, { trace = false, s
     userId: key,
     session,
     trace,
-    timeoutMs: NEW_PAGE_TIMEOUT_MS,
+    timeoutMs: label => {
+      if (label !== 'new page retry') return NEW_PAGE_TIMEOUT_MS;
+      const deadlineAt = signal?.deadlineAt;
+      if (!Number.isFinite(deadlineAt)) return NEW_PAGE_TIMEOUT_MS;
+      return Math.max(1, deadlineAt - Date.now());
+    },
     withTimeout,
     isTimeoutError,
     isDeadContextError,

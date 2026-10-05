@@ -179,6 +179,32 @@ describe('createPageWithSessionRecovery', () => {
     expect(replacement.context.newPage).toHaveBeenCalledTimes(1);
   });
 
+  test('resolves a separate timeout for the recovery retry', async () => {
+    const timeoutError = Object.assign(new Error('new page timed out'), { code: 'timeout' });
+    const first = { context: { newPage: jest.fn().mockRejectedValue(timeoutError) } };
+    const page = { id: 'retry-page' };
+    const replacement = { context: { newPage: jest.fn().mockResolvedValue(page) } };
+    const timeoutCalls = [];
+
+    const result = await createPageWithSessionRecovery(recoveryOptions({
+      session: first,
+      timeoutMs: label => label === 'new page retry' ? 23_000 : 10_000,
+      withTimeout: (promise, ms, label) => {
+        timeoutCalls.push({ ms, label });
+        return promise;
+      },
+      currentSession: () => first,
+      destroySession: jest.fn(),
+      getSession: jest.fn(async () => replacement),
+    }));
+
+    expect(result.page).toBe(page);
+    expect(timeoutCalls).toEqual([
+      { ms: 10_000, label: 'new page' },
+      { ms: 23_000, label: 'new page retry' },
+    ]);
+  });
+
   test('does not recover unrelated failures', async () => {
     const error = new Error('programming error');
     const session = { context: { newPage: jest.fn().mockRejectedValue(error) } };
