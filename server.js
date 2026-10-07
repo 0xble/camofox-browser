@@ -61,6 +61,7 @@ import { SharedIdentityManager } from './lib/shared-identity.js';
 import { readHidIdleSeconds } from './lib/macos-hid-idle.js';
 import { createSharedIdentityIdlePolicy } from './lib/shared-identity-idle.js';
 import { isEligibleForAutomaticCleanup } from './lib/cleanup-policy.js';
+import { closeSessionOnce } from './lib/session-close.js';
 import { applySharedTabHandoff } from './lib/shared-tab-handoff.js';
 import { createVirtualDisplayRegistry } from './lib/plugin-capabilities.js';
 import { killProcessIds } from './lib/browser-processes.js';
@@ -1385,13 +1386,18 @@ function clearSessionLocks(session) {
   refreshTabLockQueueDepth();
 }
 
-async function closeSession(userId, session, {
+function closeSession(userId, session, options = {}) {
+  // Expiry, the tab reaper and other cleanup paths can select the same session
+  // in one tick. They share the first teardown, so the persistence checkpoint
+  // runs once while the context is alive instead of once more after close.
+  return closeSessionOnce(session, () => closeSessionNow(userId, session, options));
+}
+
+async function closeSessionNow(userId, session, {
   reason = 'session_closed',
   clearDownloads = true,
   clearLocks = true,
 } = {}) {
-  if (!session) return;
-
   const key = normalizeUserId(userId);
   const transition = (reason === 'headed_transition' || reason === 'headed_release') && session.sharedIdentity;
   // A headed transition must be able to abort with the session untouched, so the
@@ -6528,13 +6534,14 @@ sharedIdleInterval.unref();
 setInterval(() => {
   const now = Date.now();
   for (const [userId, session] of Array.from(sessions.entries())) {
-    if (session.keepOpen) continue;
+    if (session._closing || session.keepOpen) continue;
     if (SESSION_TIMEOUT_MS > 0 && now - session.lastAccess > SESSION_TIMEOUT_MS) {
       session._closing = true;
       const idleMs = now - session.lastAccess;
       sessionsExpiredTotal.inc();
       pluginEvents.emit('session:expired', { userId, idleMs });
-      closeSession(userId, session, { reason: 'session_timeout', clearDownloads: true, clearLocks: true }).catch(() => {});
+      closeSession(userId, session, { reason: 'session_timeout', clearDownloads: true, clearLocks: true })
+        .catch(err => log('warn', 'session close failed; will retry', { userId, reason: 'session_timeout', error: err.message }));
       log('info', 'session expired', { userId });
     }
   }
@@ -6595,7 +6602,7 @@ if (FLY_MACHINE_ID) {
 setInterval(() => {
   const now = Date.now();
   for (const [userId, session] of sessions) {
-    if (session.keepOpen) continue;
+    if (session._closing || session.keepOpen) continue;
     for (const [listItemId, group] of session.tabGroups) {
       for (const [tabId, tabState] of group) {
         if (!tabState._lastReaperCheck) {
@@ -6627,7 +6634,8 @@ setInterval(() => {
     if (session.tabGroups.size === 0 && !hasActivePageLeases(session)) {
       session._closing = true;
       log('info', 'session empty after tab reaper, closing', { userId });
-      closeSession(userId, session, { reason: 'tab_reaper_empty_session', clearDownloads: true, clearLocks: true }).catch(() => {});
+      closeSession(userId, session, { reason: 'tab_reaper_empty_session', clearDownloads: true, clearLocks: true })
+        .catch(err => log('warn', 'session close failed; will retry', { userId, reason: 'tab_reaper_empty_session', error: err.message }));
       sessionsExpiredTotal.inc();
     }
   }
