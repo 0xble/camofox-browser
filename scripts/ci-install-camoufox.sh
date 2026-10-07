@@ -16,7 +16,9 @@ MIRROR_TAG=camoufox-backup-380139564
 ASSET="camoufox-${VERSION}-${RELEASE}-lin.x86_64.zip"
 SHA256=5720d45b894ce1770543de024c6f10d514b38be560fa2dc3226b3d8586caf672
 INSTALL_DIR="${CAMOUFOX_INSTALL_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/camoufox}"
-REPOSITORY="${GITHUB_REPOSITORY:-0xble/camofox-browser}"
+# The mirror lives in this fork. Do not derive it from GITHUB_REPOSITORY:
+# forks of the fork would look for a release they do not have.
+MIRROR_REPOSITORY="${CAMOUFOX_MIRROR_REPOSITORY:-0xble/camofox-browser}"
 
 expected_version="{\"version\":\"${VERSION}\",\"release\":\"${RELEASE}\"}"
 if [[ -f "$INSTALL_DIR/version.json" ]] && [[ "$(tr -d '[:space:]' < "$INSTALL_DIR/version.json")" == "$expected_version" ]]; then
@@ -26,7 +28,7 @@ fi
 
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
-gh release download "$MIRROR_TAG" --repo "$REPOSITORY" --pattern "$ASSET" --dir "$work"
+gh release download "$MIRROR_TAG" --repo "$MIRROR_REPOSITORY" --pattern "$ASSET" --dir "$work"
 echo "${SHA256}  ${work}/${ASSET}" | sha256sum --check --strict -
 
 rm -rf "$INSTALL_DIR"
