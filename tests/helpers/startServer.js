@@ -2,6 +2,7 @@ import path from 'path';
 import { fileURLToPath } from 'node:url';
 import { launchServer } from '../../lib/launcher.js';
 import { loadConfig } from '../../lib/config.js';
+import { DISPLAY, XAUTHORITY } from './test-env.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -29,14 +30,20 @@ async function startServer(port = 0, extraEnv = {}) {
   const pluginDir = path.join(__dirname, '../..');
 
   const log = {
-    info: (msg) => { if (cfg.serverEnv.DEBUG_SERVER) console.log(msg); },
-    error: (msg) => { if (cfg.serverEnv.DEBUG_SERVER) console.error(msg); },
+    // Always surface server warnings and errors so a failing request in CI
+    // shows its cause; everything else only with DEBUG_SERVER.
+    info: (msg) => { if (cfg.serverEnv.DEBUG_SERVER || /"level":"(warn|error)"/.test(msg)) console.log(msg); },
+    error: (msg) => { if (cfg.serverEnv.DEBUG_SERVER || /"level":"(warn|error)"|Error/.test(msg)) console.error(msg); },
   };
 
   serverProcess = launchServer({
     pluginDir,
     port: usePort,
-    env: { ...cfg.serverEnv, DEBUG_RESPONSES: 'false', ...extraEnv },
+    // Forward the X display and its authority cookie. Without them, a headed
+    // launch on Linux (xvfb-run in CI) only works after the browser pre-warm
+    // has started its own Xvfb and mutated the server's process.env, which is
+    // a startup race; DISPLAY alone fails X authorization.
+    env: { ...cfg.serverEnv, DEBUG_RESPONSES: 'false', ...(DISPLAY ? { DISPLAY } : {}), ...(XAUTHORITY ? { XAUTHORITY } : {}), ...extraEnv },
     log,
   });
 

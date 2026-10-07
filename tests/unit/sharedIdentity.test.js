@@ -126,7 +126,8 @@ describe('SharedIdentityManager', () => {
     const manager = new SharedIdentityManager({ identities: ['personal'], profileDir: root });
     await manager.open('personal', async () => context());
     await manager.close('personal');
-    manager.closedAt.set('personal', Date.now() - 44_850);
+    // 180 ms remain: enough for one 100 ms backoff, not for the next 200 ms one.
+    manager.closedAt.set('personal', Date.now() - 44_820);
     const locked = new Error('Firefox is already running, but is not responding');
     const launch = jest.fn(async () => { throw locked; });
     await expect(manager.open('personal', launch)).rejects.toBe(locked);

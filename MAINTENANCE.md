@@ -14,6 +14,11 @@ remote; `upstream` is fetch-only and must never receive pushes. The upstream MIT
 - This fork owns deployment plugins and its matching plugin configuration, not a
   Camoufox/Firefox engine fork or a Hermes configuration.
 - Deployment, installation, and runtime activation are distinct stages.
+- CI tests the deployed engine, not upstream's latest: `scripts/ci-install-camoufox.sh`
+  installs the checksummed Camoufox build from this fork's `camoufox-backup-*`
+  mirror release. Change that pin together with the deployed engine pin.
+- `agenthook-notify.yml` secrets are optional; the fork has no agenthook
+  configuration, so notification is skipped instead of failing its callers.
 
 ## Active patches
 
