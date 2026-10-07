@@ -2,6 +2,7 @@ import path from 'path';
 import { fileURLToPath } from 'node:url';
 import { launchServer } from '../../lib/launcher.js';
 import { loadConfig } from '../../lib/config.js';
+import { DISPLAY } from './test-env.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -36,7 +37,10 @@ async function startServer(port = 0, extraEnv = {}) {
   serverProcess = launchServer({
     pluginDir,
     port: usePort,
-    env: { ...cfg.serverEnv, DEBUG_RESPONSES: 'false', ...extraEnv },
+    // Forward DISPLAY like globalSetup does. Without it, a headed launch on
+    // Linux (xvfb-run in CI) only works after the browser pre-warm has started
+    // its own Xvfb and mutated the server's process.env, which is a startup race.
+    env: { ...cfg.serverEnv, DEBUG_RESPONSES: 'false', ...(DISPLAY ? { DISPLAY } : {}), ...extraEnv },
     log,
   });
 

@@ -41,8 +41,17 @@ describe('timed-out tab operations', () => {
     const { tabId } = await client.createTab();
 
     try {
+      const baselineCalls = (await client.getStats(tabId)).toolCalls;
       const first = client.evaluate(tabId, 'new Promise(() => {})').catch(error => error);
-      await wait(50);
+      // The queued request must arrive after the hung one holds the tab lock.
+      // A fixed sleep raced under host load: the queued evaluate could win the
+      // lock, return 42, and fail the test. The evaluate route counts the call
+      // synchronously before acquiring the lock, so wait for that counter.
+      const deadline = Date.now() + 4000;
+      while ((await client.getStats(tabId)).toolCalls <= baselineCalls) {
+        if (Date.now() > deadline) throw new Error('first evaluate never reached the tab lock');
+        await wait(20);
+      }
       const queued = client.evaluate(tabId, '42').catch(error => error);
       const [firstError, queuedError] = await Promise.all([first, queued]);
 
