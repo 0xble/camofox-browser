@@ -15,6 +15,11 @@ async function request(method, route, body) {
   return { response, data };
 }
 
+// A failed open must report the server's error body, not only its status.
+function expectOk({ response, data }) {
+  if (response.status !== 200) throw new Error(`expected 200, got ${response.status}: ${JSON.stringify(data)}`);
+}
+
 describe('shared persistent identity lifecycle over HTTP', () => {
   const userId = 'shared-lifecycle-e2e';
   const group = 'agent-work';
@@ -41,8 +46,7 @@ describe('shared persistent identity lifecycle over HTTP', () => {
 
   test('page events and task creation share one tab ID, serialize handoff, and group cleanup removes that exact page', async () => {
     const opened = await request('POST', `/browser/identities/${userId}/open`);
-    // Include the body so a failed open reports the server's error, not just a status.
-    expect({ status: opened.response.status, body: opened.data }).toMatchObject({ status: 200 });
+    expectOk(opened);
     expect(opened.data.tabId).toBeDefined();
 
     const created = await request('POST', '/tabs', {
@@ -99,8 +103,7 @@ describe('shared persistent identity lifecycle over HTTP', () => {
     expect(empty.data).toEqual({ ok: true, released: false });
 
     const opened = await request('POST', `/browser/identities/${userId}/open`);
-    // Include the body so a failed open reports the server's error, not just a status.
-    expect({ status: opened.response.status, body: opened.data }).toMatchObject({ status: 200 });
+    expectOk(opened);
     const human = await request('POST', `/tabs/${opened.data.tabId}/handoff`, { userId, handoff: 'human' });
     expect(human.response.status).toBe(200);
     const busy = await request('POST', `/browser/identities/${userId}/release`);
@@ -132,8 +135,7 @@ describe('shared persistent identity lifecycle over HTTP', () => {
 
   test('release followed by open serializes opposite actions and starts a fresh headed session', async () => {
     const first = await request('POST', `/browser/identities/${userId}/open`);
-    // Include the body so a failed open reports the server's error, not just a status.
-    expect({ status: first.response.status, body: first.data }).toMatchObject({ status: 200 });
+    expectOk(first);
     const release = request('POST', `/browser/identities/${userId}/release`);
     const reopen = request('POST', `/browser/identities/${userId}/open`);
     const [released, opened] = await Promise.all([release, reopen]);

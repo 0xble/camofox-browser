@@ -30,8 +30,10 @@ async function startServer(port = 0, extraEnv = {}) {
   const pluginDir = path.join(__dirname, '../..');
 
   const log = {
-    info: (msg) => { if (cfg.serverEnv.DEBUG_SERVER) console.log(msg); },
-    error: (msg) => { if (cfg.serverEnv.DEBUG_SERVER) console.error(msg); },
+    // Always surface server warnings and errors so a failing request in CI
+    // shows its cause; everything else only with DEBUG_SERVER.
+    info: (msg) => { if (cfg.serverEnv.DEBUG_SERVER || /"level":"(warn|error)"/.test(msg)) console.log(msg); },
+    error: (msg) => { if (cfg.serverEnv.DEBUG_SERVER || /"level":"(warn|error)"|Error/.test(msg)) console.error(msg); },
   };
 
   serverProcess = launchServer({
