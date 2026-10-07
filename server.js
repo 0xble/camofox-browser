@@ -21,6 +21,7 @@ import { createSharedIdentityRequestTracker } from './lib/shared-identity-reques
 import { launchSharedIdentityContext } from './lib/shared-identity-launch.js';
 import { extensionsForIdentity } from './lib/profile-extensions.js';
 import { windowSnapshot } from './lib/snapshot.js';
+import { chooseRefsAfterRebuild, iframeSnapshotBudgetMs, markRefsIncomplete, retainedRefsStillAttached } from './lib/snapshot-refs.js';
 import { extractPageStructure, attachStructureRefs } from './lib/page-structure.js';
 import {
   MAX_DOWNLOAD_INLINE_BYTES,
@@ -293,7 +294,10 @@ const IFRAME_SKIP_PATTERNS = [
   /arkose/i, /funcaptcha/i, /datadome/i,
 ];
 const MAX_IFRAMES_TO_PROCESS = 8;
-const IFRAME_SNAPSHOT_TIMEOUT_MS = 3000;
+// Iframe ariaSnapshot budgets are adaptive (lib/snapshot-refs.js): the time
+// left before the snapshot deadline is shared across the frames still to visit.
+const IFRAME_SNAPSHOT_MAX_MS = 8000;
+const IFRAME_SNAPSHOT_MIN_MS = 1000;
 
 // timingSafeCompare and isLoopbackAddress imported from lib/auth.js
 const timingSafeCompare = _timingSafeCompare;
@@ -2593,7 +2597,7 @@ async function buildRefs(page) {
   
   if (!page || page.isClosed()) {
     log('warn', 'buildRefs: page closed or invalid');
-    return refs;
+    return markRefsIncomplete(refs, 'page_closed');
   }
   
   // Google SERP fast path -- skip ariaSnapshot entirely
@@ -2622,7 +2626,8 @@ async function buildRefs(page) {
     clearTimeout(timerId);
     if (err.message === 'buildRefs_timeout') {
       log('warn', 'buildRefs: total timeout exceeded', { elapsed: Date.now() - start });
-      return refs;
+      // The inner build may still be filling `refs`; never hand out that map.
+      return markRefsIncomplete(new Map(), 'timeout');
     }
     throw err;
   }
@@ -2641,7 +2646,7 @@ async function _buildRefsInner(page, refs, start) {
   const remaining = BUILDREFS_TIMEOUT_MS - elapsed;
   if (remaining < 2000) {
     log('warn', 'buildRefs: insufficient time for ariaSnapshot', { elapsed });
-    return refs;
+    return markRefsIncomplete(refs, 'timeout');
   }
   
   let ariaYaml;
@@ -2650,18 +2655,18 @@ async function _buildRefsInner(page, refs, start) {
   } catch (err) {
     log('warn', 'ariaSnapshot failed, retrying');
     const retryBudget = BUILDREFS_TIMEOUT_MS - (Date.now() - start);
-    if (retryBudget < 2000) return refs;
+    if (retryBudget < 2000) return markRefsIncomplete(refs, 'aria_snapshot_failed');
     try {
       ariaYaml = await page.locator('body').ariaSnapshot({ timeout: Math.min(retryBudget - 500, 5000) });
     } catch (retryErr) {
       log('warn', 'ariaSnapshot retry failed, returning empty refs', { error: retryErr.message });
-      return refs;
+      return markRefsIncomplete(refs, 'aria_snapshot_failed');
     }
   }
   
   if (!ariaYaml) {
     log('warn', 'buildRefs: no aria snapshot');
-    return refs;
+    return markRefsIncomplete(refs, 'no_aria_snapshot');
   }
   
   const lines = ariaYaml.split('\n');
@@ -2698,23 +2703,31 @@ async function _buildRefsInner(page, refs, start) {
   // Process child frames to capture elements inside iframes (e.g., Stripe payment fields)
   const iframeRemaining = BUILDREFS_TIMEOUT_MS - (Date.now() - start);
   if (iframeRemaining > 2000 && refCounter <= MAX_SNAPSHOT_NODES) {
-    const childFrames = page.frames().filter(f => f !== page.mainFrame());
+    const childFrames = snapshotCandidateFrames(page);
     let iframesProcessed = 0;
     
-    for (const frame of childFrames) {
+    for (const [index, frame] of childFrames.entries()) {
       if (iframesProcessed >= MAX_IFRAMES_TO_PROCESS) break;
       if (refCounter > MAX_SNAPSHOT_NODES) break;
       
       const frameUrl = frame.url();
       const frameName = frame.name();
-      
-      // Skip tracking/analytics iframes
-      if (IFRAME_SKIP_PATTERNS.some(p => p.test(frameUrl) || p.test(frameName))) continue;
-      // Skip about:blank and empty frames
-      if (!frameUrl || frameUrl === 'about:blank' || frameUrl === 'about:srcdoc') continue;
+      // Keep 250 ms for parsing and the response inside the build deadline.
+      const frameBudget = iframeSnapshotBudgetMs({
+        remainingMs: BUILDREFS_TIMEOUT_MS - (Date.now() - start) - 250,
+        framesLeft: Math.min(childFrames.length - index, MAX_IFRAMES_TO_PROCESS - iframesProcessed),
+        minMs: IFRAME_SNAPSHOT_MIN_MS,
+        maxMs: IFRAME_SNAPSHOT_MAX_MS,
+      });
+      if (!frameBudget) {
+        log('warn', 'buildRefs: snapshot deadline reached before all iframes', { skipped: childFrames.length - index });
+        break;
+      }
       
       try {
-        const frameYaml = await frame.locator('body').ariaSnapshot({ timeout: IFRAME_SNAPSHOT_TIMEOUT_MS });
+        const frameStart = Date.now();
+        const frameYaml = await frame.locator('body').ariaSnapshot({ timeout: frameBudget });
+        log('debug', 'buildRefs: iframe snapshot', { frameUrl: frameUrl.slice(0, 80), budgetMs: frameBudget, ms: Date.now() - frameStart });
         if (!frameYaml || frameYaml.trim().length < 10) continue;
         
         // Check if frame has any interactive elements
@@ -2752,8 +2765,8 @@ async function _buildRefsInner(page, refs, start) {
         
         log('debug', 'buildRefs: processed iframe', { frameName, frameUrl: frameUrl.slice(0, 80), refs: refCounter - 1 });
       } catch (err) {
-        // Frame might have navigated away or be inaccessible — skip silently
-        log('debug', 'buildRefs: iframe snapshot failed', { frameName, error: err.message?.slice(0, 80) });
+        // Frame might have navigated away or be inaccessible — skip it
+        log('debug', 'buildRefs: iframe snapshot failed', { frameName, frameUrl: frameUrl.slice(0, 80), budgetMs: frameBudget, error: err.message?.slice(0, 80) });
       }
     }
     
@@ -2765,10 +2778,22 @@ async function _buildRefsInner(page, refs, start) {
   return refs;
 }
 
+// Frames worth an ariaSnapshot: not tracking/analytics and not blank.
+function snapshotCandidateFrames(page) {
+  return page.frames().filter(frame => {
+    if (frame === page.mainFrame()) return false;
+    const frameUrl = frame.url();
+    const frameName = frame.name();
+    if (IFRAME_SKIP_PATTERNS.some(p => p.test(frameUrl) || p.test(frameName))) return false;
+    return Boolean(frameUrl) && frameUrl !== 'about:blank' && frameUrl !== 'about:srcdoc';
+  });
+}
+
 async function getAriaSnapshot(page) {
   if (!page || page.isClosed()) {
     return null;
   }
+  const start = Date.now();
   await waitForPageReady(page, {
     timeout: REFRESH_READY_TIMEOUT_MS,
     waitForNetwork: false,
@@ -2787,22 +2812,25 @@ async function getAriaSnapshot(page) {
   
   // --- IFRAME SUPPORT ---
   // Append accessible iframe content to the snapshot YAML
-  const childFrames = page.frames().filter(f => f !== page.mainFrame());
+  const childFrames = snapshotCandidateFrames(page);
   const iframeYamls = [];
   let iframesProcessed = 0;
   
-  for (const frame of childFrames) {
+  for (const [index, frame] of childFrames.entries()) {
     if (iframesProcessed >= MAX_IFRAMES_TO_PROCESS) break;
     
     const frameUrl = frame.url();
     const frameName = frame.name();
-    
-    // Skip tracking/analytics iframes
-    if (IFRAME_SKIP_PATTERNS.some(p => p.test(frameUrl) || p.test(frameName))) continue;
-    if (!frameUrl || frameUrl === 'about:blank' || frameUrl === 'about:srcdoc') continue;
+    const frameBudget = iframeSnapshotBudgetMs({
+      remainingMs: BUILDREFS_TIMEOUT_MS - (Date.now() - start) - 250,
+      framesLeft: Math.min(childFrames.length - index, MAX_IFRAMES_TO_PROCESS - iframesProcessed),
+      minMs: IFRAME_SNAPSHOT_MIN_MS,
+      maxMs: IFRAME_SNAPSHOT_MAX_MS,
+    });
+    if (!frameBudget) break;
     
     try {
-      const frameYaml = await frame.locator('body').ariaSnapshot({ timeout: IFRAME_SNAPSHOT_TIMEOUT_MS });
+      const frameYaml = await frame.locator('body').ariaSnapshot({ timeout: frameBudget });
       if (!frameYaml || frameYaml.trim().length < 10) continue;
       
       // Only include frames with interactive elements
@@ -2833,7 +2861,10 @@ async function getAriaSnapshot(page) {
   return mainYaml;
 }
 
-function refToLocator(page, ref, refs) {
+// strictFrame: an iframe ref whose frame is gone resolves to null instead of
+// falling back to a page-level match, so validation cannot mistake an
+// unrelated main-frame element for the recorded one.
+function refToLocator(page, ref, refs, { strictFrame = false } = {}) {
   const info = refs.get(ref);
   if (!info) return null;
   
@@ -2854,6 +2885,7 @@ function refToLocator(page, ref, refs) {
       locator = locator.nth(nth);
       return locator;
     }
+    if (strictFrame) return null;
     // Frame not found (navigated away?) — fall through to page-level resolution
     log('warn', 'refToLocator: frame not found for iframe ref', { ref, frameName, frameUrl: frameUrl?.slice(0, 60) });
   }
@@ -2871,7 +2903,6 @@ async function refreshTabRefs(tabState, options = {}) {
   const {
     reason = 'refresh',
     timeoutMs = null,
-    preserveExistingOnEmpty = true,
   } = options;
 
   const beforeUrl = tabState.page?.url?.() || '';
@@ -2890,16 +2921,34 @@ async function refreshTabRefs(tabState, options = {}) {
   }
 
   const afterUrl = tabState.page?.url?.() || beforeUrl;
-  if (preserveExistingOnEmpty && refreshedRefs.size === 0 && existingRefs.size > 0 && beforeUrl === afterUrl) {
-    log('warn', 'preserving previous refs after empty rebuild', {
-      reason,
+  try {
+    // An empty same-URL rebuild may be a failed capture after an SPA
+    // re-render. Previous refs are reused only if they still resolve to
+    // attached elements; otherwise a failed capture fails closed.
+    return await chooseRefsAfterRebuild({
+      rebuilt: refreshedRefs,
+      existing: existingRefs,
+      sameUrl: beforeUrl === afterUrl,
       url: afterUrl,
-      previousRefs: existingRefs.size,
+      validate: refs => retainedRefsStillAttached(refs, {
+        isAttached: async id => {
+          const locator = refToLocator(tabState.page, id, refs, { strictFrame: true });
+          return Boolean(locator) && (await locator.count()) > 0;
+        },
+      }),
+      onRetained: ({ failure, previousRefs }) => log('warn', 'reusing previous refs after empty rebuild; they still resolve', {
+        reason, url: afterUrl, previousRefs, captureFailure: failure,
+      }),
     });
-    return existingRefs;
+  } catch (err) {
+    if (err.code === 'refs_unavailable') {
+      // Never leave refs that failed validation for the next action.
+      tabState.refs = new Map();
+      tabState.lastSnapshot = null;
+      log('warn', 'refs unavailable after failed rebuild', { reason, url: afterUrl, previousRefs: err.previousRefs, captureFailure: err.reason });
+    }
+    throw err;
   }
-
-  return refreshedRefs;
 }
 
 
@@ -4079,6 +4128,12 @@ app.post('/tabs/:tabId/navigate', async (req, res) => {
  *           application/json:
  *             schema:
  *               $ref: '#/components/schemas/Error'
+ *       503:
+ *         description: Retryable. code=refs_unavailable when the page could not be captured and the previous refs no longer resolve.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
  */
 app.get('/tabs/:tabId/snapshot', async (req, res) => {
   try {
@@ -4512,8 +4567,8 @@ app.post('/tabs/:tabId/click', async (req, res) => {
       try {
         tabState.refs = await refreshTabRefs(tabState, { reason: 'post_click', timeoutMs: postClickBudget });
       } catch (e) {
-        if (e.message === 'post_click_refs_timeout' || e.message === 'buildRefs_timeout') {
-          log('warn', 'post-click buildRefs timed out, returning without refs', { budget: postClickBudget, elapsed: Date.now() - clickStart });
+        if (e.message === 'post_click_refs_timeout' || e.message === 'buildRefs_timeout' || e.code === 'refs_unavailable') {
+          log('warn', 'post-click refs unavailable, returning without refs', { budget: postClickBudget, elapsed: Date.now() - clickStart, error: e.message });
           tabState.refs = new Map();
         } else {
           throw e;
