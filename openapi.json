@@ -975,6 +975,16 @@
                 }
               }
             }
+          },
+          "503": {
+            "description": "Retryable. code=refs_unavailable when the page could not be captured and the previous refs no longer resolve.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           }
         }
       }
