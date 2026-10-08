@@ -15,7 +15,7 @@ import { createFlyHelpers } from './lib/fly.js';
 import { withRequestDeadline } from './lib/request-deadline.js';
 import { createPluginEvents, loadPlugins, typeEventPayload } from './lib/plugins.js';
 import { requireAuth, accessKeyMiddleware, timingSafeCompare as _timingSafeCompare, isLoopbackAddress as _isLoopbackAddress } from './lib/auth.js';
-import { sharedIdentityMetadata } from './lib/shared-identity-metadata.js';
+import { sharedIdentityMetadata, sharedIdentityIndicator } from './lib/shared-identity-metadata.js';
 import { createSharedIdentityWindowOpener } from './lib/shared-identity-window.js';
 import { createSharedIdentityRequestTracker } from './lib/shared-identity-requests.js';
 import { launchSharedIdentityContext } from './lib/shared-identity-launch.js';
@@ -60,7 +60,7 @@ import { prepareExternalCamoufoxExecutable } from './lib/camoufox-executable.js'
 import { SharedIdentityManager } from './lib/shared-identity.js';
 import { readHidIdleSeconds } from './lib/macos-hid-idle.js';
 import { createSharedIdentityIdlePolicy } from './lib/shared-identity-idle.js';
-import { isEligibleForAutomaticCleanup } from './lib/cleanup-policy.js';
+import { createProfileCleanupGuard, isEligibleForAutomaticCleanup } from './lib/cleanup-policy.js';
 import { applySharedTabHandoff } from './lib/shared-tab-handoff.js';
 import { createVirtualDisplayRegistry } from './lib/plugin-capabilities.js';
 import { killProcessIds } from './lib/browser-processes.js';
@@ -1391,62 +1391,72 @@ async function closeSession(userId, session, {
   clearLocks = true,
 } = {}) {
   if (!session) return;
+  // Several cleanup timers can observe the same empty session before the first
+  // close finishes. Share one teardown promise so persistence is checkpointed
+  // once, while the context is still alive, before any caller can close it.
+  if (session._closePromise) return session._closePromise;
 
-  const key = normalizeUserId(userId);
-  const transition = (reason === 'headed_transition' || reason === 'headed_release') && session.sharedIdentity;
-  // A headed transition must be able to abort with the session untouched, so the
-  // only fallible pre-close step (the cookie snapshot) runs before any teardown.
-  const transitionCookies = transition ? await sharedIdentities.snapshotCookies(key) : undefined;
+  const closePromise = (async () => {
+    const key = normalizeUserId(userId);
+    const transition = (reason === 'headed_transition' || reason === 'headed_release') && session.sharedIdentity;
+    // A headed transition must be able to abort with the session untouched, so the
+    // only fallible pre-close step (the cookie snapshot) runs before any teardown.
+    const transitionCookies = transition ? await sharedIdentities.snapshotCookies(key) : undefined;
 
-  // Drain locks BEFORE closing context — queued operations get clean "Tab destroyed"
-  // (410) instead of messy "Target page closed" (500) errors.
-  if (clearLocks) {
-    clearSessionLocks(session);
-  }
-
-  if (clearDownloads) {
-    await clearSessionDownloads(session).catch(() => {});
-  }
-
-  if (!session.sharedIdentity) await pluginEvents.emitAsync('session:destroying', { userId: key, reason });
-  if (session.tracePath) {
-    try {
-      await session.context.tracing.stop({ path: session.tracePath });
-      log('info', 'tracing saved', { userId: key, path: session.tracePath });
-    } catch (err) {
-      log('warn', 'tracing.stop failed', { userId: key, error: err.message });
+    // Drain locks BEFORE closing context — queued operations get clean "Tab destroyed"
+    // (410) instead of messy "Target page closed" (500) errors.
+    if (clearLocks) {
+      clearSessionLocks(session);
     }
-  }
 
-  if (session.sharedIdentity) {
-    session._intentionalClose = true;
-    const close = sharedIdentities.close(key, { checkpoint: reason !== 'storage_reset', reason, cookies: transitionCookies });
-    if (transition) {
-      try { await close; }
-      catch (err) {
-        session._intentionalClose = false;
-        // Once the context is confirmed closed (e.g. only the checkpoint write
-        // failed), drop the dead session so stale tab IDs return 404.
-        if (!sharedIdentities.contexts.has(key) && !sharedIdentities.failedClosures.has(key)) {
-          session.tabGroups.clear();
-          if (sessions.get(key) === session) sessions.delete(key);
-          refreshActiveTabsGauge();
-        }
-        throw err;
+    if (clearDownloads) {
+      await clearSessionDownloads(session).catch(() => {});
+    }
+
+    // For legacy contexts, session:destroying is the persistence checkpoint
+    // boundary. emitAsync must settle before context.close() is reached.
+    if (!session.sharedIdentity) await pluginEvents.emitAsync('session:destroying', { userId: key, reason });
+    if (session.tracePath) {
+      try {
+        await session.context.tracing.stop({ path: session.tracePath });
+        log('info', 'tracing saved', { userId: key, path: session.tracePath });
+      } catch (err) {
+        log('warn', 'tracing.stop failed', { userId: key, error: err.message });
       }
-    } else await close.catch((err) => {
-      session._intentionalClose = false;
-      log('warn', 'shared identity close failed', { userId: key, reason, error: err.message });
-    });
-  } else {
-    await session.context.close().catch(() => {});
-  }
-  if (transition) session.tabGroups.clear();
-  if (session.sharedIdentity) sharedIdentityLastUrls.delete(key);
-  if (sessions.get(key) === session) sessions.delete(key);
-  if (!session.sharedIdentity) await pluginEvents.emitAsync('session:destroyed', { userId: key, reason });
+    }
 
-  refreshActiveTabsGauge();
+    if (session.sharedIdentity) {
+      session._intentionalClose = true;
+      const close = sharedIdentities.close(key, { checkpoint: reason !== 'storage_reset', reason, cookies: transitionCookies });
+      if (transition) {
+        try { await close; }
+        catch (err) {
+          session._intentionalClose = false;
+          // Once the context is confirmed closed (e.g. only the checkpoint write
+          // failed), drop the dead session so stale tab IDs return 404.
+          if (!sharedIdentities.contexts.has(key) && !sharedIdentities.failedClosures.has(key)) {
+            session.tabGroups.clear();
+            if (sessions.get(key) === session) sessions.delete(key);
+            refreshActiveTabsGauge();
+          }
+          throw err;
+        }
+      } else await close.catch((err) => {
+        session._intentionalClose = false;
+        log('warn', 'shared identity close failed', { userId: key, reason, error: err.message });
+      });
+    } else {
+      await session.context.close().catch(() => {});
+    }
+    if (transition) session.tabGroups.clear();
+    if (session.sharedIdentity) sharedIdentityLastUrls.delete(key);
+    if (sessions.get(key) === session) sessions.delete(key);
+    if (!session.sharedIdentity) await pluginEvents.emitAsync('session:destroyed', { userId: key, reason });
+
+    refreshActiveTabsGauge();
+  })();
+  session._closePromise = closePromise;
+  return closePromise;
 }
 
 async function closeAllSessions(reason, { clearDownloads = true, clearLocks = true } = {}) {
@@ -1459,6 +1469,7 @@ async function closeAllSessions(reason, { clearDownloads = true, clearLocks = tr
 async function createSharedIdentityContext(userId, profilePath, { headed = false } = {}) {
   return launchSharedIdentityContext(profilePath, {
     headed, extensions: extensionsForIdentity(CONFIG.sharedIdentityExtensions, userId),
+    identityIndicator: sharedIdentityIndicator(CONFIG.sharedIdentityAliases, userId),
     launchOptions, firefox, os, getHostOS, config: CONFIG, events: pluginEvents, log,
   });
 }
@@ -6528,7 +6539,7 @@ sharedIdleInterval.unref();
 setInterval(() => {
   const now = Date.now();
   for (const [userId, session] of Array.from(sessions.entries())) {
-    if (session.keepOpen) continue;
+    if (session._closing || session.keepOpen) continue;
     if (SESSION_TIMEOUT_MS > 0 && now - session.lastAccess > SESSION_TIMEOUT_MS) {
       session._closing = true;
       const idleMs = now - session.lastAccess;
@@ -6624,7 +6635,7 @@ setInterval(() => {
       }
     }
     // Clean up sessions with zero tabs remaining -- free browser context memory
-    if (session.tabGroups.size === 0 && !hasActivePageLeases(session)) {
+    if (!session._closing && session.tabGroups.size === 0 && !hasActivePageLeases(session)) {
       session._closing = true;
       log('info', 'session empty after tab reaper, closing', { userId });
       closeSession(userId, session, { reason: 'tab_reaper_empty_session', clearDownloads: true, clearLocks: true }).catch(() => {});
@@ -7682,14 +7693,15 @@ const server = app.listen(PORT, CONFIG.bindHost || undefined, async () => {
 
   // Periodic cleanup is liveness-aware: a running browser's profile can look
   // stale by mtime while its storage is still in use.
+  const profileCleanupGuard = createProfileCleanupGuard(() => {
+    log('warn', 'skipped periodic firefox profile cleanup: live profile path unavailable');
+  });
   setInterval(() => {
     try {
       const profiles = browser ? profilePathsFromProcessSnapshot(snapshotOwnedBrowserProcesses(process.pid)) : [];
-      if (browser && profiles.size === 0) {
-        log('warn', 'skipped periodic firefox profile cleanup: live profile path unavailable');
-        return;
-      }
-      const cleaned = cleanupStaleFirefoxProfiles({ protectedPaths: profiles });
+      const protectedPaths = profileCleanupGuard({ browser, protectedPaths: profiles });
+      if (protectedPaths === null) return;
+      const cleaned = cleanupStaleFirefoxProfiles({ protectedPaths });
       if (cleaned.removed > 0) {
         log('info', 'periodic firefox profile cleanup', cleaned);
       }

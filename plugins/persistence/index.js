@@ -72,6 +72,7 @@ export async function register(app, ctx, pluginConfig = {}) {
   const activeSessions = new Map(); // userId -> context
   const checkpointPromises = new Map(); // userId -> latest queued checkpoint
   const resettingUsers = new Set();
+  const closingUsers = new Set(); // userIds with a pre-close checkpoint in progress
 
   /**
    * Checkpoint storage state to disk for a userId.
@@ -118,6 +119,7 @@ export async function register(app, ctx, pluginConfig = {}) {
   // After session is created: import bootstrap cookies if no persisted state,
   // and track the context for later checkpointing
   events.on('session:created', async ({ userId, context }) => {
+    closingUsers.delete(userId);
     activeSessions.set(userId, context);
 
     // If no persisted state was restored, try bootstrap cookies
@@ -151,13 +153,19 @@ export async function register(app, ctx, pluginConfig = {}) {
     }
   });
 
-  // On session destroying (pre-close): checkpoint while context is still alive
+  // On session destroying (pre-close): checkpoint while context is still alive.
+  // Teardown timers can race on an empty session; only the first close owner may
+  // start the serialized checkpoint, otherwise a second checkpoint can begin
+  // after the first owner has already closed the context.
   events.on('session:destroying', async ({ userId, reason }) => {
+    if (closingUsers.has(userId)) return;
+    closingUsers.add(userId);
     const context = activeSessions.get(userId);
-    if (context) {
-      if (reason !== 'storage_reset') {
+    try {
+      if (context && reason !== 'storage_reset') {
         await checkpoint(userId, context, reason).catch(() => {});
       }
+    } finally {
       activeSessions.delete(userId);
     }
   });

@@ -33,6 +33,9 @@ Camofox remains the single loopback-authenticated browser service at `127.0.0.1:
 8. The macOS HID reader invokes `ioreg -c IOHIDSystem` in an isolated child-process module and converts `HIDIdleTime` nanoseconds to seconds. Non-macOS platforms, command failures, and malformed output return no reading, so headed auto-release fails closed. Headless cleanup depends on agent activity, not HID.
 9. Automatic release uses the explicit release gate and retries on later ticks when busy. A manual window close invalidates only its exact context's session and tab IDs. Profile-lock relaunch retries are bounded to 45 seconds after a confirmed clean close; uncertain ownership never retries.
 10. The existing production click issue is explicitly out of scope. Console capture is deferred. No browser-engine source or engine pin changes are permitted.
+11. When `CAMOFOX_SHARED_IDENTITY_MAP` supplies a valid alias, headed launches
+    render that alias with a deterministic subtle color label in Firefox browser
+    chrome. The indicator is not page content and is absent from headless UI.
 
 ## Interfaces
 

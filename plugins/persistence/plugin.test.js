@@ -109,6 +109,35 @@ describe('persistence plugin', () => {
     expect(mockContext.storageState).toHaveBeenCalled();
   });
 
+  test('does not start a second checkpoint when empty-session teardown races', async () => {
+    await register(mockApp, ctx, { profileDir: tmpDir });
+
+    let releaseFirst;
+    let firstStarted;
+    const firstGate = new Promise(resolve => { releaseFirst = resolve; });
+    const firstCall = new Promise(resolve => { firstStarted = resolve; });
+    const mockContext = {
+      storageState: jest.fn(async ({ path: targetPath }) => {
+        firstStarted();
+        await firstGate;
+        await fs.writeFile(targetPath, JSON.stringify({ cookies: [], origins: [] }));
+      }),
+    };
+
+    await events.emitAsync('session:created', { userId: 'user-race', context: mockContext });
+    const firstDestroy = events.emitAsync('session:destroying', {
+      userId: 'user-race', reason: 'tab_reaper_empty_session',
+    });
+    await firstCall;
+    const secondDestroy = events.emitAsync('session:destroying', {
+      userId: 'user-race', reason: 'tab_reaper_empty_session',
+    });
+
+    releaseFirst();
+    await Promise.all([firstDestroy, secondDestroy]);
+    expect(mockContext.storageState).toHaveBeenCalledTimes(1);
+  });
+
   test('DELETE storage_state destroys the live session without checkpointing and removes persisted state', async () => {
     await register(mockApp, ctx, { profileDir: tmpDir });
 

@@ -28,6 +28,7 @@ describe('shared identity headed transition', () => {
     launcher = jest.fn((profile, { headed = false } = {}) => launchSharedIdentityContext(profile, {
       headed, firefox, launchOptions: async options => ({ ...options }), os: { platform: () => 'darwin' },
       getHostOS: () => 'macos', config: {}, events: { emitAsync: async () => {} },
+      identityIndicator: { alias: 'personal', displayName: 'Personal', accent: 'hsl(210 62% 38%)', background: 'hsl(210 72% 88%)', text: '#172033' },
     }));
     const getSession = jest.fn(async (userId, { headed = false } = {}) => {
       const context = await manager.open(userId, profile => launcher(profile, { headed }));
@@ -49,12 +50,30 @@ describe('shared identity headed transition', () => {
     const original = await opener.getSession('personal');
     expect(contexts[0].options.headless).toBe(true);
     const profile = launcher.mock.calls[0][0];
+    await expect(fs.readFile(path.join(profile, 'chrome', 'userChrome.css'), 'utf8')).rejects.toMatchObject({ code: 'ENOENT' });
+    await fs.mkdir(path.join(profile, 'chrome'), { recursive: true });
+    await fs.writeFile(path.join(profile, 'chrome', 'userChrome.css'), '/* human customization */\n');
     await opener.openWindow('personal');
     expect(contexts[1].options.headless).toBe(false);
     expect(launcher.mock.calls[1][0]).toBe(profile);
+    const indicatorCss = await fs.readFile(path.join(profile, 'chrome', 'userChrome.css'), 'utf8');
+    expect(indicatorCss).toContain('/* human customization */');
+    expect(indicatorCss).toMatch(/Camofox · Personal/);
+    expect(await fs.readFile(path.join(profile, 'user.js'), 'utf8')).toContain('toolkit.legacyUserProfileCustomizations.stylesheets');
     expect(original.context.close).toHaveBeenCalledTimes(1);
   });
 
+  test('removes only the managed indicator when returning to headless mode', async () => {
+    await opener.openWindow('personal');
+    const profile = launcher.mock.calls[0][0];
+    const userChrome = path.join(profile, 'chrome', 'userChrome.css');
+    await fs.appendFile(userChrome, '\n/* human customization */\n');
+    await opener.closeSession('personal', sessions.get('personal'));
+    await opener.getSession('personal');
+    const remaining = await fs.readFile(userChrome, 'utf8');
+    expect(remaining).toContain('/* human customization */');
+    expect(remaining).not.toContain('Camofox · Personal');
+  });
   test('checkpointed close, restored URL and session cookies, with old tabs discarded', async () => {
     const old = await opener.getSession('personal');
     old.lastUsedPage = fakePage('https://example.test/private');
