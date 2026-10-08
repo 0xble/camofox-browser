@@ -15,7 +15,7 @@ import { createFlyHelpers } from './lib/fly.js';
 import { withRequestDeadline } from './lib/request-deadline.js';
 import { createPluginEvents, loadPlugins, typeEventPayload } from './lib/plugins.js';
 import { requireAuth, accessKeyMiddleware, timingSafeCompare as _timingSafeCompare, isLoopbackAddress as _isLoopbackAddress } from './lib/auth.js';
-import { sharedIdentityMetadata } from './lib/shared-identity-metadata.js';
+import { sharedIdentityMetadata, sharedIdentityIndicator } from './lib/shared-identity-metadata.js';
 import { createSharedIdentityWindowOpener } from './lib/shared-identity-window.js';
 import { createSharedIdentityRequestTracker } from './lib/shared-identity-requests.js';
 import { launchSharedIdentityContext } from './lib/shared-identity-launch.js';
@@ -60,7 +60,7 @@ import { prepareExternalCamoufoxExecutable } from './lib/camoufox-executable.js'
 import { SharedIdentityManager } from './lib/shared-identity.js';
 import { readHidIdleSeconds } from './lib/macos-hid-idle.js';
 import { createSharedIdentityIdlePolicy } from './lib/shared-identity-idle.js';
-import { isEligibleForAutomaticCleanup } from './lib/cleanup-policy.js';
+import { createProfileCleanupGuard, isEligibleForAutomaticCleanup } from './lib/cleanup-policy.js';
 import { applySharedTabHandoff } from './lib/shared-tab-handoff.js';
 import { createVirtualDisplayRegistry } from './lib/plugin-capabilities.js';
 import { killProcessIds } from './lib/browser-processes.js';
@@ -1459,6 +1459,7 @@ async function closeAllSessions(reason, { clearDownloads = true, clearLocks = tr
 async function createSharedIdentityContext(userId, profilePath, { headed = false } = {}) {
   return launchSharedIdentityContext(profilePath, {
     headed, extensions: extensionsForIdentity(CONFIG.sharedIdentityExtensions, userId),
+    identityIndicator: sharedIdentityIndicator(CONFIG.sharedIdentityAliases, userId),
     launchOptions, firefox, os, getHostOS, config: CONFIG, events: pluginEvents, log,
   });
 }
@@ -7682,14 +7683,15 @@ const server = app.listen(PORT, CONFIG.bindHost || undefined, async () => {
 
   // Periodic cleanup is liveness-aware: a running browser's profile can look
   // stale by mtime while its storage is still in use.
+  const profileCleanupGuard = createProfileCleanupGuard(() => {
+    log('warn', 'skipped periodic firefox profile cleanup: live profile path unavailable');
+  });
   setInterval(() => {
     try {
       const profiles = browser ? profilePathsFromProcessSnapshot(snapshotOwnedBrowserProcesses(process.pid)) : [];
-      if (browser && profiles.size === 0) {
-        log('warn', 'skipped periodic firefox profile cleanup: live profile path unavailable');
-        return;
-      }
-      const cleaned = cleanupStaleFirefoxProfiles({ protectedPaths: profiles });
+      const protectedPaths = profileCleanupGuard({ browser, protectedPaths: profiles });
+      if (protectedPaths === null) return;
+      const cleaned = cleanupStaleFirefoxProfiles({ protectedPaths });
       if (cleaned.removed > 0) {
         log('info', 'periodic firefox profile cleanup', cleaned);
       }

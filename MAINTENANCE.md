@@ -53,6 +53,19 @@ together. Preserve these invariants when applying the shared adoption rules belo
 - Source synchronization does not prove installation. Deploy a separately
   verified immutable release from the landed fork and retain profile backups.
 
+### 2026-10-06 focused fork repair
+
+- Preserve CAMOFOX-002's headless-by-default and explicit headed handoff while
+  adding a browser-chrome-only alias/color indicator derived from
+  `CAMOFOX_SHARED_IDENTITY_MAP`; it does not inject page content or change
+  fingerprint-visible browser settings.
+- Periodic Firefox profile cleanup now fails closed on macOS, where the owned
+  browser process snapshot cannot expose profile arguments, and emits the
+  unavailable warning once per unavailable interval instead of on every tick.
+- CAMOFOX-005's pinned extension sync remains unchanged; its shared launch
+  surface now also writes the managed browser-chrome indicator without
+  overwriting existing profile preferences.
+
 On every maintenance run, fetch `origin` and `upstream` separately, resolve the
 live upstream default branch (currently `master`), and reconcile the maintained
 `master` with its latest tip while preserving the registered deployment patches.

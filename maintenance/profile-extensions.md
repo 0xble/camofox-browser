@@ -62,8 +62,12 @@ leaves human-installed extensions alone.
   152.0.4-beta.30: without warm-up, launch 1 showed the Le Monde consent wall
   and loaded doubleclick. With warm-up, both were handled on the first real launch.
 - **Surfaces:** `lib/profile-extensions.js`, `lib/shared-identity-launch.js`,
-  `lib/config.js`, `server.js` (`createSharedIdentityContext`),
+  `lib/shared-identity-metadata.js`, `lib/config.js`, `server.js` (`createSharedIdentityContext`),
   `tests/unit/profileExtensions.test.js`.
+- **Related fork adaptation (2026-10-06):** `lib/shared-identity-launch.js` also
+  writes the mapped identity's browser-chrome-only indicator before launch.
+  This is deliberately outside the extension sync contract: it does not alter
+  extension bytes, page content, headless behavior, or fingerprint surfaces.
 - **Upstream issue/PR:** None found on 2026-09-26. `jo-inc/camofox-browser` #2797
   (uBlock question, closed) and #5078 (`CAMOFOX_DISABLE_DEFAULT_ADDONS`, merged)
   are related. Neither supplies per-identity or persistent-profile extensions.
