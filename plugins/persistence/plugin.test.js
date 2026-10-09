@@ -3,6 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { jest } from '@jest/globals';
 import { createPluginEvents } from '../../lib/plugins.js';
+import { getUserPersistencePaths } from '../../lib/persistence.js';
 import { register } from './index.js';
 
 describe('persistence plugin', () => {
@@ -107,6 +108,154 @@ describe('persistence plugin', () => {
     await events.emitAsync('session:destroying', { userId: 'user-3', reason: 'test' });
 
     expect(mockContext.storageState).toHaveBeenCalled();
+  });
+
+  test('a late checkpoint cannot remove a replacement session context', async () => {
+    await register(mockApp, ctx, { profileDir: tmpDir });
+    let finishOld;
+    let oldStarted;
+    const oldGate = new Promise(resolve => { finishOld = resolve; });
+    const oldStart = new Promise(resolve => { oldStarted = resolve; });
+    const oldContext = {
+      storageState: jest.fn(async ({ path: targetPath }) => {
+        oldStarted();
+        await oldGate;
+        await fs.writeFile(targetPath, JSON.stringify({ cookies: [], origins: [] }));
+      }),
+    };
+    const replacementContext = {
+      storageState: jest.fn(async ({ path: targetPath }) => {
+        await fs.writeFile(targetPath, JSON.stringify({ cookies: [{ name: 'replacement' }], origins: [] }));
+      }),
+    };
+    await events.emitAsync('session:created', { userId: 'user-replaced', context: oldContext });
+    const destroying = events.emitAsync('session:destroying', { userId: 'user-replaced', reason: 'timeout' });
+    await oldStarted;
+    events.emit('session:created', { userId: 'user-replaced', context: replacementContext });
+    finishOld();
+    await destroying;
+
+    await events.emitAsync('session:cookies:import', { userId: 'user-replaced' });
+    expect(replacementContext.storageState).toHaveBeenCalled();
+  });
+
+  test('a later checkpoint proceeds after the chained wait bound', async () => {
+    jest.useFakeTimers();
+    try {
+      await register(mockApp, ctx, { profileDir: tmpDir });
+      let oldStarted;
+      const oldStart = new Promise(resolve => { oldStarted = resolve; });
+      const oldContext = {
+        storageState: jest.fn(async () => {
+          oldStarted();
+          await new Promise(() => {});
+        }),
+      };
+      let replacementStarted;
+      const replacementStart = new Promise(resolve => { replacementStarted = resolve; });
+      const replacementContext = {
+        storageState: jest.fn(async ({ path: targetPath }) => {
+          replacementStarted();
+          await fs.writeFile(targetPath, JSON.stringify({ cookies: [], origins: [] }));
+        }),
+      };
+      await events.emitAsync('session:created', { userId: 'user-chain', context: oldContext });
+      const first = events.emitAsync('session:cookies:import', { userId: 'user-chain' });
+      await oldStarted;
+      events.emit('session:created', { userId: 'user-chain', context: replacementContext });
+      const second = events.emitAsync('session:cookies:import', { userId: 'user-chain' });
+      await jest.advanceTimersByTimeAsync(10_001);
+      await replacementStart;
+      await second;
+      expect(replacementContext.storageState).toHaveBeenCalled();
+      // The original checkpoint remains unresolved, but it no longer blocks the replacement.
+      expect(first).toBeInstanceOf(Promise);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test('a checkpoint that finishes after a newer one committed is discarded', async () => {
+    jest.useFakeTimers();
+    try {
+      await register(mockApp, ctx, { profileDir: tmpDir });
+      let releaseOld;
+      let oldStarted;
+      const oldStart = new Promise(resolve => { oldStarted = resolve; });
+      const oldGate = new Promise(resolve => { releaseOld = resolve; });
+      const oldContext = {
+        storageState: jest.fn(async ({ path: targetPath }) => {
+          oldStarted();
+          await oldGate;
+          await fs.writeFile(targetPath, JSON.stringify({ cookies: [{ name: 'stale' }], origins: [] }));
+        }),
+      };
+      const newContext = {
+        storageState: jest.fn(async ({ path: targetPath }) => {
+          await fs.writeFile(targetPath, JSON.stringify({ cookies: [{ name: 'fresh' }], origins: [] }));
+        }),
+      };
+      await events.emitAsync('session:created', { userId: 'user-race', context: oldContext });
+      const first = events.emitAsync('session:cookies:import', { userId: 'user-race' });
+      await oldStart;
+      events.emit('session:created', { userId: 'user-race', context: newContext });
+      const second = events.emitAsync('session:cookies:import', { userId: 'user-race' });
+      await jest.advanceTimersByTimeAsync(10_001);
+      await second;
+      releaseOld();
+      await first;
+
+      const { storageStatePath, userDir } = getUserPersistencePaths(tmpDir, 'user-race');
+      const saved = JSON.parse(await fs.readFile(storageStatePath, 'utf8'));
+      expect(saved.cookies).toEqual([{ name: 'fresh' }]);
+      const leftovers = (await fs.readdir(userDir)).filter(name => name.includes('.tmp-'));
+      expect(leftovers).toEqual([]);
+      expect(ctx.log).toHaveBeenCalledWith('warn', 'late storage checkpoint discarded; a newer checkpoint superseded it',
+        expect.objectContaining({ userId: 'user-race' }));
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test('a checkpoint hung across a storage reset cannot restore the removed state', async () => {
+    jest.useFakeTimers();
+    try {
+      await register(mockApp, ctx, { profileDir: tmpDir });
+      const handler = mockApp.delete.mock.calls.find(c => c[0] === '/sessions/:userId/storage_state').at(-1);
+      let releaseOld;
+      let oldStarted;
+      const oldStart = new Promise(resolve => { oldStarted = resolve; });
+      const oldGate = new Promise(resolve => { releaseOld = resolve; });
+      const oldContext = {
+        storageState: jest.fn(async ({ path: targetPath }) => {
+          oldStarted();
+          await oldGate;
+          await fs.writeFile(targetPath, JSON.stringify({ cookies: [{ name: 'pre-reset' }], origins: [] }));
+        }),
+      };
+      await events.emitAsync('session:created', { userId: 'user-reset-race', context: oldContext });
+      const hung = events.emitAsync('session:cookies:import', { userId: 'user-reset-race' });
+      await oldStart;
+      // A second checkpoint queues behind the hung one. The reset waits only
+      // for this latest one, which gives up after its 10s bound.
+      const queued = events.emitAsync('session:cookies:import', { userId: 'user-reset-race' });
+
+      const res = { json: jest.fn(), status: jest.fn(function () { return this; }) };
+      const reset = handler({ params: { userId: 'user-reset-race' } }, res);
+      await jest.advanceTimersByTimeAsync(10_001);
+      await reset;
+      await queued;
+      expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ ok: true }));
+
+      releaseOld();
+      await hung;
+      const { storageStatePath, userDir } = getUserPersistencePaths(tmpDir, 'user-reset-race');
+      await expect(fs.access(storageStatePath)).rejects.toMatchObject({ code: 'ENOENT' });
+      const leftovers = (await fs.readdir(userDir).catch(() => [])).filter(name => name.includes('.tmp-'));
+      expect(leftovers).toEqual([]);
+    } finally {
+      jest.useRealTimers();
+    }
   });
 
   test('DELETE storage_state destroys the live session without checkpointing and removes persisted state', async () => {

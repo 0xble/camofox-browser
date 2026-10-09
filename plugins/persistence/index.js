@@ -35,6 +35,7 @@ import {
   persistStorageState,
 } from '../../lib/persistence.js';
 import { importBootstrapCookies } from '../../lib/cookies.js';
+import { settleWithin } from '../../lib/session-close.js';
 
 async function removeIfExists(p) {
   try {
@@ -71,6 +72,7 @@ export async function register(app, ctx, pluginConfig = {}) {
   // skip new checkpoints until their live context and saved state are gone.
   const activeSessions = new Map(); // userId -> context
   const checkpointPromises = new Map(); // userId -> latest queued checkpoint
+  const writeGenerations = new Map(); // userId -> generation allowed to commit
   const resettingUsers = new Set();
 
   /**
@@ -79,9 +81,16 @@ export async function register(app, ctx, pluginConfig = {}) {
   async function checkpoint(userId, context, reason, storageState) {
     if ((!context && !storageState) || resettingUsers.has(userId)) return;
 
-    const previous = checkpointPromises.get(userId) || Promise.resolve();
-    const current = previous.catch(() => {}).then(async () => {
+    const previous = checkpointPromises.get(userId);
+    const current = (async () => {
+      if (previous && !(await settleWithin(() => previous, 10_000))) {
+        log('warn', 'previous storage checkpoint timed out; continuing', { userId, reason, timeoutMs: 10_000 });
+      }
       if (resettingUsers.has(userId)) return;
+      // Claiming a write generation supersedes any checkpoint still hung past
+      // its wait bound: that one discards its capture instead of renaming it.
+      const generation = (writeGenerations.get(userId) || 0) + 1;
+      writeGenerations.set(userId, generation);
       const result = await persistStorageState({
         profileDir,
         userId,
@@ -89,12 +98,16 @@ export async function register(app, ctx, pluginConfig = {}) {
         storageState,
         logger,
         indexedDB,
+        shouldCommit: () => writeGenerations.get(userId) === generation && !resettingUsers.has(userId),
       });
+      if (result.reason === 'superseded') {
+        log('warn', 'late storage checkpoint discarded; a newer checkpoint superseded it', { userId, reason });
+      }
       if (result.persisted) {
         log('info', 'storage state persisted', { userId, reason, path: result.storageStatePath });
       }
       return result;
-    });
+    })();
     checkpointPromises.set(userId, current);
     try {
       return await current;
@@ -158,7 +171,7 @@ export async function register(app, ctx, pluginConfig = {}) {
       if (reason !== 'storage_reset') {
         await checkpoint(userId, context, reason).catch(() => {});
       }
-      activeSessions.delete(userId);
+      if (activeSessions.get(userId) === context) activeSessions.delete(userId);
     }
   });
 
@@ -182,6 +195,9 @@ export async function register(app, ctx, pluginConfig = {}) {
     }
 
     resettingUsers.add(userId);
+    // Invalidate every checkpoint already in flight, including one hung past
+    // its wait bound, so none can restore the state this reset removes.
+    writeGenerations.set(userId, (writeGenerations.get(userId) || 0) + 1);
     try {
       const clearedLive = await ctx.destroySession(userId, { reason: 'storage_reset' });
       await checkpointPromises.get(userId)?.catch(() => {});

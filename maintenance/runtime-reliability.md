@@ -34,3 +34,42 @@ regression passes against the same failure mode, then retire the local repair.
 - **Regression:** `NODE_OPTIONS=--experimental-vm-modules npx jest tests/unit/sessionClose.test.js tests/unit/sessionDestroyingEvent.test.js plugins/persistence`.
 - **Rollback:** revert the repair commit. Persisted state is unaffected.
 - **Retire when:** upstream serializes concurrent session closes.
+
+#### Bounded session close
+
+- **Behavior:** `teardownEphemeralSession()` in `lib/session-close.js` bounds
+  every step of a non-shared session close at 10 s: the `session:destroying`
+  checkpoint, `tracing.stop`, and `context.close()`. When the context does not
+  close in time, each page is closed with `runBeforeUnload: false` and its own
+  2 s bound. The session and its tab groups are always removed from the
+  registry, and timeouts log `session close step timed out` or
+  `session context close timed out; closed pages individually`.
+- **Evidence:** on 2026-10-09 `hermes_51df174154` logged `session expired` at
+  01:57:20Z with no `storage state persisted` after it, while its tab
+  `78b10665` had a content process at 100% CPU. The `session_timeout`
+  checkpoint only logged at 02:40:24Z, seconds after that process was killed,
+  so the teardown was blocked inside the checkpoint (`storageState()` evaluates
+  in every page) for 43 minutes, with `context.close()` unbounded behind it.
+  `_closing` stopped the timers from retrying, and at 02:09Z `getSession`
+  replaced the stuck session, which left its context tracked by nothing.
+- **Surfaces:** `server.js` (`closeSessionNow`), `lib/session-close.js`,
+  `tests/unit/sessionCloseBounded.test.js`.
+- **Regression:** `NODE_OPTIONS=--experimental-vm-modules npx jest tests/unit/sessionCloseBounded.test.js`.
+- **Rollback:** revert the repair commit.
+- **Retire when:** upstream bounds ephemeral session teardown.
+
+#### Idle tabs in non-shared sessions
+
+- **Behavior:** the 60 s idle sweep also closes non-shared tabs whose agent has
+  been inactive for `CAMOFOX_HIDDEN_TAB_IDLE_MIN` (default 30, `0` disables),
+  even while the session stays alive through a sibling tab. It reuses the
+  shared-identity rules in `lib/idle-tabs.js` (`tabClosable`): never the most
+  recent tab, nor a tab with an active or queued lock, a page lease, a download
+  or a human handoff. Activity is any `/tabs/:tabId` request, or a tool call
+  counted since the previous sweep.
+- **Surfaces:** `server.js` (activity middleware, idle sweep interval),
+  `lib/idle-tabs.js`, `tests/unit/idleTabs.test.js`.
+- **Regression:** `NODE_OPTIONS=--experimental-vm-modules npx jest tests/unit/idleTabs.test.js`.
+- **Rollback:** set `CAMOFOX_HIDDEN_TAB_IDLE_MIN=0` to disable all idle-tab
+  cleanup, or revert the repair commit.
+- **Retire when:** upstream closes idle tabs inside live sessions.
