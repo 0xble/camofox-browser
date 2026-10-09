@@ -5,6 +5,7 @@ import { withRequestDeadline } from '../../lib/request-deadline.js';
 import { createPageWithSessionRecovery } from '../../lib/new-page-recovery.js';
 import { releasePageLease } from '../../lib/page-lease.js';
 import { isTimeoutError } from '../../lib/browser-errors.js';
+import { createPageRegistry } from '../../lib/page-registry.js';
 
 // Run the actual registered route with a deterministic browser transport. This
 // avoids launching or touching any real shared identity/profile in failure tests.
@@ -20,16 +21,19 @@ const flush = () => new Promise(resolve => setImmediate(resolve));
 
 function fixture({ initialSession, pendingPage, navigation } = {}) {
   let handler;
-  const page = { url: () => 'https://fixture.invalid/', close: jest.fn(async () => {}) };
+  const page = { url: () => 'https://fixture.invalid/', close: jest.fn(async () => {}), on: () => {} };
   const session = { sharedIdentity: true, tabGroups: new Map([['other-task', new Map([['other', { page: {} }]])]]),
     context: { newPage: jest.fn(() => pendingPage?.promise || Promise.resolve(page)) } };
   const destroySession = jest.fn();
   const closePage = jest.fn(async (_session, latePage) => latePage.close());
   const emitted = [];
+  const sessions = new Map([['shared', session]]);
+  const registry = createPageRegistry({ sessions, makeTabId: () => 'new-tab',
+    createTabState: created => ({ page: created, visitedUrls: new Set() }), attachDownloadListener: () => {} });
   const scope = {
     app: { post: (_path, callback) => { handler = callback; } },
     FLY_MACHINE_ID: null, MAX_TABS_PER_SESSION: 10, MAX_TABS_GLOBAL: 30,
-    sessions: new Map([['shared', session]]), normalizeUserId: value => value,
+    sessions, normalizeUserId: value => value,
     withRequestDeadline, requestTimeoutMs: () => 10,
     getSession: jest.fn(() => initialSession?.promise || Promise.resolve(session)),
     getTotalTabCount: () => 1,
@@ -39,14 +43,7 @@ function fixture({ initialSession, pendingPage, navigation } = {}) {
       currentSession: () => session, destroySession, getSession: async () => session,
       closePage, log: () => {},
     }),
-    getTabGroup: (current, key) => {
-      if (!current.tabGroups.has(key)) current.tabGroups.set(key, new Map());
-      return current.tabGroups.get(key);
-    },
-    findTabByPage: () => null,
-    fly: { makeTabId: () => 'new-tab' },
-    createTabState: created => ({ page: created, visitedUrls: new Set() }),
-    attachDownloadListener: () => {}, attachPopupHandler: () => {},
+    registerPage: registry.registerPage,
     releasePageLease, refreshActiveTabsGauge: () => {},
     validateUrl: () => null, withPageLoadDuration: (_name, fn) => fn(),
     navigatePage: jest.fn(() => navigation?.promise || Promise.resolve()),
