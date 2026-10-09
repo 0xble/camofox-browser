@@ -195,6 +195,9 @@ export async function register(app, ctx, pluginConfig = {}) {
     }
 
     resettingUsers.add(userId);
+    // Invalidate every checkpoint already in flight, including one hung past
+    // its wait bound, so none can restore the state this reset removes.
+    writeGenerations.set(userId, (writeGenerations.get(userId) || 0) + 1);
     try {
       const clearedLive = await ctx.destroySession(userId, { reason: 'storage_reset' });
       await checkpointPromises.get(userId)?.catch(() => {});

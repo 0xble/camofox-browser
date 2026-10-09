@@ -217,6 +217,47 @@ describe('persistence plugin', () => {
     }
   });
 
+  test('a checkpoint hung across a storage reset cannot restore the removed state', async () => {
+    jest.useFakeTimers();
+    try {
+      await register(mockApp, ctx, { profileDir: tmpDir });
+      const handler = mockApp.delete.mock.calls.find(c => c[0] === '/sessions/:userId/storage_state').at(-1);
+      let releaseOld;
+      let oldStarted;
+      const oldStart = new Promise(resolve => { oldStarted = resolve; });
+      const oldGate = new Promise(resolve => { releaseOld = resolve; });
+      const oldContext = {
+        storageState: jest.fn(async ({ path: targetPath }) => {
+          oldStarted();
+          await oldGate;
+          await fs.writeFile(targetPath, JSON.stringify({ cookies: [{ name: 'pre-reset' }], origins: [] }));
+        }),
+      };
+      await events.emitAsync('session:created', { userId: 'user-reset-race', context: oldContext });
+      const hung = events.emitAsync('session:cookies:import', { userId: 'user-reset-race' });
+      await oldStart;
+      // A second checkpoint queues behind the hung one. The reset waits only
+      // for this latest one, which gives up after its 10s bound.
+      const queued = events.emitAsync('session:cookies:import', { userId: 'user-reset-race' });
+
+      const res = { json: jest.fn(), status: jest.fn(function () { return this; }) };
+      const reset = handler({ params: { userId: 'user-reset-race' } }, res);
+      await jest.advanceTimersByTimeAsync(10_001);
+      await reset;
+      await queued;
+      expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ ok: true }));
+
+      releaseOld();
+      await hung;
+      const { storageStatePath, userDir } = getUserPersistencePaths(tmpDir, 'user-reset-race');
+      await expect(fs.access(storageStatePath)).rejects.toMatchObject({ code: 'ENOENT' });
+      const leftovers = (await fs.readdir(userDir).catch(() => [])).filter(name => name.includes('.tmp-'));
+      expect(leftovers).toEqual([]);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
   test('DELETE storage_state destroys the live session without checkpointing and removes persisted state', async () => {
     await register(mockApp, ctx, { profileDir: tmpDir });
 
