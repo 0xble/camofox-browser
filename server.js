@@ -55,6 +55,7 @@ import { normalizeBrowserKey } from './lib/browser-key.js';
 import { createPageWithSessionRecovery } from './lib/new-page-recovery.js';
 import { resolveUploadPaths } from './lib/upload-paths.js';
 import { acquirePageLease, hasActivePageLeases, isPageLeased, releasePageLease, setLeasedPage } from './lib/page-lease.js';
+import { createPageRegistry, findTabByPage, tabIdsForPage } from './lib/page-registry.js';
 import { createReporter, createTabHealthTracker, collectResourceSnapshot, classifyProxyError, browserProcessTreeRssMb, browserProcessNameRssMb } from './lib/reporter.js';
 import { mountDocs } from './lib/openapi.js';
 import { initSentry, captureException as sentryCaptureException, setupExpressErrorHandler as setupSentryErrorHandler, flush as sentryFlush } from './lib/sentry.js';
@@ -1655,15 +1656,6 @@ async function createPageWithRecoveryForUser(userId, session, { trace = false, s
   });
 }
 
-function getTabGroup(session, listItemId) {
-  let group = session.tabGroups.get(listItemId);
-  if (!group) {
-    group = new Map();
-    session.tabGroups.set(listItemId, group);
-  }
-  return group;
-}
-
 // Centralized error handler for route catch blocks.
 // Auto-destroys dead browser sessions and returns appropriate status codes.
 function isProxyError(err) {
@@ -1926,7 +1918,9 @@ async function recycleOldestTab(session, reqId, userId) {
 // candidate selection is never cut off.
 function sharedTabClosable(session, tabId, tab, latestTabId) {
   const lock = tabLocks.get(tabId);
+  // Never close a page that another tab ID still references.
   return tabId !== latestTabId && findTab(session, tabId)?.tabState === tab
+    && tabIdsForPage(session, tab.page).length === 1
     && !isPageLeased(session, tab.page) && !humanControlledTabs.has(tabId) && !(tab.activeDownloads > 0)
     && !lock?.active && !lock?.queue?.length;
 }
@@ -1997,16 +1991,6 @@ function findTab(session, tabId) {
   return null;
 }
 
-function findTabByPage(session, page) {
-  if (!session || !page) return null;
-  for (const [listItemId, group] of session.tabGroups) {
-    for (const [tabId, tabState] of group) {
-      if (tabState.page === page) return { tabId, tabState, listItemId, group };
-    }
-  }
-  return null;
-}
-
 // Return 404 or 410 depending on whether the browser restarted recently.
 // 410 Gone tells clients the tab existed but the browser crashed — create a new one.
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -2056,60 +2040,34 @@ function createTabState(page) {
   return tabState;
 }
 
-/**
- * Attach a popup handler to a managed page so that popups (target=_blank,
- * window.open) become tracked tabs rather than orphaned pages. (JO-2456)
- *
- * The handler registers the popup in the same session's '__popups__' tab group
- * and recursively attaches itself to the new page.
- */
-function attachPopupHandler(page, userId, sessionKey) {
-  page.on('popup', (popupPage) => {
-    const key = normalizeUserId(userId);
-    const currentSession = sessions.get(key);
-    if (!currentSession || currentSession._closing) return;
-
-    const popupTabId = fly.makeTabId();
-    const popupTabState = createTabState(popupPage);
-    attachDownloadListener(popupTabState, popupTabId, log, pluginEvents, key);
-    const popupGroup = getTabGroup(currentSession, sessionKey || '__popups__');
-    popupGroup.set(popupTabId, popupTabState);
-    currentSession.lastAccess = Date.now();
-    refreshActiveTabsGauge();
-    log('info', 'popup registered as managed tab', { userId: key, tabId: popupTabId, url: safePageUrl(popupPage) });
-    pluginEvents.emit('tab:created', { userId: key, tabId: popupTabId, page: popupPage, url: safePageUrl(popupPage) });
-    // Recursively handle popups from the popup
-    attachPopupHandler(popupPage, userId, sessionKey);
-  });
+function releaseTabId(tabId) {
+  humanControlledTabs.delete(tabId);
+  const lock = tabLocks.get(tabId);
+  if (lock) { lock.drain(); tabLocks.delete(tabId); refreshTabLockQueueDepth(); }
 }
 
-const SHARED_IDENTITY_GROUP = '__shared_identity__';
+// Every path that puts a page in a tab group goes through this registry, so
+// one Playwright page never holds two tab IDs (two locks, two download
+// listeners, and two reaper lifetimes for one page). Popups (JO-2456) become
+// tracked tabs in the opener's group.
+const pageRegistry = createPageRegistry({
+  sessions,
+  normalizeUserId,
+  makeTabId: () => fly.makeTabId(),
+  createTabState,
+  attachDownloadListener: (tabState, tabId, userId) => attachDownloadListener(tabState, tabId, log, pluginEvents, userId),
+  releaseTabId,
+  onChange: refreshActiveTabsGauge,
+  log,
+  emit: (event, payload) => pluginEvents.emit(event, payload),
+});
+
+function registerPage(session, userId, page, listItemId, options) {
+  return pageRegistry.registerPage(session, userId, page, listItemId, options);
+}
 
 function registerSharedIdentityPage(session, userId, page) {
-  if (!session?.sharedIdentity || !page || page.isClosed?.()) return null;
-  const group = getTabGroup(session, SHARED_IDENTITY_GROUP);
-  for (const [tabId, tabState] of group) {
-    if (tabState.page === page) return tabId;
-  }
-  const tabId = fly.makeTabId();
-  const tabState = createTabState(page);
-  attachDownloadListener(tabState, tabId, log, pluginEvents, userId);
-  group.set(tabId, tabState);
-  attachPopupHandler(page, userId, SHARED_IDENTITY_GROUP);
-  page.on?.('close', () => {
-    const found = findTab(session, tabId);
-    if (found?.tabState !== tabState) return;
-    found.group.delete(tabId);
-    if (!found.group.size) session.tabGroups.delete(found.listItemId);
-    humanControlledTabs.delete(tabId);
-    const lock = tabLocks.get(tabId);
-    if (lock) { lock.drain(); tabLocks.delete(tabId); refreshTabLockQueueDepth(); }
-    refreshActiveTabsGauge();
-  });
-  refreshActiveTabsGauge();
-  log('info', 'shared identity page registered', { userId, tabId });
-  pluginEvents.emit('tab:created', { userId, tabId, page, url: safePageUrl(page) });
-  return tabId;
+  return pageRegistry.registerSharedIdentityPage(session, userId, page);
 }
 
 function pressureHash(value) {
@@ -2299,15 +2257,11 @@ async function rotateGoogleTab(userId, sessionKey, tabId, previousTabState, reas
     await closeSession(key, oldSession, { reason: 'google_rotate_context', clearDownloads: true, clearLocks: true });
   }
   const session = await getSession(userId);
-  const group = getTabGroup(session, sessionKey);
   const { page, lease } = await createLeasedPage(session);
-  const tabState = createTabState(page);
+  const { tabState } = registerPage(session, userId, page, sessionKey, { tabId });
   tabState.googleRetryCount = (previousTabState.googleRetryCount || 0) + 1;
   tabState.lastRequestedUrl = previousTabState.lastRequestedUrl;
-  attachDownloadListener(tabState, tabId, log, pluginEvents, userId);
-  group.set(tabId, tabState);
   releasePageLease(session, lease);
-  attachPopupHandler(page, userId, sessionKey);
   refreshActiveTabsGauge();
 
   log('warn', 'replaying google search on fresh context (per-context proxy rotation)', {
@@ -3518,25 +3472,17 @@ app.post('/tabs', async (req, res) => {
       session = createdPage.session;
       const page = createdPage.page;
       const lease = createdPage.lease;
-      const group = getTabGroup(session, resolvedSessionKey);
 
       // A persistent shared context registers `page` synchronously through
-      // its context `page` event. Reuse that state and move it to the caller's
-      // group instead of registering the same Playwright page under another
-      // tab ID (which would create independent locks and bypass handoff).
-      const registered = session.sharedIdentity && findTabByPage(session, page);
-      const tabId = registered?.tabId || fly.makeTabId();
-      let tabState = registered?.tabState || createTabState(page);
-      if (registered) {
-        registered.group.delete(tabId);
-        if (registered.group.size === 0) session.tabGroups.delete(registered.listItemId);
-      } else {
-        attachDownloadListener(tabState, tabId, log, pluginEvents, userId);
-      }
-      group.set(tabId, tabState);
+      // its context `page` event. registerPage reuses that state and moves it
+      // to the caller's group instead of registering the same Playwright page
+      // under another tab ID (which would create independent locks and bypass
+      // handoff).
+      const registered = registerPage(session, userId, page, resolvedSessionKey);
+      const tabId = registered.tabId;
+      let tabState = registered.tabState;
       activeTab = { session, tabId };
       releasePageLease(session, lease);
-      if (!registered) attachPopupHandler(page, userId, resolvedSessionKey);
       refreshActiveTabsGauge();
       
       if (url) {
@@ -3563,19 +3509,15 @@ app.post('/tabs', async (req, res) => {
             signal.throwIfAborted();
             session = await getSession(userId, { trace: !!trace });
             signal.throwIfAborted();
-            const retryGroup = getTabGroup(session, resolvedSessionKey);
             const { page: retryPage, lease: retryLease } = await createLeasedPage(session);
             if (signal.aborted) {
               await closeLeasedPage(session, retryPage, retryLease);
               signal.throwIfAborted();
             }
-            tabState = createTabState(retryPage);
+            tabState = registerPage(session, userId, retryPage, resolvedSessionKey, { tabId }).tabState;
             tabState.lastRequestedUrl = url;
-            attachDownloadListener(tabState, tabId, log, pluginEvents, userId);
-            retryGroup.set(tabId, tabState);
             activeTab = { session, tabId };
             releasePageLease(session, retryLease);
-            attachPopupHandler(retryPage, userId, resolvedSessionKey);
             refreshActiveTabsGauge();
             const navigationResponse = await withPageLoadDuration('open_url', () => navigatePage(retryPage, url));
             signal.throwIfAborted();
@@ -3829,16 +3771,14 @@ app.post('/tabs/:tabId/navigate', async (req, res) => {
           const previousTabState = tabState;
           const createdPage = await createPageWithRecoveryForUser(userId, session);
           session = createdPage.session;
-          const group = getTabGroup(session, currentSessionKey);
           const replacementPage = createdPage.page;
           const replacementLease = createdPage.lease;
           let replacementAttached = false;
           try {
-            tabState = createTabState(replacementPage);
+            // The context `page` event may already have registered the
+            // replacement under a new ID; registerPage folds it into this tab.
+            tabState = registerPage(session, userId, replacementPage, currentSessionKey, { tabId }).tabState;
             tabState.googleRetryCount = previousTabState.googleRetryCount || 0;
-            attachDownloadListener(tabState, tabId, log, pluginEvents, userId);
-            group.set(tabId, tabState);
-            attachPopupHandler(replacementPage, userId, currentSessionKey);
             replacementAttached = true;
           } finally {
             releasePageLease(session, replacementLease);
@@ -3922,14 +3862,10 @@ app.post('/tabs/:tabId/navigate', async (req, res) => {
             await closeSession(key, oldSession, { reason: 'google_blocked_context_rotate', clearDownloads: true, clearLocks: true });
           }
           session = await getSession(userId);
-          const group = getTabGroup(session, currentSessionKey);
           const { page, lease } = await createLeasedPage(session);
-          tabState = createTabState(page);
+          tabState = registerPage(session, userId, page, currentSessionKey, { tabId }).tabState;
           tabState.googleRetryCount = previousRetryCount + 1;
-          attachDownloadListener(tabState, tabId, log, pluginEvents, userId);
-          group.set(tabId, tabState);
           releasePageLease(session, lease);
-          attachPopupHandler(page, userId, currentSessionKey);
           refreshActiveTabsGauge();
         };
 
@@ -4154,7 +4090,7 @@ app.get('/tabs/:tabId/snapshot', async (req, res) => {
     if (!found) return tabNotFoundResponse(res, req.params.tabId || req.body?.tabId);
     session.lastAccess = Date.now();
     
-    const { tabState } = found;
+    let { tabState } = found;
     tabState.toolCalls++; tabState.consecutiveTimeouts = 0; tabState.consecutiveFailures = 0;
 
     // Cached chunk retrieval for offset>0 requests
@@ -4175,17 +4111,9 @@ app.get('/tabs/:tabId/snapshot', async (req, res) => {
         const unavailable = !blocked && await isGoogleUnavailable(tabState.page);
         if (blocked || unavailable) {
           const rotated = await rotateGoogleTab(userId, found.listItemId, req.params.tabId, tabState, blocked ? 'google_search_block_snapshot' : 'google_search_unavailable_snapshot', req.reqId);
-          if (rotated) {
-            tabState.page = rotated.tabState.page;
-            tabState.refs = rotated.tabState.refs;
-            tabState.visitedUrls = rotated.tabState.visitedUrls;
-            tabState.downloads = rotated.tabState.downloads;
-            tabState.toolCalls = rotated.tabState.toolCalls;
-            tabState.consecutiveTimeouts = rotated.tabState.consecutiveTimeouts;
-            tabState.lastSnapshot = rotated.tabState.lastSnapshot;
-            tabState.lastRequestedUrl = rotated.tabState.lastRequestedUrl;
-            tabState.googleRetryCount = rotated.tabState.googleRetryCount;
-          }
+          // Continue with the registered state rather than copying its page
+          // into the retired state, so one page never has two tab states.
+          if (rotated) tabState = rotated.tabState;
         }
       }
 
@@ -6944,15 +6872,9 @@ app.post('/tabs/open', async (req, res) => {
       }
     }
     
-    let group = getTabGroup(session, listItemId);
-    
     let { page, lease } = await createLeasedPage(session);
-    const tabId = fly.makeTabId();
-    let tabState = createTabState(page);
-    attachDownloadListener(tabState, tabId, log, pluginEvents, userId);
-    group.set(tabId, tabState);
+    let { tabId, tabState } = registerPage(session, userId, page, listItemId);
     releasePageLease(session, lease);
-    attachPopupHandler(page, userId, listItemId);
     refreshActiveTabsGauge();
     
     try {
@@ -6970,13 +6892,9 @@ app.post('/tabs/open', async (req, res) => {
           await closeSession(key, oldSession, { reason: 'proxy_retry_rotate', clearDownloads: true, clearLocks: true });
         }
         session = await getSession(userId);
-        group = getTabGroup(session, listItemId);
         ({ page, lease } = await createLeasedPage(session));
-        tabState = createTabState(page);
-        attachDownloadListener(tabState, tabId, log, pluginEvents, userId);
-        group.set(tabId, tabState);
+        tabState = registerPage(session, userId, page, listItemId, { tabId }).tabState;
         releasePageLease(session, lease);
-        attachPopupHandler(page, userId, listItemId);
         refreshActiveTabsGauge();
         await withPageLoadDuration('open_url', () => navigatePage(page, url));
         recordNavSuccess(userId);

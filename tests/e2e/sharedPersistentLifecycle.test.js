@@ -192,6 +192,28 @@ describe('shared persistent identity lifecycle over HTTP', () => {
     }
   }, 90000);
 
+  test('a popup in a shared identity registers under one tab ID in its opener group', async () => {
+    try {
+      const created = await request('POST', '/tabs', { userId, sessionKey: 'popup-dedup', url: `${testSiteUrl}/popup-source` });
+      expect(created.response.status).toBe(200);
+      // The context `page` event and the opener `popup` event both see this page.
+      const opened = await request('POST', `/tabs/${created.data.tabId}/evaluate`, {
+        userId, expression: "Boolean(window.open('/popup-target', '_blank'))",
+      });
+      expect(opened.response.status).toBe(200);
+      await new Promise(resolve => setTimeout(resolve, 1500));
+
+      const listed = await request('GET', `/tabs?userId=${encodeURIComponent(userId)}`);
+      const popups = listed.data.tabs.filter(tab => tab.url.includes('/popup-target'));
+      expect(popups).toHaveLength(1);
+      expect(new Set(listed.data.tabs.map(tab => tab.tabId)).size).toBe(listed.data.tabs.length);
+      // The popup lives in its opener's task group, under exactly one ID.
+      expect(popups[0].listItemId).toBe('popup-dedup');
+    } finally {
+      await request('DELETE', `/sessions/${userId}`);
+    }
+  }, 90000);
+
   test('normal use launches headless, and /focus refuses a headless identity', async () => {
     const created = await request('POST', '/tabs', { userId, sessionKey: 'headless-focus', url: `${testSiteUrl}/pageA` });
     expect(created.response.status).toBe(200);
