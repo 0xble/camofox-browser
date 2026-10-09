@@ -35,6 +35,7 @@ import {
   persistStorageState,
 } from '../../lib/persistence.js';
 import { importBootstrapCookies } from '../../lib/cookies.js';
+import { settleWithin } from '../../lib/session-close.js';
 
 async function removeIfExists(p) {
   try {
@@ -79,8 +80,11 @@ export async function register(app, ctx, pluginConfig = {}) {
   async function checkpoint(userId, context, reason, storageState) {
     if ((!context && !storageState) || resettingUsers.has(userId)) return;
 
-    const previous = checkpointPromises.get(userId) || Promise.resolve();
-    const current = previous.catch(() => {}).then(async () => {
+    const previous = checkpointPromises.get(userId);
+    const current = (async () => {
+      if (previous && !(await settleWithin(() => previous, 10_000))) {
+        log('warn', 'previous storage checkpoint timed out; continuing', { userId, reason, timeoutMs: 10_000 });
+      }
       if (resettingUsers.has(userId)) return;
       const result = await persistStorageState({
         profileDir,
@@ -94,7 +98,7 @@ export async function register(app, ctx, pluginConfig = {}) {
         log('info', 'storage state persisted', { userId, reason, path: result.storageStatePath });
       }
       return result;
-    });
+    })();
     checkpointPromises.set(userId, current);
     try {
       return await current;
@@ -158,7 +162,7 @@ export async function register(app, ctx, pluginConfig = {}) {
       if (reason !== 'storage_reset') {
         await checkpoint(userId, context, reason).catch(() => {});
       }
-      activeSessions.delete(userId);
+      if (activeSessions.get(userId) === context) activeSessions.delete(userId);
     }
   });
 

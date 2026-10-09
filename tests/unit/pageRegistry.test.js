@@ -3,6 +3,7 @@ import { EventEmitter } from 'node:events';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
 import { createPageRegistry, findTabByPage, tabIdsForPage, SHARED_IDENTITY_GROUP } from '../../lib/page-registry.js';
+import { tabClosable } from '../../lib/idle-tabs.js';
 
 // A shared persistent identity sees every page twice: once from the context
 // `page` event and once from the path that caused it (popup, tab creation, or
@@ -200,24 +201,13 @@ describe('GET /tabs lists each page once', () => {
 });
 
 describe('shared idle close guard', () => {
-  const source = readFileSync(new URL('../../server.js', import.meta.url), 'utf8');
-  const start = source.indexOf('function sharedTabClosable(');
-  const fn = source.slice(start, source.indexOf('\n}\n', start) + 3);
-
   test('refuses to close a page that another tab ID still references', () => {
     const page = fakePage();
     const tab = { page };
     const session = { tabGroups: new Map([['a', new Map([['one', tab]])], ['b', new Map([['two', { page }]])]]) };
-    const scope = {
-      tabLocks: new Map(), humanControlledTabs: new Set(), isPageLeased: () => false, tabIdsForPage,
-      findTab: (current, tabId) => {
-        for (const group of current.tabGroups.values()) if (group.has(tabId)) return { tabState: group.get(tabId) };
-        return null;
-      },
-    };
-    runInNewContext(`${fn}\nthis.sharedTabClosable = sharedTabClosable;`, scope);
-    expect(scope.sharedTabClosable(session, 'one', tab, 'latest')).toBe(false);
+    const options = { tabLocks: new Map(), humanControlledTabs: new Set() };
+    expect(tabClosable({ session, tabId: 'one', tab, latestTabId: 'latest', ...options })).toBe(false);
     session.tabGroups.delete('b');
-    expect(scope.sharedTabClosable(session, 'one', tab, 'latest')).toBe(true);
+    expect(tabClosable({ session, tabId: 'one', tab, latestTabId: 'latest', ...options })).toBe(true);
   });
 });

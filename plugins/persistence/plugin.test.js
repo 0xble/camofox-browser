@@ -109,6 +109,71 @@ describe('persistence plugin', () => {
     expect(mockContext.storageState).toHaveBeenCalled();
   });
 
+  test('a late checkpoint cannot remove a replacement session context', async () => {
+    await register(mockApp, ctx, { profileDir: tmpDir });
+    let finishOld;
+    let oldStarted;
+    const oldGate = new Promise(resolve => { finishOld = resolve; });
+    const oldStart = new Promise(resolve => { oldStarted = resolve; });
+    const oldContext = {
+      storageState: jest.fn(async ({ path: targetPath }) => {
+        oldStarted();
+        await oldGate;
+        await fs.writeFile(targetPath, JSON.stringify({ cookies: [], origins: [] }));
+      }),
+    };
+    const replacementContext = {
+      storageState: jest.fn(async ({ path: targetPath }) => {
+        await fs.writeFile(targetPath, JSON.stringify({ cookies: [{ name: 'replacement' }], origins: [] }));
+      }),
+    };
+    await events.emitAsync('session:created', { userId: 'user-replaced', context: oldContext });
+    const destroying = events.emitAsync('session:destroying', { userId: 'user-replaced', reason: 'timeout' });
+    await oldStarted;
+    events.emit('session:created', { userId: 'user-replaced', context: replacementContext });
+    finishOld();
+    await destroying;
+
+    await events.emitAsync('session:cookies:import', { userId: 'user-replaced' });
+    expect(replacementContext.storageState).toHaveBeenCalled();
+  });
+
+  test('a later checkpoint proceeds after the chained wait bound', async () => {
+    jest.useFakeTimers();
+    try {
+      await register(mockApp, ctx, { profileDir: tmpDir });
+      let oldStarted;
+      const oldStart = new Promise(resolve => { oldStarted = resolve; });
+      const oldContext = {
+        storageState: jest.fn(async () => {
+          oldStarted();
+          await new Promise(() => {});
+        }),
+      };
+      let replacementStarted;
+      const replacementStart = new Promise(resolve => { replacementStarted = resolve; });
+      const replacementContext = {
+        storageState: jest.fn(async ({ path: targetPath }) => {
+          replacementStarted();
+          await fs.writeFile(targetPath, JSON.stringify({ cookies: [], origins: [] }));
+        }),
+      };
+      await events.emitAsync('session:created', { userId: 'user-chain', context: oldContext });
+      const first = events.emitAsync('session:cookies:import', { userId: 'user-chain' });
+      await oldStarted;
+      events.emit('session:created', { userId: 'user-chain', context: replacementContext });
+      const second = events.emitAsync('session:cookies:import', { userId: 'user-chain' });
+      await jest.advanceTimersByTimeAsync(10_001);
+      await replacementStart;
+      await second;
+      expect(replacementContext.storageState).toHaveBeenCalled();
+      // The original checkpoint remains unresolved, but it no longer blocks the replacement.
+      expect(first).toBeInstanceOf(Promise);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
   test('DELETE storage_state destroys the live session without checkpointing and removes persisted state', async () => {
     await register(mockApp, ctx, { profileDir: tmpDir });
 

@@ -64,7 +64,8 @@ import { SharedIdentityManager } from './lib/shared-identity.js';
 import { readHidIdleSeconds } from './lib/macos-hid-idle.js';
 import { createSharedIdentityIdlePolicy } from './lib/shared-identity-idle.js';
 import { createProfileCleanupGuard, isEligibleForAutomaticCleanup } from './lib/cleanup-policy.js';
-import { closeSessionOnce } from './lib/session-close.js';
+import { closeSessionOnce, teardownEphemeralSession, reapAbandonedContexts } from './lib/session-close.js';
+import { tabClosable, latestAgentTabId, sweepIdleEphemeralTabs } from './lib/idle-tabs.js';
 import { applySharedTabHandoff } from './lib/shared-tab-handoff.js';
 import { createVirtualDisplayRegistry } from './lib/plugin-capabilities.js';
 import { killProcessIds } from './lib/browser-processes.js';
@@ -261,11 +262,10 @@ app.use((req, res, next) => {
   const tabId = req.path.match(/^\/tabs\/([^/]+)/)?.[1];
   if (tabId && tabId !== 'group') {
     for (const session of sessions.values()) {
-      if (!session.sharedIdentity) continue;
       const found = findTab(session, tabId);
       if (found) {
         found.tabState.lastAgentActivityAt = Date.now();
-        session.lastAccess = Date.now();
+        if (session.sharedIdentity) session.lastAccess = Date.now();
         break;
       }
     }
@@ -1420,15 +1420,27 @@ async function closeSessionNow(userId, session, {
     await clearSessionDownloads(session).catch(() => {});
   }
 
-  if (!session.sharedIdentity) await pluginEvents.emitAsync('session:destroying', { userId: key, reason });
-  if (session.tracePath) {
+  const stopTracing = async () => {
     try {
       await session.context.tracing.stop({ path: session.tracePath });
       log('info', 'tracing saved', { userId: key, path: session.tracePath });
     } catch (err) {
       log('warn', 'tracing.stop failed', { userId: key, error: err.message });
     }
+  };
+
+  if (!session.sharedIdentity) {
+    // Every step is bounded and the session leaves the registry regardless,
+    // so a page spinning a CPU-bound script cannot hang expiry forever.
+    await teardownEphemeralSession({
+      userId: key, session, sessions, reason, events: pluginEvents, log,
+      beforeClose: session.tracePath ? stopTracing : null,
+    });
+    refreshActiveTabsGauge();
+    return;
   }
+
+  if (session.tracePath) await stopTracing();
 
   if (session.sharedIdentity) {
     session._intentionalClose = true;
@@ -1450,13 +1462,10 @@ async function closeSessionNow(userId, session, {
       session._intentionalClose = false;
       log('warn', 'shared identity close failed', { userId: key, reason, error: err.message });
     });
-  } else {
-    await session.context.close().catch(() => {});
   }
   if (transition) session.tabGroups.clear();
   if (session.sharedIdentity) sharedIdentityLastUrls.delete(key);
   if (sessions.get(key) === session) sessions.delete(key);
-  if (!session.sharedIdentity) await pluginEvents.emitAsync('session:destroyed', { userId: key, reason });
 
   refreshActiveTabsGauge();
 }
@@ -1917,21 +1926,10 @@ async function recycleOldestTab(session, reqId, userId) {
 // now. Rechecked immediately before close so a request that arrived since
 // candidate selection is never cut off.
 function sharedTabClosable(session, tabId, tab, latestTabId) {
-  const lock = tabLocks.get(tabId);
-  // Never close a page that another tab ID still references.
-  return tabId !== latestTabId && findTab(session, tabId)?.tabState === tab
-    && tabIdsForPage(session, tab.page).length === 1
-    && !isPageLeased(session, tab.page) && !humanControlledTabs.has(tabId) && !(tab.activeDownloads > 0)
-    && !lock?.active && !lock?.queue?.length;
+  return tabClosable({ session, tabId, tab, latestTabId, tabLocks, humanControlledTabs });
 }
 
-function latestSharedTabId(session) {
-  let latest = null;
-  for (const group of session.tabGroups.values()) {
-    for (const [tabId, tab] of group) if (!latest || tab.lastAgentActivityAt > latest[1].lastAgentActivityAt) latest = [tabId, tab];
-  }
-  return latest?.[0];
-}
+const latestSharedTabId = latestAgentTabId;
 
 async function closeSharedTab(session, tabId, tab, { userId, reason, reqId }) {
   await safePageClose(tab.page);
@@ -1948,7 +1946,7 @@ async function closeSharedTab(session, tabId, tab, { userId, reason, reqId }) {
   refreshActiveTabsGauge();
   pluginEvents.emit(reason === 'idle_cap' ? 'tab:recycled' : 'tab:reaped',
     reason === 'idle_cap' ? { userId: userId || null, tabId } : { userId: userId || null, tabId, listItemId: found?.listItemId, reason });
-  log('info', 'shared idle tab closed', { reqId, userId, tabId, reason });
+  log('info', reason === 'idle_tab' ? 'idle tab closed' : 'shared idle tab closed', { reqId, userId, tabId, reason });
   return true;
 }
 
@@ -6512,7 +6510,14 @@ let sharedIdleSweepRunning = false;
 const sharedIdleInterval = setInterval(() => {
   if (sharedIdleSweepRunning) return;
   sharedIdleSweepRunning = true;
-  cleanIdleSharedSessions().catch(err => log('warn', 'shared identity idle sweep failed', { error: err.message }))
+  reapAbandonedContexts({ log }).catch(err => log('warn', 'abandoned context sweep failed', { error: err.message }))
+    .then(() => cleanIdleSharedSessions())
+    .then(() => sweepIdleEphemeralTabs({
+      sessions, minutes: CONFIG.hiddenTabIdleMin, agentIdle: sharedIdentityIdlePolicy.agentIdle,
+      closable: sharedTabClosable, closeTab: closeSharedTab,
+    }))
+    .then(closed => { if (closed.length) tabsReapedTotal.inc(closed.length); })
+    .catch(err => log('warn', 'idle tab sweep failed', { error: err.message }))
     .finally(() => { sharedIdleSweepRunning = false; });
 }, 60_000);
 sharedIdleInterval.unref();
