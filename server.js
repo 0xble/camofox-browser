@@ -3131,14 +3131,14 @@ app.get('/browser/identities', authMiddleware(), (req, res) => {
 
 // Serialize opposite operations without returning an open result to a release
 // caller (or vice versa). A queued operation installs its gate immediately.
-function transitionIdentity(userId, action, operation) {
+function transitionIdentity(userId, action, operation, { coalesceKey = null } = {}) {
   const previous = identityTransitions.get(userId);
-  if (previous?.action === action) return previous.promise;
+  if (previous?.action === action && Object.is(previous.coalesceKey, coalesceKey)) return previous.promise;
   const promise = (async () => {
     if (previous) await previous.promise.catch(() => {});
     return operation();
   })();
-  const entry = { action, promise };
+  const entry = { action, coalesceKey, promise };
   identityTransitions.set(userId, entry);
   promise.finally(() => {
     if (identityTransitions.get(userId) === entry) identityTransitions.delete(userId);
@@ -3242,6 +3242,16 @@ sharedIdentityWindow = createSharedIdentityWindowOpener({
  *         in: path
  *         required: true
  *         schema: { type: string }
+ *     requestBody:
+ *       required: false
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               tabId:
+ *                 type: string
+ *                 description: Caller-owned tab to focus or restore; stale IDs open a new tab.
  *     responses:
  *       200: { description: "Shared identity is visible; restarted is true after a headless transition; restoreFailed is true if bounded URL restoration failed." }
  *       404: { description: Identity is not configured for shared mode. }
@@ -3251,7 +3261,8 @@ app.post('/browser/identities/:userId/open', async (req, res) => {
   const userId = normalizeUserId(req.params.userId);
   if (!sharedIdentities.owns(userId)) return res.status(404).json({ error: 'Shared identity not configured' });
   try {
-    const result = await transitionIdentity(userId, 'open', () => sharedIdentityWindow.openWindow(userId));
+    const requestedTabId = req.body?.tabId ?? null;
+    const result = await transitionIdentity(userId, 'open', () => sharedIdentityWindow.openWindow(userId, requestedTabId), { coalesceKey: requestedTabId });
     if (result.busy) return res.status(409).json({ error: 'identity busy' });
     return res.json(result);
   } catch (err) {
