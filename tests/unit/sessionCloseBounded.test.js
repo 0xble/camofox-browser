@@ -63,14 +63,11 @@ describe('bounded session close', () => {
       expect.objectContaining({ userId: 'hermes_1', reason: 'session_timeout' }));
   });
 
-  test('a timed-out context stays abandoned until a later sweep closes it', async () => {
-    let closeCalls = 0;
+  test('a close that finishes after its timeout is confirmed without a second close call', async () => {
+    let finishClose;
     const context = {
       pages: () => [],
-      close: jest.fn(async () => {
-        closeCalls += 1;
-        if (closeCalls === 1) return never();
-      }),
+      close: jest.fn(() => new Promise(resolve => { finishClose = resolve; })),
     };
     const session = fakeSession(context, []);
     const sessions = new Map([['hermes_retry', session]]);
@@ -82,9 +79,52 @@ describe('bounded session close', () => {
     });
     expect(abandonedContexts.has(context)).toBe(true);
 
+    // The original close is still in flight, so the sweep must not start another.
     await reapAbandonedContexts({ timeoutMs: 20 });
-    expect(closeCalls).toBe(2);
+    expect(context.close).toHaveBeenCalledTimes(1);
+    expect(abandonedContexts.has(context)).toBe(true);
+
+    finishClose();
+    await reapAbandonedContexts({ timeoutMs: 20 });
+    expect(context.close).toHaveBeenCalledTimes(1);
     expect(abandonedContexts.has(context)).toBe(false);
+  });
+
+  test('a close that failed is retried once per sweep, never overlapping', async () => {
+    let calls = 0;
+    const context = {
+      pages: () => [],
+      close: jest.fn(async () => {
+        calls += 1;
+        if (calls === 1) { await new Promise(resolve => setTimeout(resolve, 40)); throw new Error('protocol error'); }
+      }),
+    };
+    const session = fakeSession(context, []);
+    const sessions = new Map([['hermes_fail', session]]);
+    await teardownEphemeralSession({
+      userId: 'hermes_fail', session, sessions, reason: 'session_timeout', events: createPluginEvents(),
+      timeoutMs: 10, pageTimeoutMs: 5,
+    });
+    await new Promise(resolve => setTimeout(resolve, 60));
+    await reapAbandonedContexts({ timeoutMs: 20 });
+    expect(context.close).toHaveBeenCalledTimes(2);
+    expect(abandonedContexts.has(context)).toBe(false);
+  });
+
+  test('a context whose close never settles is retired after the sweep limit', async () => {
+    const context = { pages: () => [], close: jest.fn(never) };
+    const session = fakeSession(context, []);
+    const sessions = new Map([['hermes_wedged', session]]);
+    const log = jest.fn();
+    await teardownEphemeralSession({
+      userId: 'hermes_wedged', session, sessions, reason: 'session_timeout', events: createPluginEvents(),
+      timeoutMs: 10, pageTimeoutMs: 5,
+    });
+    for (let i = 0; i < 3; i += 1) await reapAbandonedContexts({ timeoutMs: 5, maxSweeps: 3, log });
+    expect(context.close).toHaveBeenCalledTimes(1);
+    expect(abandonedContexts.has(context)).toBe(false);
+    expect(log).toHaveBeenCalledWith('error', 'abandoned browser context never closed; no longer tracking it',
+      expect.objectContaining({ userId: 'hermes_wedged', sweeps: 3 }));
   });
 
   test('a checkpoint that never finishes (hung page evaluate) does not block close', async () => {

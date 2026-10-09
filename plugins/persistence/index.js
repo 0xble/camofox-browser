@@ -72,6 +72,7 @@ export async function register(app, ctx, pluginConfig = {}) {
   // skip new checkpoints until their live context and saved state are gone.
   const activeSessions = new Map(); // userId -> context
   const checkpointPromises = new Map(); // userId -> latest queued checkpoint
+  const writeGenerations = new Map(); // userId -> generation allowed to commit
   const resettingUsers = new Set();
 
   /**
@@ -86,6 +87,10 @@ export async function register(app, ctx, pluginConfig = {}) {
         log('warn', 'previous storage checkpoint timed out; continuing', { userId, reason, timeoutMs: 10_000 });
       }
       if (resettingUsers.has(userId)) return;
+      // Claiming a write generation supersedes any checkpoint still hung past
+      // its wait bound: that one discards its capture instead of renaming it.
+      const generation = (writeGenerations.get(userId) || 0) + 1;
+      writeGenerations.set(userId, generation);
       const result = await persistStorageState({
         profileDir,
         userId,
@@ -93,7 +98,11 @@ export async function register(app, ctx, pluginConfig = {}) {
         storageState,
         logger,
         indexedDB,
+        shouldCommit: () => writeGenerations.get(userId) === generation && !resettingUsers.has(userId),
       });
+      if (result.reason === 'superseded') {
+        log('warn', 'late storage checkpoint discarded; a newer checkpoint superseded it', { userId, reason });
+      }
       if (result.persisted) {
         log('info', 'storage state persisted', { userId, reason, path: result.storageStatePath });
       }

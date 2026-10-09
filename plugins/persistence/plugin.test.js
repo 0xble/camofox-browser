@@ -3,6 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { jest } from '@jest/globals';
 import { createPluginEvents } from '../../lib/plugins.js';
+import { getUserPersistencePaths } from '../../lib/persistence.js';
 import { register } from './index.js';
 
 describe('persistence plugin', () => {
@@ -169,6 +170,48 @@ describe('persistence plugin', () => {
       expect(replacementContext.storageState).toHaveBeenCalled();
       // The original checkpoint remains unresolved, but it no longer blocks the replacement.
       expect(first).toBeInstanceOf(Promise);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test('a checkpoint that finishes after a newer one committed is discarded', async () => {
+    jest.useFakeTimers();
+    try {
+      await register(mockApp, ctx, { profileDir: tmpDir });
+      let releaseOld;
+      let oldStarted;
+      const oldStart = new Promise(resolve => { oldStarted = resolve; });
+      const oldGate = new Promise(resolve => { releaseOld = resolve; });
+      const oldContext = {
+        storageState: jest.fn(async ({ path: targetPath }) => {
+          oldStarted();
+          await oldGate;
+          await fs.writeFile(targetPath, JSON.stringify({ cookies: [{ name: 'stale' }], origins: [] }));
+        }),
+      };
+      const newContext = {
+        storageState: jest.fn(async ({ path: targetPath }) => {
+          await fs.writeFile(targetPath, JSON.stringify({ cookies: [{ name: 'fresh' }], origins: [] }));
+        }),
+      };
+      await events.emitAsync('session:created', { userId: 'user-race', context: oldContext });
+      const first = events.emitAsync('session:cookies:import', { userId: 'user-race' });
+      await oldStart;
+      events.emit('session:created', { userId: 'user-race', context: newContext });
+      const second = events.emitAsync('session:cookies:import', { userId: 'user-race' });
+      await jest.advanceTimersByTimeAsync(10_001);
+      await second;
+      releaseOld();
+      await first;
+
+      const { storageStatePath, userDir } = getUserPersistencePaths(tmpDir, 'user-race');
+      const saved = JSON.parse(await fs.readFile(storageStatePath, 'utf8'));
+      expect(saved.cookies).toEqual([{ name: 'fresh' }]);
+      const leftovers = (await fs.readdir(userDir)).filter(name => name.includes('.tmp-'));
+      expect(leftovers).toEqual([]);
+      expect(ctx.log).toHaveBeenCalledWith('warn', 'late storage checkpoint discarded; a newer checkpoint superseded it',
+        expect.objectContaining({ userId: 'user-race' }));
     } finally {
       jest.useRealTimers();
     }
