@@ -71,14 +71,67 @@ describe('shared identity headed transition', () => {
     expect(JSON.parse(await fs.readFile(cookieCheckpointPath(root, 'personal'), 'utf8')).cleanShutdown).toBe(false);
   });
 
-  test('already headed only focuses; a session end resets next normal use to headless', async () => {
+  test('already headed with a requested tab focuses and returns that tab', async () => {
     await opener.openWindow('personal');
+    const session = sessions.get('personal');
+    const firstPage = contexts[0].context.pages()[0];
+    const secondPage = fakePage('https://example.test/second');
+    contexts[0].context.pages.mockReturnValue([firstPage, secondPage]);
+    session.tabGroups.set('task-a', new Map([['first-tab', { page: firstPage }]]));
+    session.tabGroups.set('task-b', new Map([['second-tab', { page: secondPage }]]));
+    registerPage.mockImplementation((_session, _userId, page) => page === secondPage ? 'second-tab' : 'first-tab');
+
+    const result = await opener.openWindow('personal', 'second-tab');
+
+    expect(result).toMatchObject({ ok: true, userId: 'personal', focused: true, tabId: 'second-tab', keepOpen: true });
+    expect(secondPage.bringToFront).toHaveBeenCalledTimes(1);
+    expect(firstPage.bringToFront).toHaveBeenCalledTimes(1);
+  });
+
+  test('already headed with an unknown requested tab opens a new tab', async () => {
+    await opener.openWindow('personal');
+    const session = sessions.get('personal');
+    const existingPage = contexts[0].context.pages()[0];
+    session.tabGroups.set('task-a', new Map([['existing-tab', { page: existingPage }]]));
+    const newPage = fakePage('about:blank');
+    contexts[0].context.newPage.mockResolvedValueOnce(newPage);
+    registerPage.mockReturnValueOnce('new-tab');
+
+    const result = await opener.openWindow('personal', 'stale-tab');
+
+    expect(result).toMatchObject({ ok: true, userId: 'personal', focused: true, tabId: 'new-tab', keepOpen: true });
+    expect(contexts[0].context.newPage).toHaveBeenCalledTimes(1);
+    expect(newPage.bringToFront).toHaveBeenCalledTimes(1);
+    expect(registerPage).toHaveBeenLastCalledWith(session, 'personal', newPage);
+    expect(result.tabId).not.toBe('existing-tab');
+  });
+
+  test('already headed without a requested tab keeps focusing the manager-selected page', async () => {
+    await opener.openWindow('personal');
+    const focus = jest.spyOn(manager, 'focus');
     const result = await opener.openWindow('personal');
-    expect(result).not.toHaveProperty('restarted');
-    expect(contexts).toHaveLength(1);
+
+    expect(focus).toHaveBeenCalledWith('personal');
+    expect(result).toMatchObject({ ok: true, userId: 'personal', focused: true, tabId: 'personal-new-tab', keepOpen: true });
+    focus.mockRestore();
     await opener.closeSession('personal', sessions.get('personal'));
     await opener.getSession('personal');
     expect(contexts[1].options.headless).toBe(true);
+  });
+
+  test('headless transition restores the requested tab URL instead of lastUsedPage', async () => {
+    const old = await opener.getSession('personal');
+    const requestedPage = fakePage('https://example.test/caller');
+    old.lastUsedPage = fakePage('https://example.test/other-task');
+    old.tabGroups.set('caller-task', new Map([['caller-tab', { page: requestedPage }]]));
+    old.tabGroups.set('other-task', new Map([['other-tab', { page: old.lastUsedPage }]]));
+    registerPage.mockReturnValueOnce('restored-caller-tab');
+
+    const result = await opener.openWindow('personal', 'caller-tab');
+
+    expect(result).toMatchObject({ ok: true, userId: 'personal', focused: true, tabId: 'restored-caller-tab', keepOpen: true, restarted: true });
+    expect(sessions.get('personal').lastUsedPage.goto).toHaveBeenCalledWith('https://example.test/caller', { timeout: 10000 });
+    expect(sessions.get('personal').lastUsedPage.goto).not.toHaveBeenCalledWith('https://example.test/other-task', { timeout: 10000 });
   });
 
   test('already headed relaunches when the headed window has been closed', async () => {

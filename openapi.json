@@ -494,6 +494,22 @@
             }
           }
         ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "tabId": {
+                    "type": "string",
+                    "description": "Caller-owned tab to focus or restore; stale IDs open a new tab."
+                  }
+                }
+              }
+            }
+          }
+        },
         "responses": {
           "200": {
             "description": "Shared identity is visible; restarted is true after a headless transition; restoreFailed is true if bounded URL restoration failed."
