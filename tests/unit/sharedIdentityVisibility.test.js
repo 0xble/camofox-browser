@@ -292,6 +292,14 @@ describe('no-relaunch visibility with two concurrent callers', () => {
     finally { clearInterval(timer); }
     expect(p.document.title).toMatch(/^SPA /);
   });
+  test('simultaneous first-time UI show/release shares one title association', async () => {
+    const p = page('https://fixture.test/ui');
+    windows.set(50, { id: 50, tabs: [{ id: 50, windowId: 50, page: p, url: p.url() }], ...windowBounds(display.park) });
+    context.livePages.push(p);
+    await Promise.all([visibility.open(p), visibility.release({ page: p })]);
+    expect(windows.get(50)).toMatchObject(windowBounds(display.park));
+    expect(visibility.visible.has(50)).toBe(false); expect(p.document.title).toBe('UI title');
+  });
   test('commands on the same window serialize show then release', async () => {
     const p = await visibility.newPage(context);
     const original = browser.windows.update.getMockImplementation();
