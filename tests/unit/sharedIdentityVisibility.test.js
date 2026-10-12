@@ -298,7 +298,7 @@ describe('no-relaunch visibility with two concurrent callers', () => {
     context.livePages.push(p);
     await Promise.all([visibility.open(p), visibility.release({ page: p })]);
     expect(windows.get(50)).toMatchObject(windowBounds(display.park));
-    expect(visibility.visible.has(50)).toBe(false); expect(p.document.title).toBe('UI title');
+    expect(visibility.visible.has(50)).toBe(false); expect(p.document.title).toBe('Original title');
   });
   test('commands on the same window serialize show then release', async () => {
     const p = await visibility.newPage(context);
