@@ -87,7 +87,7 @@
         "tags": [
           "Browser"
         ],
-        "summary": "Checkpoint and release a shared identity session",
+        "summary": "Park the latest shared identity handoff window, or checkpoint and release without a park display",
         "security": [
           {
             "BearerAuth": []
@@ -483,7 +483,7 @@
         "tags": [
           "Browser"
         ],
-        "summary": "Show a named shared identity in a headed window (restarting headless sessions)",
+        "summary": "Show the caller's shared identity window (preserving live tabs when a park display exists)",
         "parameters": [
           {
             "name": "userId",

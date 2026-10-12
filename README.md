@@ -644,6 +644,7 @@ Browser behavior can be tuned in `camofox.config.json`:
 | `CAMOUFOX_EXECUTABLE_PATH` | Compatibility alias for `CAMOUFOX_EXECUTABLE` | - |
 | `CAMOFOX_EXECUTABLE_PATH` | Compatibility alias for `CAMOUFOX_EXECUTABLE` | - |
 | `CAMOFOX_DISABLE_DEFAULT_ADDONS` | Set to `1`/`true` to skip downloading and launching the default uBlock Origin (UBO) addon. Useful for deployments where the addons.mozilla.org download is unreliable or unwanted (a failed download otherwise leaves a broken addon cache that blocks startup). | `0` |
+| `CAMOFOX_PARK_DISPLAY` | macOS NSScreen name used to park shared-identity windows (for example `DeskPad Display`). Unset selects the first non-main display. `off`, a missing display, or a non-macOS host uses the legacy headless/relaunch behavior and logs one warning. | first non-main display |
 | `CAMOFOX_SHARED_IDENTITY_EXTENSIONS` | JSON map of shared identity (alias or userId) to `[{"id","path","sha256"}]`. Each signed `.xpi` whose SHA-256 matches is installed into that identity's persistent profile before launch. Previously managed extensions no longer listed are removed. Human-installed extensions are untouched. | unset (none) |
 | `CAMOFOX_COOKIES_DIR` | Directory for cookie files | `~/.camofox/cookies` |
 | `CAMOFOX_UPLOADS_DIR` | Directory allowed for `POST /tabs/:tabId/upload` file attachments. Paths outside it, including symlink escapes, are rejected. | `~/.camofox/uploads` |
@@ -710,6 +711,36 @@ Browser Instance (Camoufox)
 ```
 
 Sessions auto-expire after 30 minutes of inactivity. The browser itself shuts down after 5 minutes with no active sessions, and relaunches on the next request.
+
+#### Parked shared-identity windows (macOS)
+
+A named shared identity can keep one headed persistent context on a dedicated,
+composited secondary display. Set `CAMOFOX_PARK_DISPLAY="DeskPad Display"` to
+select DeskPad by NSScreen name; unset selects the first non-main display. The
+parked browser windows must remain drawn, not minimized or hidden. DeskPad's
+mirror window can be minimized without minimizing the browsers on its display.
+Keep the park display connected for the lifetime of the server.
+
+On these installations, `/browser/identities/:userId/open` with `{ "tabId": "..." }`
+moves only the requested tab's window to the main display and focuses it. A
+stale tab ID creates a new parked page before showing it, never an unrelated
+tab. `/release` parks the latest handoff window; idle release parks all visible
+windows of that identity. Neither operation closes or relaunches the context,
+drops registered tabs, or gates another caller's requests. New automation tabs
+are created in independently parked windows, including while a handoff is shown.
+Parked contexts stay alive until explicit session deletion, shutdown, or a real
+browser failure; hidden-tab reaping still follows the configured idle policy.
+
+The launch omits Playwright's `-foreground` argument. A private loopback bridge
+and temporary WebExtension move windows; the identity indicator and persistent
+profile extensions keep their existing launch paths. API-created pages are
+associated with their window at creation. A UI-created page is located once
+using a temporary title marker on that page, then its title is restored.
+
+Without a usable park display (or with `CAMOFOX_PARK_DISPLAY=off`), the server
+logs one warning and retains the existing headless-to-headed relaunch behavior.
+That fallback cannot preserve in-memory tabs across a visibility transition.
+
 
 When a session's tab limit is reached, the oldest/least-used tab is automatically recycled instead of returning an error -- so long-running agent sessions don't hit dead ends.
 

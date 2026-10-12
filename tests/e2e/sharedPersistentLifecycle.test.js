@@ -29,6 +29,8 @@ describe('shared persistent identity lifecycle over HTTP', () => {
   beforeAll(async () => {
     profileDir = await fs.mkdtemp(path.join(os.tmpdir(), 'camofox-shared-lifecycle-'));
     await startServer(0, {
+      // These checkpoint/relaunch regressions explicitly exercise the no-display fallback.
+      CAMOFOX_PARK_DISPLAY: 'off',
       CAMOFOX_SHARED_IDENTITIES: userId,
       CAMOFOX_SHARED_PROFILE_DIR: profileDir,
       MAX_TABS_PER_SESSION: '3',
