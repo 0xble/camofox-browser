@@ -5,7 +5,7 @@ import path from 'node:path';
 import vm from 'node:vm';
 import { EventEmitter } from 'node:events';
 import { findParkDisplay, selectParkDisplay, windowBounds } from '../../lib/park-display-launcher.js';
-import { createSharedIdentityVisibility, prepareParkedProfile, visibilityAddonFiles } from '../../lib/shared-identity-visibility.js';
+import { createSharedIdentityVisibility, prepareParkedProfile, visibilityAddonFiles, launchWithVisibilityFallback, cleanupVisibilityAddons } from '../../lib/shared-identity-visibility.js';
 import { createSharedIdentityWindowOpener } from '../../lib/shared-identity-window.js';
 import { createSharedIdentityRequestTracker } from '../../lib/shared-identity-requests.js';
 import { launchSharedIdentityContext } from '../../lib/shared-identity-launch.js';
@@ -36,6 +36,15 @@ describe('virtual display selection and launch', () => {
     expect(await findParkDisplay({ platform: 'linux', execute })).toBeNull();
     expect(await findParkDisplay({ platform: 'darwin', name: 'off', execute })).toBeNull();
     expect(execute).not.toHaveBeenCalled();
+  });
+  test('defaults ignore physical second monitors and find virtual displays by name', () => {
+    const physical = { ...screens[1], name: 'DELL U2723QE' };
+    expect(selectParkDisplay([screens[0], physical])).toBeNull();
+    expect(selectParkDisplay([screens[0], physical, screens[1]])).toEqual(display);
+    for (const name of ['deskPAD Display', 'BetterDisplay Dummy', 'Virtual Display']) {
+      expect(selectParkDisplay([screens[0], { ...physical, name }]).name).toBe(name);
+    }
+    expect(selectParkDisplay([screens[0], { ...physical, name: 'BetterDisplay physical monitor' }])).toBeNull();
   });
   test('native discovery uses a finite timeout and a whitelisted environment', async () => {
     const execute = jest.fn(async () => ({ stdout: JSON.stringify(screens) }));
@@ -69,6 +78,64 @@ describe('virtual display selection and launch', () => {
   });
 });
 
+describe('parking initialization failures', () => {
+  test.each(['create', 'prepare', 'attach', 'launch'])('%s failure falls back once and leaves the identity usable', async stage => {
+    const failure = new Error('parking broke');
+    const parked = { close: jest.fn(async () => {}), once: jest.fn() };
+    const legacy = {};
+    const visibility = { park: {}, attach: jest.fn(async () => { if (stage === 'attach') throw failure; }), close: jest.fn(async () => {}) };
+    const createVisibility = jest.fn(async () => { if (stage === 'create') throw failure; return visibility; });
+    const prepareProfile = jest.fn(async () => { if (stage === 'prepare') throw failure; });
+    const launch = jest.fn(async options => { if (options.visibility && stage === 'launch') throw failure; return options.visibility ? parked : legacy; });
+    const log = jest.fn();
+    expect(await launchWithVisibilityFallback({ display, profilePath: 'unused', launch, log, createVisibility, prepareProfile })).toBe(legacy);
+    expect(legacy.sharedIdentityVisibility).toBeNull();
+    expect(launch.mock.calls.at(-1)[0]).toEqual({ headed: false, visibility: null });
+    expect(log).toHaveBeenCalledTimes(1);
+    expect(parked.close).toHaveBeenCalledTimes(stage === 'attach' ? 1 : 0);
+    expect(visibility.close).toHaveBeenCalledTimes(stage === 'create' ? 0 : 1);
+  });
+  test('a fallback context still opens its requested tab through the legacy path', async () => {
+    const p = { isClosed: () => false, bringToFront: jest.fn(async () => {}) };
+    const session = { headed: true, visibility: null, tabGroups: new Map([['caller', new Map([['B', { page: p }]])]]) };
+    const sessions = new Map([['identity', session]]);
+    const opener = createSharedIdentityWindowOpener({ parkingEnabled: true, sessions,
+      manager: { failedClosures: new Map() }, getSession: async () => session,
+      closeSession: jest.fn(), registerPage: () => 'B', isBusy: () => false });
+    expect(await opener.openWindow('identity', 'B')).toMatchObject({ focused: true, tabId: 'B' });
+    expect(p.bringToFront).toHaveBeenCalledTimes(1);
+  });
+  test('unconfirmed profile ownership blocks fallback instead of double launching', async () => {
+    const context = { close: async () => { throw Error('close failed'); }, once() {} };
+    const launch = jest.fn(async () => context);
+    const visibility = { park: {}, attach: async () => { throw Error('attach failed'); }, close: async () => {} };
+    await expect(launchWithVisibilityFallback({ display, profilePath: 'unused', launch, createVisibility: async () => visibility, prepareProfile: async () => {} }))
+      .rejects.toMatchObject({ profileOwnershipUnconfirmed: true });
+    expect(launch).toHaveBeenCalledTimes(1);
+  });
+  test.each(['{corrupt', 'null', '[]', '{"chrome://browser/content/browser.xhtml":[]}'])('invalid xulstore %s is rebuilt', async value => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'park-corrupt-'));
+    try {
+      await fs.writeFile(path.join(root, 'xulstore.json'), value);
+      await prepareParkedProfile(root, windowBounds(display.park));
+      const data = JSON.parse(await fs.readFile(path.join(root, 'xulstore.json'), 'utf8'));
+      expect(data['chrome://browser/content/browser.xhtml']['main-window'].screenX).toBe('-3320');
+    } finally { await fs.rm(root, { recursive: true, force: true }); }
+  });
+  test('startup reaps dead-owner add-ons but preserves active server add-ons', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'park-cleanup-'));
+    const dead = path.join(root, '00000000-0000-0000-0000-000000000000');
+    const alive = path.join(root, '00000000-0000-0000-0000-000000000001');
+    try {
+      for (const [dir, pid] of [[dead, 2147483647], [alive, process.pid]]) {
+        await fs.mkdir(dir); await fs.writeFile(path.join(dir, 'owner.json'), JSON.stringify({ pid }));
+      }
+      await cleanupVisibilityAddons(root);
+      await expect(fs.access(dead)).rejects.toMatchObject({ code: 'ENOENT' }); await expect(fs.access(alive)).resolves.toBeUndefined();
+    } finally { await fs.rm(root, { recursive: true, force: true }); }
+  });
+});
+
 describe('no-relaunch visibility with two concurrent callers', () => {
   let root, visibility, context, windows, intervals, nextId, onCreated, browser, script;
   beforeEach(async () => {
@@ -84,6 +151,10 @@ describe('no-relaunch visibility with two concurrent callers', () => {
         onRemoved: { addListener() {} },
         getAll: async () => [...windows.values()],
         update: jest.fn(async (id, bounds) => { const w = windows.get(id); if (!w) throw Error('window ended'); Object.assign(w, bounds); return w; }),
+        remove: jest.fn(async id => {
+          const w = windows.get(id); windows.delete(id);
+          if (w) context.livePages = context.livePages.filter(p => !w.tabs.some(t => t.page === p));
+        }),
         create: async ({ url, ...bounds }) => {
           const id = nextId++;
           const p = page(url);
@@ -95,7 +166,8 @@ describe('no-relaunch visibility with two concurrent callers', () => {
       },
       tabs: {
         update: async () => {},
-        query: async ({ title }) => [...windows.values()].flatMap(w => w.tabs).filter(t => title == null || t.page.document.title === title),
+        get: async id => { const t = [...windows.values()].flatMap(w => w.tabs).find(t => t.id === id); if (!t) throw Error('tab ended'); return t; },
+        query: async ({ title, windowId } = {}) => [...windows.values()].flatMap(w => w.tabs).filter(t => (title == null || t.page.document.title === title) && (windowId == null || t.windowId === windowId)),
       },
     };
     visibility = await createSharedIdentityVisibility(display, { rootDir: root, timeoutMs: 2000 });
@@ -157,6 +229,39 @@ describe('no-relaunch visibility with two concurrent callers', () => {
     expect(windows.get(1)).toMatchObject(windowBounds(display.park));
     expect(context.pages()).toEqual([a, b]);
   });
+  test('popup from a visible window inherits visibility, while new API windows stay parked', async () => {
+    const a = await visibility.newPage(context); await visibility.open(a);
+    const popup = page('https://fixture.test/oauth');
+    const w = { id: 50, tabs: [{ id: 50, windowId: 50, openerTabId: 1, page: popup, url: popup.url() }], ...windowBounds(display.main, true) };
+    windows.set(50, w); context.livePages.push(popup); await onCreated(w);
+    expect(w).toMatchObject(windowBounds(display.main, true));
+    expect(visibility.visible.has(50)).toBe(true);
+    await visibility.newPage(context);
+    expect(windows.get(2)).toMatchObject(windowBounds(display.park));
+    expect(visibility.visible.has(2)).toBe(false);
+  });
+  test('background restart preserves a UI popup and does not relabel previously parked API windows', async () => {
+    const a = await visibility.newPage(context), b = await visibility.newPage(context);
+    await visibility.open(b);
+    for (const id of intervals) clearInterval(id);
+    const popup = page('https://fixture.test/oauth');
+    windows.set(50, { id: 50, tabs: [{ id: 50, windowId: 50, openerTabId: 2, page: popup, url: popup.url() }], ...windowBounds(display.park) });
+    context.livePages.push(popup);
+    vm.runInNewContext(script, { browser, fetch, setInterval: fn => { const id = setInterval(fn, 10); intervals.push(id); return id; } });
+    await new Promise(resolve => setTimeout(resolve, 60));
+    expect(windows.get(50)).toMatchObject(windowBounds(display.main, true));
+    expect(visibility.visible.has(50)).toBe(true);
+    expect(windows.get(1)).toMatchObject(windowBounds(display.park)); expect(visibility.visible.has(1)).toBe(false);
+    expect(context.pages()).toEqual([a, b, popup]);
+  });
+  test('targeted release leaves the other callers visible window alone', async () => {
+    const a = await visibility.newPage(context), b = await visibility.newPage(context);
+    await visibility.open(b); await visibility.open(a);
+    expect(await visibility.release({ page: b })).toBe(true);
+    expect(windows.get(1)).toMatchObject(windowBounds(display.main, true));
+    expect(windows.get(2)).toMatchObject(windowBounds(display.park));
+    expect(visibility.visible.has(1)).toBe(true);
+  });
   test('release affects the latest handoff only; idle release parks all visible windows', async () => {
     const a = await visibility.newPage(context), b = await visibility.newPage(context);
     await Promise.all([visibility.open(a), visibility.open(b)]);
@@ -177,6 +282,92 @@ describe('no-relaunch visibility with two concurrent callers', () => {
     expect(windows.get(1)).toMatchObject(windowBounds(display.park));
     expect(b.document.title).toBe('UI title');
     expect(a.evaluate).not.toHaveBeenCalled();
+  });
+  test('title rewriting SPAs can still be located and the latest app title is preserved', async () => {
+    const p = page('https://fixture.test/spa');
+    windows.set(50, { id: 50, tabs: [{ id: 50, windowId: 50, page: p, url: p.url() }] });
+    context.livePages.push(p);
+    let n = 0; const timer = setInterval(() => { p.document.title = `SPA ${++n}`; }, 7);
+    try { await visibility.open(p); expect(windows.get(50)).toMatchObject(windowBounds(display.main, true)); }
+    finally { clearInterval(timer); }
+    expect(p.document.title).toMatch(/^SPA /);
+  });
+  test('commands on the same window serialize show then release', async () => {
+    const p = await visibility.newPage(context);
+    const original = browser.windows.update.getMockImplementation();
+    let active = 0, maxActive = 0;
+    browser.windows.update.mockImplementation(async (...args) => {
+      maxActive = Math.max(maxActive, ++active);
+      await new Promise(resolve => setTimeout(resolve, 30));
+      try { return await original(...args); } finally { active--; }
+    });
+    await Promise.all([visibility.open(p), visibility.release({ page: p })]);
+    expect(maxActive).toBe(1);
+    expect(windows.get(1)).toMatchObject(windowBounds(display.park));
+    expect(visibility.visible.size).toBe(0);
+  });
+  test('moved tabs resolve their new window instead of cached creation geometry', async () => {
+    const p = await visibility.newPage(context);
+    const tab = windows.get(1).tabs.pop(); tab.windowId = 50;
+    windows.set(50, { id: 50, tabs: [tab] });
+    await visibility.open(p);
+    expect(windows.get(50)).toMatchObject(windowBounds(display.main, true));
+    expect(windows.get(1)).toMatchObject(windowBounds(display.park));
+  });
+  test('initial blank page events wait for the API fragment before UI registration', async () => {
+    let url = 'about:blank';
+    const p = { url: () => url, isClosed: () => false, waitForURL: async () => { url = 'about:blank#camofox-late'; } };
+    expect(await visibility.shouldRegisterUIPage(p)).toBe(false);
+  });
+  test('a late create is closed and cannot become a registered UI page', async () => {
+    const original = browser.windows.create;
+    let resume, started;
+    const start = new Promise(resolve => { started = resolve; });
+    browser.windows.create = async args => { started(); await new Promise(resolve => { resume = resolve; }); return original(args); };
+    const result = visibility.newPage(context);
+    const failed = expect(result).rejects.toThrow('timed out');
+    await start; await failed;
+    const registered = [];
+    context.on('page', p => { if (!visibility.isManagedPage(p)) registered.push(p); });
+    resume(); await new Promise(resolve => setTimeout(resolve, 100));
+    expect(browser.windows.remove).toHaveBeenCalledWith(1);
+    expect(windows.size).toBe(0); expect(context.pages()).toEqual([]); expect(registered).toEqual([]);
+  });
+  test('expired creates reconcile after the add-on background restarts', async () => {
+    const original = browser.windows.create;
+    let created; const start = new Promise(resolve => { created = resolve; });
+    browser.windows.create = async args => { const w = await original(args); created(); return new Promise(() => {}); };
+    const failed = expect(visibility.newPage(context)).rejects.toThrow('timed out');
+    await start; for (const id of intervals) clearInterval(id); await failed;
+    expect(windows.size).toBe(1);
+    vm.runInNewContext(script, { browser, fetch, setInterval: fn => { const id = setInterval(fn, 10); intervals.push(id); return id; } });
+    await new Promise(resolve => setTimeout(resolve, 100));
+    expect(windows.size).toBe(0); expect(context.pages()).toEqual([]);
+  });
+  test('a late show is re-parked after caller receives a timeout', async () => {
+    const p = await visibility.newPage(context);
+    const original = browser.windows.update.getMockImplementation();
+    let resume, started; const start = new Promise(resolve => { started = resolve; });
+    browser.windows.update.mockImplementation(async (id, bounds) => {
+      if (bounds.focused) { started(); await new Promise(resolve => { resume = resolve; }); }
+      return original(id, bounds);
+    });
+    const failed = expect(visibility.open(p)).rejects.toThrow('timed out');
+    await start; await failed; resume();
+    await new Promise(resolve => setTimeout(resolve, 100));
+    expect(windows.get(1)).toMatchObject(windowBounds(display.park)); expect(visibility.visible.size).toBe(0);
+  });
+  test('expired commands are acknowledged without creating a window', async () => {
+    const emitted = [], jobs = [];
+    const files = visibilityAddonFiles({ endpoint: 'fake', park: {}, main: {} });
+    const expired = { id: 'expired', action: 'create', url: 'about:blank#camofox-expired', expiresAt: Date.now() - 1 };
+    vm.runInNewContext(files['background.js'], { browser, setInterval: fn => jobs.push(fn), fetch: async (_url, opts) => {
+      if (opts) { emitted.push(JSON.parse(opts.body)); return { json: async () => ({ accepted: false }) }; }
+      return { json: async () => ({ commands: [expired], visible: [], parked: [] }) };
+    } });
+    await new Promise(resolve => setTimeout(resolve, 10)); await jobs[0]();
+    await new Promise(resolve => setTimeout(resolve, 10));
+    expect(emitted).toContainEqual({ id: 'expired', error: 'expired' }); expect(windows.size).toBe(0);
   });
   test('visibility add-on has no page content scripts or web-accessible resources', () => {
     const manifest = JSON.parse(visibilityAddonFiles({ endpoint: 'http://127.0.0.1:1/private', park: {}, main: {} })['manifest.json']);

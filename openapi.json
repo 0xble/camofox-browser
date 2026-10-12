@@ -87,7 +87,7 @@
         "tags": [
           "Browser"
         ],
-        "summary": "Park the latest shared identity handoff window, or checkpoint and release without a park display",
+        "summary": "Park a caller's tab window (latest handoff if omitted), or checkpoint and release without a park display",
         "security": [
           {
             "BearerAuth": []
@@ -103,6 +103,22 @@
             }
           }
         ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "tabId": {
+                    "type": "string",
+                    "description": "In parking mode, release only this tab's window; unknown IDs return 404."
+                  }
+                }
+              }
+            }
+          }
+        },
         "responses": {
           "200": {
             "description": "Session cleanly released or already absent.",
@@ -528,7 +544,7 @@
         "tags": [
           "Browser"
         ],
-        "summary": "Focus an open named shared identity",
+        "summary": "Show a caller's tab window in parking mode; otherwise focus an open named shared identity",
         "parameters": [
           {
             "name": "userId",
@@ -539,9 +555,25 @@
             }
           }
         ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "tabId": {
+                    "type": "string",
+                    "description": "Caller-owned tab to show in parking mode, as for open."
+                  }
+                }
+              }
+            }
+          }
+        },
         "responses": {
           "200": {
-            "description": "Focus result."
+            "description": "Focus result after the requested window is shown."
           },
           "404": {
             "description": "Identity is not configured or is not open."

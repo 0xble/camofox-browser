@@ -41,6 +41,10 @@ parkedDescribe('parked shared identity visibility over HTTP', () => {
         await request('POST', `/browser/identities/${userId}/release`);
       } })(),
     ]);
+    expect(await request('POST', `/browser/identities/${userId}/focus`, { tabId: a.tabId })).toMatchObject({ tabId: a.tabId, focused: true, restarted: false });
+    // B is parked, but explicitly releasing B must not implicitly release A.
+    await request('POST', `/browser/identities/${userId}/release`, { tabId: b.tabId });
+    await request('POST', `/browser/identities/${userId}/release`, { tabId: a.tabId });
     const after = await request('GET', `/tabs?userId=${userId}`);
     expect(after.tabs.map(t => t.tabId).sort()).toEqual(before.tabs.map(t => t.tabId).sort());
     expect(new Set(after.tabs.map(t => t.tabId)).size).toBe(after.tabs.length);
