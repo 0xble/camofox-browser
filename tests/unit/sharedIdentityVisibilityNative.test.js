@@ -182,6 +182,32 @@ describe('native readback in the add-on (Camoufox-spoofed windows.get)', () => {
     expect(nativelyParked(windows.get(1).native, display)).toBe(true);
     expect(visibility.visible.size).toBe(0);
   });
+  test('a background restart recovers an in-flight create before aggregate startup verification can block it', async () => {
+    await setup();
+    await visibility.newPage(context);
+    for (const id of intervals) clearInterval(id);
+    intervals.length = 0;
+    // Firefox restarts the background page after realizing the new native
+    // window, before windows.create resolves in the old background page.
+    const create = browser.windows.create;
+    browser.windows.create = jest.fn(async args => { await create(args); return new Promise(() => {}); });
+    browser.tabs.query = async () => [...windows.values()].flatMap(w => w.tabs);
+    const pending = visibility.newPage(context);
+    const script = await fs.readFile(path.join(visibility.addon, 'background.js'), 'utf8');
+    const run = () => vm.runInNewContext(script, { browser, fetch, setTimeout,
+      setInterval: fn => { const id = setInterval(fn, 10); intervals.push(id); return id; } });
+    run();
+    while (!windows.has(2)) await new Promise(resolve => setTimeout(resolve, 5));
+    for (const id of intervals) clearInterval(id);
+    intervals.length = 0;
+    run();
+    const result = await Promise.race([pending.then(() => 'recovered'), new Promise(resolve => setTimeout(() => resolve('blocked'), 500))]);
+    expect(result).toBe('recovered');
+    expect(nativelyParked(windows.get(2).native, display)).toBe(true);
+    expect(browser.windows.create).toHaveBeenCalledTimes(1);
+    expect(visibility.parkingFailures.size).toBe(0);
+    await pending.catch(() => {});
+  });
   test('concurrent creates both verify even though native windows carry no Firefox id', async () => {
     await setup();
     const [a, b] = await Promise.all([visibility.newPage(context), visibility.newPage(context)]);
