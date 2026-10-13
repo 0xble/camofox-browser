@@ -44,6 +44,29 @@ function serverFunction(name, dependencies) {
   return vm.runInNewContext(`(${source.slice(start, end)})`, dependencies);
 }
 
+test.each([[null, false], ['B', false], [null, true], ['B', true]])(
+  'release during first parked session creation preserves the context (tabId=%s, headedOnly=%s)', async (tabId, headedOnly) => {
+    const sessions = new Map(), sessionCreations = new Map([['identity', Promise.resolve()]]);
+    const visible = new Map([[2, { windowId: 2, tabId: 2 }]]);
+    const visibility = { visible, release: jest.fn(async () => { visible.clear(); return true; }) };
+    const page = { state: 'unsaved' };
+    const session = { visibility, headed: false, tabGroups: new Map([['caller', new Map([['B', { page }]])]]) };
+    const closeSession = jest.fn(), identityBusy = jest.fn(() => false), wakes = [];
+    const releaseIdentity = serverFunction('releaseIdentity', { sessions, sessionCreations, sharedParkDisplay: {},
+      findTab: (_session, id) => id === 'B' ? { tabState: { page } } : null,
+      closeSession, identityBusy, setTimeout: fn => wakes.push(fn) });
+    const result = releaseIdentity('identity', { tabId, headedOnly });
+    expect(wakes).toHaveLength(1);
+    expect(visibility.release).not.toHaveBeenCalled();
+    sessions.set('identity', session); sessionCreations.delete('identity'); wakes.shift()();
+    await expect(result).resolves.toEqual({ ok: true, released: true });
+    expect(visibility.release).toHaveBeenCalledWith({ all: false, page: tabId ? page : undefined });
+    expect(closeSession).not.toHaveBeenCalled(); expect(identityBusy).not.toHaveBeenCalled();
+    expect(sessions.get('identity')).toBe(session);
+    expect(session.tabGroups.get('caller').get('B').page).toBe(page);
+    expect(page.state).toBe('unsaved'); expect(session.headed).toBe(false);
+  });
+
 test('parked release without tabId succeeds and always recomputes headed from live handoffs', async () => {
   const visible = new Map([[2, { windowId: 2, tabId: 2 }]]);
   const visibility = { visible, release: jest.fn(async () => { visible.clear(); return true; }) };

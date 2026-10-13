@@ -452,6 +452,37 @@ describe('no-relaunch visibility with two concurrent callers', () => {
     expect(windows.get(2)).toMatchObject(windowBounds(display.park));
     expect([...visibility.visible.keys()]).toEqual([1]);
   });
+  test('a concurrent open timeout cannot roll back the preceding successful handoff', async () => {
+    const p = await visibility.newPage(context);
+    const original = browser.windows.update.getMockImplementation();
+    let resumeFirst, resumeSecond, firstStarted, secondStarted, shows = 0;
+    const firstStart = new Promise(resolve => { firstStarted = resolve; });
+    const secondStart = new Promise(resolve => { secondStarted = resolve; });
+    browser.windows.update.mockImplementation(async (id, bounds) => {
+      if (bounds.focused) {
+        if (++shows === 1) { firstStarted(); await new Promise(resolve => { resumeFirst = resolve; }); }
+        else { secondStarted(); await new Promise(resolve => { resumeSecond = resolve; }); }
+      }
+      return original(id, bounds);
+    });
+    const first = visibility.open(p);
+    await firstStart;
+    const failed = expect(visibility.open(p)).rejects.toThrow('timed out');
+    // Inspect the real HTTP bridge: both commands were issued while parked.
+    const endpoint = JSON.parse(script.match(/^const endpoint=(.*);$/m)[1]);
+    const queued = await (await fetch(endpoint)).json();
+    expect(queued.commands.filter(c => c.action === 'show')).toHaveLength(2);
+    expect(queued.visible).toEqual([]);
+    resumeFirst(); await first; await secondStart;
+    expect(visibility.visible.has(1)).toBe(true);
+    await failed; resumeSecond();
+    await new Promise(resolve => setTimeout(resolve, 100));
+    expect(windows.get(1)).toMatchObject(windowBounds(display.main, true));
+    expect(visibility.visible.has(1)).toBe(true);
+    expect(browser.windows.update.mock.calls.filter(([, bounds]) => !bounds.focused)).toHaveLength(0);
+    expect(context.pages()).toEqual([p]); expect(p.state.input).toBe('unsaved form state');
+    expect(context.close).not.toHaveBeenCalled();
+  });
   test('an expired show never hides a window an earlier open already handed off', async () => {
     const p = await visibility.newPage(context);
     await visibility.open(p);

@@ -3200,22 +3200,23 @@ function identityBusy(userId, session) {
 }
 
 async function releaseIdentity(userId, { headedOnly = false, all = false, tabId = null } = {}) {
-  const parkedSession = sessions.get(userId);
-  if (parkedSession?.visibility) {
-    const page = tabId == null ? undefined : findTab(parkedSession, tabId)?.tabState.page;
-    if (tabId != null && !page) throw Object.assign(new Error('Tab not found'), { statusCode: 404 });
-    // Recompute even after a failed park so idle reaping reflects the windows still shown.
-    try { return { ok: true, released: await parkedSession.visibility.release({ all, page }) }; }
-    finally { parkedSession.headed = parkedSession.visibility.visible.size > 0; }
-  }
-  if (sharedParkDisplay && !parkedSession && !sessionCreations.has(userId)) return { ok: true, released: false };
-  const deadline = Date.now() + 3000;
   let session = sessions.get(userId);
+  if (!session && sharedParkDisplay && !sessionCreations.has(userId)) return { ok: true, released: false };
+  const deadline = Date.now() + 3000;
   while (!session && sessionCreations.has(userId) && Date.now() < deadline) {
     await new Promise(resolve => setTimeout(resolve, Math.min(25, deadline - Date.now())));
     session = sessions.get(userId);
   }
   if (!session && sessionCreations.has(userId)) return { busy: true };
+  // Creation may have completed while release was waiting. Select parking from
+  // the resulting session, never fall through to legacy context destruction.
+  if (session?.visibility) {
+    const page = tabId == null ? undefined : findTab(session, tabId)?.tabState.page;
+    if (tabId != null && !page) throw Object.assign(new Error('Tab not found'), { statusCode: 404 });
+    // Recompute even after a failed park so idle reaping reflects the windows still shown.
+    try { return { ok: true, released: await session.visibility.release({ all, page }) }; }
+    finally { session.headed = session.visibility.visible.size > 0; }
+  }
   if (!session || (headedOnly && !session.headed)) return { ok: true, released: false };
   while (identityBusy(userId, session) && Date.now() < deadline) {
     await new Promise(resolve => setTimeout(resolve, Math.min(25, deadline - Date.now())));
