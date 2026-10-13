@@ -163,6 +163,25 @@ describe('native readback in the add-on (Camoufox-spoofed windows.get)', () => {
     browser.windows.update.mockImplementation(async (id, bounds) => ({ ...windows.get(id), ...bounds }));
     await expect(visibility.newPage(context)).rejects.toThrow('did not park');
   });
+  test('a window natively moved to main after Firefox recorded park geometry is nudged, since a same-bounds update is a no-op', async () => {
+    await setup();
+    // Firefox drops updates whose bounds equal its cached (spoofed) geometry.
+    const cached = new Map();
+    browser.windows.update.mockImplementation(async (id, bounds) => {
+      const w = windows.get(id); if (!w) throw Error('window ended');
+      const key = JSON.stringify(['left', 'top', 'width', 'height'].map(k => bounds[k]));
+      if (cached.get(id) !== key) { cached.set(id, key); w.native = { ...bounds }; }
+      return { ...w, ...bounds };
+    });
+    const p = await visibility.newPage(context);
+    expect(p).toBeTruthy();
+    // macOS moves the window after Firefox recorded park bounds.
+    windows.get(1).native = { ...onMain };
+    visibility.visible.set(1, { windowId: 1, tabId: 1 });
+    await visibility.release({ all: true });
+    expect(nativelyParked(windows.get(1).native, display)).toBe(true);
+    expect(visibility.visible.size).toBe(0);
+  });
   test('concurrent creates both verify even though native windows carry no Firefox id', async () => {
     await setup();
     const [a, b] = await Promise.all([visibility.newPage(context), visibility.newPage(context)]);
