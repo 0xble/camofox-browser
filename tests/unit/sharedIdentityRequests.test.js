@@ -8,7 +8,7 @@ async function fixture() {
   const session = { lastUsedPage: null };
   const sessions = new Map([['personal', session]]);
   const manager = { owns: key => key === 'personal', closings: new Set() };
-  let busy = false;
+  let busy = false, parked = false;
   const app = express();
   // Match server.js: evaluate bypasses the global parser, but parses in its route.
   const globalJson = express.json();
@@ -16,14 +16,14 @@ async function fixture() {
   app.use(createSharedIdentityRequestTracker({ getSessions: () => sessions, manager,
     normalizeUserId: value => value === 'alias' ? 'personal' : value,
     findTab: (_session, id) => id === 'tab-1' ? { tabState: { page } } : null,
-    transitioning: () => busy, requests }));
+    transitioning: () => busy, requests, parkedVisibility: key => parked && key === 'personal' }));
   app.post('/tabs/:tabId/evaluate', express.json(), (req, res) => res.json({ body: req.body, tracked: requests.get('personal') || 0 }));
   app.post('/tabs/:tabId/navigate', (req, res) => res.json({ tracked: requests.get('personal') || 0 }));
   app.post('/browser/identities/:userId/focus', (req, res) => res.status(409).json({ error: 'identity is headless; use open' }));
   const server = await new Promise(resolve => { const s = app.listen(0, '127.0.0.1', () => resolve(s)); });
   const post = (url, body) => fetch(`http://127.0.0.1:${server.address().port}${url}`, {
     method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
-  return { requests, session, manager, page, setBusy: value => { busy = value; }, server, post };
+  return { requests, session, manager, page, setBusy: value => { busy = value; }, setParked: value => { parked = value; }, server, post };
 }
 
 describe('shared identity HTTP tracking and transition gate', () => {
@@ -37,6 +37,20 @@ describe('shared identity HTTP tracking and transition gate', () => {
     expect(f.session.lastUsedPage).toBe(f.page);
     f.setBusy(true);
     expect((await f.post('/tabs/tab-1/navigate', { userId: 'alias' })).status).toBe(409);
+  });
+
+  test('legacy focus keeps the transition gate; parked focus bypasses it without counting', async () => {
+    f.setBusy(true);
+    const gated = await f.post('/browser/identities/alias/focus', {});
+    expect(gated.status).toBe(409); expect(await gated.json()).toEqual({ error: 'identity busy' });
+    f.setBusy(false);
+    await f.post('/browser/identities/alias/focus', {});
+    expect(f.requests.get('personal') || 0).toBe(0); // counted for the request lifetime, then released
+    f.setBusy(true); f.setParked(true);
+    const response = await f.post('/browser/identities/alias/focus', {});
+    expect(response.status).toBe(409);
+    expect(await response.json()).toEqual({ error: 'identity is headless; use open' });
+    expect(f.requests.size).toBe(0);
   });
 
   test('evaluate resolves tab owner without reading its unparsed body, and is gated', async () => {

@@ -19,6 +19,8 @@ import { sharedIdentityMetadata } from './lib/shared-identity-metadata.js';
 import { createSharedIdentityWindowOpener } from './lib/shared-identity-window.js';
 import { createSharedIdentityRequestTracker } from './lib/shared-identity-requests.js';
 import { launchSharedIdentityContext } from './lib/shared-identity-launch.js';
+import { findParkDisplay } from './lib/park-display-launcher.js';
+import { launchWithVisibilityFallback } from './lib/shared-identity-visibility.js';
 import { identityIndicator } from './lib/identity-indicator.js';
 import { extensionsForIdentity } from './lib/profile-extensions.js';
 import { windowSnapshot } from './lib/snapshot.js';
@@ -155,6 +157,14 @@ const sharedIdentities = new SharedIdentityManager({
   logger: { warn: (msg, fields) => log('warn', msg, fields) },
 });
 
+let sharedParkDisplay = null;
+if (CONFIG.sharedIdentityNames.length) {
+  let discoveryError;
+  try { sharedParkDisplay = await findParkDisplay({ name: CONFIG.parkDisplay }); }
+  catch (error) { discoveryError = error.message; }
+  if (!sharedParkDisplay) log('warn', 'no park display; shared identity visibility will use legacy relaunches', { error: discoveryError });
+}
+
 const app = express();
 const globalJsonParser = express.json({ limit: '100kb' });
 app.use((req, res, next) => {
@@ -219,7 +229,7 @@ const identityTransitions = new Map();
  * /browser/identities/{userId}/release:
  *   post:
  *     tags: [Browser]
- *     summary: Checkpoint and release a shared identity session
+ *     summary: Park a caller's tab window (latest handoff if omitted), or checkpoint and release without a park display
  *     security:
  *       - BearerAuth: []
  *     parameters:
@@ -227,6 +237,16 @@ const identityTransitions = new Map();
  *         in: path
  *         required: true
  *         schema: { type: string }
+ *     requestBody:
+ *       required: false
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               tabId:
+ *                 type: string
+ *                 description: In parking mode, release only this tab's window; unknown IDs return 404.
  *     responses:
  *       200:
  *         description: Session cleanly released or already absent.
@@ -247,7 +267,7 @@ app.post('/browser/identities/:userId/release', authMiddleware(), async (req, re
   const userId = normalizeUserId(req.params.userId);
   if (!sharedIdentities.owns(userId)) return res.status(404).json({ error: 'Shared identity not configured' });
   try {
-    const result = await transitionIdentity(userId, 'release', () => releaseIdentity(userId));
+    const result = await transitionIdentity(userId, 'release', () => releaseIdentity(userId, { tabId: req.body?.tabId ?? null }), { coalesceKey: req.body?.tabId ?? null });
     if (result.busy) return res.status(409).json({ error: 'identity busy' });
     return res.json(result);
   } catch (err) { return handleRouteError(err, req, res); }
@@ -255,6 +275,7 @@ app.post('/browser/identities/:userId/release', authMiddleware(), async (req, re
 app.use(createSharedIdentityRequestTracker({
   getSessions: () => sessions, manager: sharedIdentities, normalizeUserId, findTab,
   transitioning: key => identityTransitions.has(key) || sharedIdentityWindow?.transitioning(key), requests: sharedIdentityRequests,
+  parkedVisibility: sharedIdentityParked,
 }));
 // Agent requests, not browser focus or passive page events, determine hidden-tab
 // recency. Record before the handler so long-running actions count as active.
@@ -1477,15 +1498,20 @@ async function closeAllSessions(reason, { clearDownloads = true, clearLocks = tr
   }
 }
 
-async function createSharedIdentityContext(userId, profilePath, { headed = false } = {}) {
-  return launchSharedIdentityContext(profilePath, {
-    headed, extensions: extensionsForIdentity(CONFIG.sharedIdentityExtensions, userId),
-    indicator: identityIndicator(CONFIG.sharedIdentityAliases, userId),
-    launchOptions, firefox, os, getHostOS, config: CONFIG, events: pluginEvents, log,
+async function createSharedIdentityContext(userId, profilePath, { headed = false, parkedOpen = false } = {}) {
+  // A legacy headed transition after a parking failure must stay legacy.
+  // The normal parked opener creates contexts through the default headed=false path;
+  // if parking then fails, an /open launches headed directly instead of twice.
+  return launchWithVisibilityFallback({ display: headed ? null : sharedParkDisplay, profilePath, headed, fallbackHeaded: headed || parkedOpen, log,
+    launch: ({ headed, visibility }) => launchSharedIdentityContext(profilePath, {
+      headed, visibility, extensions: extensionsForIdentity(CONFIG.sharedIdentityExtensions, userId),
+      indicator: identityIndicator(CONFIG.sharedIdentityAliases, userId),
+      launchOptions, firefox, os, getHostOS, config: CONFIG, events: pluginEvents, log,
+    }),
   });
 }
 
-async function getSession(userId, { trace = false, headed = false } = {}) {
+async function getSession(userId, { trace = false, headed = false, parkedOpen = false } = {}) {
   const key = normalizeUserId(userId);
   if (sharedIdentities.failedClosures.has(key)) {
     throw Object.assign(new Error('shared identity close failed; profile ownership is unconfirmed'), { statusCode: 409 });
@@ -1564,7 +1590,7 @@ async function getSession(userId, { trace = false, headed = false } = {}) {
       // only to ephemeral contexts. Shared profiles restore cookies explicitly.
       if (!sharedIdentity) await pluginEvents.emitAsync('session:creating', { userId: key, contextOptions });
       const context = sharedIdentity
-        ? await sharedIdentities.open(key, profilePath => createSharedIdentityContext(key, profilePath, { headed }))
+        ? await sharedIdentities.open(key, profilePath => createSharedIdentityContext(key, profilePath, { headed, parkedOpen }))
         : await b.newContext(contextOptions);
 
       let tracePath = null;
@@ -1580,14 +1606,21 @@ async function getSession(userId, { trace = false, headed = false } = {}) {
         }
       }
 
-      const created = { context, tabGroups: new Map(), pageLeases: new Set(), lastAccess: Date.now(), proxySessionId: sessionProxy?.sessionId || null, tracePath, sharedIdentity, headed: sharedIdentity && headed, keepOpen: sharedIdentity };
+      const created = { context, tabGroups: new Map(), pageLeases: new Set(), lastAccess: Date.now(), proxySessionId: sessionProxy?.sessionId || null, tracePath, sharedIdentity, headed: sharedIdentity && (headed || Boolean(context.sharedIdentityHeaded)), keepOpen: sharedIdentity };
+      created.visibility = context.sharedIdentityVisibility;
+      if (created.visibility) created.createPage = () => created.visibility.newPage(context);
       sessions.set(key, created);
       if (sharedIdentity) {
         // Pages opened by the visible Firefox UI are real user tabs, not leaked
         // automation pages. Register them so handoff can find them and normal
         // accounting is accurate; keepOpen is a second safety boundary if a
         // browser event races this listener.
-        context.on('page', (page) => registerSharedIdentityPage(created, key, page));
+        context.on('page', (page) => {
+          if (!created.visibility) registerSharedIdentityPage(created, key, page);
+          else created.visibility.shouldRegisterUIPage(page).then(register => {
+            if (register && sessions.get(key) === created) registerSharedIdentityPage(created, key, page);
+          }).catch(() => {});
+        });
         context.on('close', () => {
           if (created._intentionalClose || sessions.get(key) !== created) return;
           clearSessionLocks(created);
@@ -1595,12 +1628,18 @@ async function getSession(userId, { trace = false, headed = false } = {}) {
           sessions.delete(key);
           refreshActiveTabsGauge();
         });
-        for (const page of context.pages()) registerSharedIdentityPage(created, key, page);
-        if (!headed && sharedIdentityLastUrls.has(key)) {
+        for (const page of context.pages()) {
+          if (!created.visibility?.isManagedPage(page)) registerSharedIdentityPage(created, key, page);
+        }
+        if (!created.headed && sharedIdentityLastUrls.has(key)) {
           const url = sharedIdentityLastUrls.get(key);
-          const page = context.pages().find(candidate => !candidate.isClosed?.() && candidate.url?.() === 'about:blank')
-            || await context.newPage();
+          // The session is already published; a page-creation failure (e.g. a
+          // parking bridge timeout) must only skip restoration, not fail creation.
           try {
+            const page = created.createPage ? await created.createPage()
+              : context.pages().find(candidate => !candidate.isClosed?.() && candidate.url?.() === 'about:blank')
+                || await context.newPage();
+            if (created.visibility) registerSharedIdentityPage(created, key, page);
             await page.goto(url, { timeout: 10_000 });
             created.lastUsedPage = page;
             sharedIdentityLastUrls.delete(key);
@@ -1626,7 +1665,7 @@ async function getSession(userId, { trace = false, headed = false } = {}) {
 async function createLeasedPage(session) {
   const lease = acquirePageLease(session);
   try {
-    const page = setLeasedPage(lease, await session.context.newPage());
+    const page = setLeasedPage(lease, await (session.createPage ? session.createPage() : session.context.newPage()));
     return { page, lease };
   } catch (err) {
     releasePageLease(session, lease);
@@ -3131,7 +3170,13 @@ app.get('/browser/identities', authMiddleware(), (req, res) => {
 
 // Serialize opposite operations without returning an open result to a release
 // caller (or vice versa). A queued operation installs its gate immediately.
+// In parking mode visibility changes never relaunch, so they take no identity gate.
+function sharedIdentityParked(userId) {
+  return Boolean(sharedParkDisplay && (!sessions.has(userId) || sessions.get(userId)?.visibility));
+}
+
 function transitionIdentity(userId, action, operation, { coalesceKey = null } = {}) {
+  if (sharedIdentityParked(userId)) return operation();
   const previous = identityTransitions.get(userId);
   if (previous?.action === action && Object.is(previous.coalesceKey, coalesceKey)) return previous.promise;
   const promise = (async () => {
@@ -3158,14 +3203,27 @@ function identityBusy(userId, session) {
   );
 }
 
-async function releaseIdentity(userId, { headedOnly = false } = {}) {
-  const deadline = Date.now() + 3000;
+async function releaseIdentity(userId, { headedOnly = false, all = false, tabId = null, keepHumanControlled = false } = {}) {
   let session = sessions.get(userId);
+  if (!session && sharedParkDisplay && !sessionCreations.has(userId)) return { ok: true, released: false };
+  const deadline = Date.now() + 3000;
   while (!session && sessionCreations.has(userId) && Date.now() < deadline) {
     await new Promise(resolve => setTimeout(resolve, Math.min(25, deadline - Date.now())));
     session = sessions.get(userId);
   }
   if (!session && sessionCreations.has(userId)) return { busy: true };
+  // Creation may have completed while release was waiting. Select parking from
+  // the resulting session, never fall through to legacy context destruction.
+  if (session?.visibility) {
+    const page = tabId == null ? undefined : findTab(session, tabId)?.tabState.page;
+    if (tabId != null && !page) throw Object.assign(new Error('Tab not found'), { statusCode: 404 });
+    // Idle release must not move a person's checkout or auth window mid-flow.
+    const keep = keepHumanControlled ? [...session.tabGroups.values()].flatMap(group => [...group])
+      .filter(([id, tab]) => humanControlledTabs.has(id) && tab.page && !tab.page.isClosed?.()).map(([, tab]) => tab.page) : [];
+    // Recompute even after a failed park so idle reaping reflects the windows still shown.
+    try { return { ok: true, released: await session.visibility.release(keep.length ? { all, page, keep } : { all, page }) }; }
+    finally { session.headed = session.visibility.visible.size > 0; }
+  }
   if (!session || (headedOnly && !session.headed)) return { ok: true, released: false };
   while (identityBusy(userId, session) && Date.now() < deadline) {
     await new Promise(resolve => setTimeout(resolve, Math.min(25, deadline - Date.now())));
@@ -3196,7 +3254,7 @@ async function cleanIdleSharedSessions() {
   if (headedCandidates.length && await sharedIdentityIdlePolicy.shouldReleaseHeaded(CONFIG.headedIdleReleaseMin)) {
     for (const [key, original] of headedCandidates) {
       if (sessions.get(key) !== original || !original.headed) continue;
-      await transitionIdentity(key, 'release', () => releaseIdentity(key, { headedOnly: true })).catch(err => {
+      await transitionIdentity(key, 'release', () => releaseIdentity(key, { headedOnly: true, all: true, keepHumanControlled: true })).catch(err => {
         log('warn', 'headed idle release failed', { userId: key, error: err.message });
       });
     }
@@ -3215,7 +3273,7 @@ async function cleanIdleSharedSessions() {
     }
     if (CONFIG.hiddenSessionIdleMin && sessions.get(key) === original && !original.headed
       && sharedIdentityIdlePolicy.agentIdle(original.lastAccess, CONFIG.hiddenSessionIdleMin) && !identityBusy(key, original)) {
-      await transitionIdentity(key, 'release', () => releaseIdentity(key)).catch(err => {
+      await transitionIdentity(key, 'release', () => releaseIdentity(key, { all: true })).catch(err => {
         log('warn', 'hidden idle session close failed', { userId: key, error: err.message });
       });
     }
@@ -3229,6 +3287,7 @@ sharedIdentityWindow = createSharedIdentityWindowOpener({
   closeSession,
   registerPage: registerSharedIdentityPage,
   isBusy: identityBusy,
+  parkingEnabled: Boolean(sharedParkDisplay),
 });
 
 /**
@@ -3236,7 +3295,7 @@ sharedIdentityWindow = createSharedIdentityWindowOpener({
  * /browser/identities/{userId}/open:
  *   post:
  *     tags: [Browser]
- *     summary: Show a named shared identity in a headed window (restarting headless sessions)
+ *     summary: Show the caller's shared identity window (preserving live tabs when a park display exists)
  *     parameters:
  *       - name: userId
  *         in: path
@@ -3275,14 +3334,24 @@ app.post('/browser/identities/:userId/open', async (req, res) => {
  * /browser/identities/{userId}/focus:
  *   post:
  *     tags: [Browser]
- *     summary: Focus an open named shared identity
+ *     summary: Show a caller's tab window in parking mode; otherwise focus an open named shared identity
  *     parameters:
  *       - name: userId
  *         in: path
  *         required: true
  *         schema: { type: string }
+ *     requestBody:
+ *       required: false
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               tabId:
+ *                 type: string
+ *                 description: Caller-owned tab to show in parking mode, as for open.
  *     responses:
- *       200: { description: Focus result. }
+ *       200: { description: Focus result after the requested window is shown. }
  *       404: { description: Identity is not configured or is not open. }
  *       409: { description: Identity is headless; use open to show it. }
  */
@@ -3290,6 +3359,12 @@ app.post('/browser/identities/:userId/focus', async (req, res) => {
   const userId = normalizeUserId(req.params.userId);
   if (!sharedIdentities.owns(userId)) return res.status(404).json({ error: 'Shared identity not configured' });
   const session = sessions.get(userId);
+  if (session?.visibility || (sharedParkDisplay && !session)) {
+    try {
+      const result = await sharedIdentityWindow.openWindow(userId, req.body?.tabId ?? null);
+      return res.json(result);
+    } catch (err) { return handleRouteError(err, req, res); }
+  }
   if (session && !session.headed) return res.status(409).json({ error: 'identity is headless; use open' });
   const page = await sharedIdentities.focus(userId);
   if (!page) return res.status(404).json({ error: 'Shared identity is not open' });
@@ -3302,7 +3377,7 @@ app.post('/browser/identities/:userId/focus', async (req, res) => {
  * /tabs/{tabId}/handoff:
  *   post:
  *     tags: [Browser]
- *     summary: Mark a tab for human or agent control
+ *     summary: Transfer human or agent control, showing or parking the tab window in parking mode
  *     parameters:
  *       - name: tabId
  *         in: path
@@ -3319,7 +3394,7 @@ app.post('/browser/identities/:userId/focus', async (req, res) => {
  *               userId: { type: string, description: Shared identity owner. }
  *               handoff: { type: string, enum: [human, agent] }
  *     responses:
- *       200: { description: Handoff recorded. }
+ *       200: { description: "Control transferred after the requested show or park completes; focused is true only after a human handoff succeeds. If the park on an agent return fails, agent control is still returned and the response adds parked: false and a reason." }
  *       400: { description: Invalid handoff payload. }
  *       404: { description: Tab not found. }
  *       409: { description: Tab is not a shared identity tab or is no longer available. }
@@ -3339,7 +3414,9 @@ app.post('/tabs/:tabId/handoff', async (req, res) => {
         tabId: req.params.tabId,
         handoff,
         tabState: current?.tabState,
+        session,
         humanControlledTabs,
+        log,
       });
     }, HANDLER_TIMEOUT_MS, undefined, { allowHumanControl: true });
     return res.json({ ok: true, ...result });

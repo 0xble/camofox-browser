@@ -87,7 +87,7 @@
         "tags": [
           "Browser"
         ],
-        "summary": "Checkpoint and release a shared identity session",
+        "summary": "Park a caller's tab window (latest handoff if omitted), or checkpoint and release without a park display",
         "security": [
           {
             "BearerAuth": []
@@ -103,6 +103,22 @@
             }
           }
         ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "tabId": {
+                    "type": "string",
+                    "description": "In parking mode, release only this tab's window; unknown IDs return 404."
+                  }
+                }
+              }
+            }
+          }
+        },
         "responses": {
           "200": {
             "description": "Session cleanly released or already absent.",
@@ -483,7 +499,7 @@
         "tags": [
           "Browser"
         ],
-        "summary": "Show a named shared identity in a headed window (restarting headless sessions)",
+        "summary": "Show the caller's shared identity window (preserving live tabs when a park display exists)",
         "parameters": [
           {
             "name": "userId",
@@ -528,7 +544,7 @@
         "tags": [
           "Browser"
         ],
-        "summary": "Focus an open named shared identity",
+        "summary": "Show a caller's tab window in parking mode; otherwise focus an open named shared identity",
         "parameters": [
           {
             "name": "userId",
@@ -539,9 +555,25 @@
             }
           }
         ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "tabId": {
+                    "type": "string",
+                    "description": "Caller-owned tab to show in parking mode, as for open."
+                  }
+                }
+              }
+            }
+          }
+        },
         "responses": {
           "200": {
-            "description": "Focus result."
+            "description": "Focus result after the requested window is shown."
           },
           "404": {
             "description": "Identity is not configured or is not open."
@@ -557,7 +589,7 @@
         "tags": [
           "Browser"
         ],
-        "summary": "Mark a tab for human or agent control",
+        "summary": "Transfer human or agent control, showing or parking the tab window in parking mode",
         "parameters": [
           {
             "name": "tabId",
@@ -597,7 +629,7 @@
         },
         "responses": {
           "200": {
-            "description": "Handoff recorded."
+            "description": "Control transferred after the requested show or park completes; focused is true only after a human handoff succeeds. If the park on an agent return fails, agent control is still returned and the response adds parked: false and a reason."
           },
           "400": {
             "description": "Invalid handoff payload."
