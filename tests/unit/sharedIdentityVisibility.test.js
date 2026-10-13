@@ -95,6 +95,29 @@ describe('parking initialization failures', () => {
     expect(parked.close).toHaveBeenCalledTimes(stage === 'attach' ? 1 : 0);
     expect(visibility.close).toHaveBeenCalledTimes(stage === 'create' ? 0 : 1);
   });
+  test('visibility failure restores profile geometry before legacy fallback', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'park-fallback-'));
+    const key = 'chrome://browser/content/browser.xhtml';
+    const original = { [key]: { 'main-window': { screenX: '10', screenY: '20', width: '800', height: '600', custom: 'retained' } } };
+    try {
+      await fs.writeFile(path.join(root, 'xulstore.json'), JSON.stringify(original));
+      const visibility = { park: windowBounds(display.park), attach: async () => { throw Error('attach failed'); }, close: async () => {} };
+      const parked = { close: async () => {}, once: () => {} };
+      const legacy = {};
+      let legacyProfile;
+      const launch = jest.fn(async options => {
+        if (options.visibility) return parked;
+        legacyProfile = JSON.parse(await fs.readFile(path.join(root, 'xulstore.json'), 'utf8'));
+        return legacy;
+      });
+      const prepareProfile = profile => prepareParkedProfile(profile, windowBounds(display.park));
+      await expect(launchWithVisibilityFallback({ display, profilePath: root, launch, createVisibility: async () => visibility, prepareProfile }))
+        .resolves.toBe(legacy);
+      expect(legacyProfile).toEqual(original);
+      expect(JSON.parse(await fs.readFile(path.join(root, 'xulstore.json'), 'utf8'))).toEqual(original);
+      expect(launch.mock.calls.at(-1)[0]).toEqual({ headed: false, visibility: null });
+    } finally { await fs.rm(root, { recursive: true, force: true }); }
+  });
   test('a fallback context still opens its requested tab through the legacy path', async () => {
     const p = { isClosed: () => false, bringToFront: jest.fn(async () => {}) };
     const session = { headed: true, visibility: null, tabGroups: new Map([['caller', new Map([['B', { page: p }]])]]) };
