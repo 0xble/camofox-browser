@@ -50,7 +50,8 @@ describe('startup park geometry verification', () => {
     await start();
     expect(w).toMatchObject(windowBounds(display.park));
     expect(browser.windows.update).toHaveBeenCalledTimes(2);
-    expect(browser.windows.get).toHaveBeenCalledTimes(2);
+    expect(browser.windows.get).toHaveBeenCalledTimes(3);
+    expect(browser.windows.get).toHaveBeenNthCalledWith(1, 1, { populate: true });
     expect(emitted).toContainEqual({ parked: 1 });
     expect(emitted.at(-1)).toEqual({ ready: true });
   });
