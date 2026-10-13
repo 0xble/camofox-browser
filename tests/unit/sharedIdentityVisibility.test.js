@@ -224,9 +224,9 @@ describe('no-relaunch visibility with two concurrent callers', () => {
         query: async ({ title, windowId } = {}) => [...windows.values()].flatMap(w => w.tabs).filter(t => (title == null || t.page.document.title === title) && (windowId == null || t.windowId === windowId)),
       },
     };
-    visibility = await createSharedIdentityVisibility(display, { rootDir: root, timeoutMs: 2000 });
+    visibility = await createSharedIdentityVisibility(display, { nativeReadback: null, rootDir: root, timeoutMs: 2000 });
     script = await fs.readFile(path.join(visibility.addon, 'background.js'), 'utf8');
-    vm.runInNewContext(script, { browser, fetch, setInterval: fn => { const id = setInterval(fn, 10); intervals.push(id); return id; } });
+    vm.runInNewContext(script, { browser, fetch, setTimeout, setInterval: fn => { const id = setInterval(fn, 10); intervals.push(id); return id; } });
     await visibility.attach(context);
   });
   afterEach(async () => { for (const id of intervals) clearInterval(id); await visibility.close(); await fs.rm(root, { recursive: true, force: true }); });
@@ -277,7 +277,7 @@ describe('no-relaunch visibility with two concurrent callers', () => {
     const a = await visibility.newPage(context), b = await visibility.newPage(context);
     await visibility.open(b);
     for (const id of intervals) clearInterval(id);
-    vm.runInNewContext(script, { browser, fetch, setInterval: fn => { const id = setInterval(fn, 10); intervals.push(id); return id; } });
+    vm.runInNewContext(script, { browser, fetch, setTimeout, setInterval: fn => { const id = setInterval(fn, 10); intervals.push(id); return id; } });
     await new Promise(resolve => setTimeout(resolve, 50));
     expect(windows.get(2)).toMatchObject(windowBounds(display.main, true));
     expect(windows.get(1)).toMatchObject(windowBounds(display.park));
@@ -301,7 +301,7 @@ describe('no-relaunch visibility with two concurrent callers', () => {
     const popup = page('https://fixture.test/oauth');
     windows.set(50, { id: 50, tabs: [{ id: 50, windowId: 50, openerTabId: 2, page: popup, url: popup.url() }], ...windowBounds(display.park) });
     context.livePages.push(popup);
-    vm.runInNewContext(script, { browser, fetch, setInterval: fn => { const id = setInterval(fn, 10); intervals.push(id); return id; } });
+    vm.runInNewContext(script, { browser, fetch, setTimeout, setInterval: fn => { const id = setInterval(fn, 10); intervals.push(id); return id; } });
     await new Promise(resolve => setTimeout(resolve, 60));
     expect(windows.get(50)).toMatchObject(windowBounds(display.main, true));
     expect(visibility.visible.has(50)).toBe(true);
@@ -535,7 +535,7 @@ describe('no-relaunch visibility with two concurrent callers', () => {
     const failed = expect(visibility.newPage(context)).rejects.toThrow('timed out');
     await start; for (const id of intervals) clearInterval(id); await failed;
     expect(windows.size).toBe(1);
-    vm.runInNewContext(script, { browser, fetch, setInterval: fn => { const id = setInterval(fn, 10); intervals.push(id); return id; } });
+    vm.runInNewContext(script, { browser, fetch, setTimeout, setInterval: fn => { const id = setInterval(fn, 10); intervals.push(id); return id; } });
     await new Promise(resolve => setTimeout(resolve, 100));
     expect(windows.size).toBe(0); expect(context.pages()).toEqual([]);
   });
@@ -694,6 +694,108 @@ describe('no-relaunch visibility with two concurrent callers', () => {
     expect(windows.get(2)).toMatchObject(windowBounds(display.main, true));
     expect(context.pages()).toEqual([a, b, popup]);
   });
+  test('new API windows verify park geometry when create ignores the requested position', async () => {
+    const originalCreate = browser.windows.create;
+    let ignored = true;
+    browser.windows.create = async args => {
+      const w = await originalCreate(args);
+      if (ignored) { ignored = false; w.left = 20; w.top = 50; }
+      return w;
+    };
+    try {
+      await visibility.newPage(context);
+      expect(windows.get(1)).toMatchObject(windowBounds(display.park));
+      expect(browser.windows.update).toHaveBeenCalledWith(1, windowBounds(display.park));
+      expect(visibility.visible.has(1)).toBe(false);
+    } finally { browser.windows.create = originalCreate; }
+  });
+  test('new API window drift during native placement is corrected before create acknowledges', async () => {
+    const originalCreate = browser.windows.create;
+    browser.windows.create = async args => {
+      const w = await originalCreate(args);
+      setTimeout(() => { w.left = 20; w.top = 50; }, 15);
+      return w;
+    };
+    try {
+      await visibility.newPage(context);
+      expect(windows.get(1)).toMatchObject(windowBounds(display.park));
+      expect(browser.windows.update).toHaveBeenCalledWith(1, windowBounds(display.park));
+    } finally { browser.windows.create = originalCreate; }
+  });
+  test('park retries successful updates whose native readback remains on main', async () => {
+    const p = await visibility.newPage(context); await visibility.open(p);
+    const originalUpdate = browser.windows.update.getMockImplementation();
+    let ignored = 0;
+    browser.windows.update.mockImplementation(async (id, bounds) => {
+      if (!bounds.focused && ignored++ < 2) return { ...windows.get(id), ...bounds };
+      return originalUpdate(id, bounds);
+    });
+    expect(await visibility.release({ page: p })).toBe(true);
+    expect(windows.get(1)).toMatchObject(windowBounds(display.park));
+    expect(ignored).toBe(3);
+    expect(visibility.visible.size).toBe(0);
+  });
+  test('uncorrectable create is bounded, reports geometry failure and closes only its own window', async () => {
+    const other = await visibility.newPage(context); await visibility.open(other);
+    const originalCreate = browser.windows.create;
+    browser.windows.create = async args => { const w = await originalCreate(args); w.left = 20; w.top = 50; return w; };
+    const originalUpdate = browser.windows.update.getMockImplementation();
+    browser.windows.update.mockImplementation(async (id, bounds) => id === 2 ? { ...windows.get(id), ...bounds } : originalUpdate(id, bounds));
+    const started = Date.now();
+    try {
+      await expect(visibility.newPage(context)).rejects.toThrow('did not park on the parking display');
+      expect(Date.now() - started).toBeLessThan(1500);
+      expect(browser.windows.update.mock.calls.filter(([id]) => id === 2)).toHaveLength(4);
+      expect(browser.windows.remove).toHaveBeenCalledWith(2);
+      expect(context.pages()).toEqual([other]);
+      expect(windows.get(1)).toMatchObject(windowBounds(display.main, true));
+    } finally { browser.windows.create = originalCreate; }
+  });
+  test('uncorrectable park does not acknowledge success or clear a human handoff', async () => {
+    const p = await visibility.newPage(context); await visibility.open(p);
+    browser.windows.update.mockImplementation(async (id, bounds) => ({ ...windows.get(id), ...bounds }));
+    await expect(visibility.release({ page: p })).rejects.toMatchObject({
+      message: '1 of 1 window park operations failed', errors: [expect.objectContaining({ message: expect.stringContaining('did not park on the parking display') })],
+    });
+    expect(visibility.visible.has(1)).toBe(true);
+    expect(visibility.parkingFailures.get(1)).toContain('did not park');
+    expect(windows.get(1)).toMatchObject(windowBounds(display.main, true));
+  });
+  test('parked UI onCreated uses native readback and reports uncorrectable placement', async () => {
+    const ui = page('https://fixture.test/ui');
+    const w = { id: 60, tabs: [{ id: 60, windowId: 60, page: ui, url: ui.url() }], ...windowBounds(display.main, true) };
+    windows.set(60, w); context.livePages.push(ui);
+    const originalUpdate = browser.windows.update.getMockImplementation();
+    let ignored = false;
+    browser.windows.update.mockImplementation(async (id, bounds) => {
+      if (!ignored) { ignored = true; return { ...windows.get(id), ...bounds }; }
+      return originalUpdate(id, bounds);
+    });
+    await onCreated(w);
+    expect(w).toMatchObject(windowBounds(display.park));
+    expect(visibility.parkingFailures.size).toBe(0);
+    Object.assign(w, windowBounds(display.main, true));
+    browser.windows.update.mockImplementation(async (id, bounds) => ({ ...windows.get(id), ...bounds }));
+    await onCreated(w);
+    expect(visibility.parkingFailures.get(60)).toContain('did not park');
+    // A later successful native move clears the failure without replacing the page.
+    browser.windows.update.mockImplementation(originalUpdate);
+    await onCreated(w);
+    expect(w).toMatchObject(windowBounds(display.park));
+    expect(visibility.parkingFailures.size).toBe(0);
+    expect(context.pages()).toEqual([ui]);
+  });
+  test('background restart re-verifies recorded parked API windows without touching visible windows', async () => {
+    const a = await visibility.newPage(context), b = await visibility.newPage(context);
+    await visibility.open(b);
+    Object.assign(windows.get(1), { left: 20, top: 50 });
+    for (const id of intervals) clearInterval(id);
+    vm.runInNewContext(script, { browser, fetch, setTimeout, setInterval: fn => { const id = setInterval(fn, 10); intervals.push(id); return id; } });
+    await new Promise(resolve => setTimeout(resolve, 120));
+    expect(windows.get(1)).toMatchObject(windowBounds(display.park));
+    expect(windows.get(2)).toMatchObject(windowBounds(display.main, true));
+    expect(context.pages()).toEqual([a, b]);
+  });
   test('an opener-less UI window during a handoff still goes to the main display', async () => {
     const p = await visibility.newPage(context); await visibility.open(p);
     const ui = page('about:newtab');
@@ -705,7 +807,7 @@ describe('no-relaunch visibility with two concurrent callers', () => {
     const emitted = [], jobs = [];
     const files = visibilityAddonFiles({ endpoint: 'fake', park: {}, main: {} });
     const expired = { id: 'expired', action: 'create', url: 'about:blank#camofox-expired', expiresAt: Date.now() - 1 };
-    vm.runInNewContext(files['background.js'], { browser, setInterval: fn => jobs.push(fn), fetch: async (_url, opts) => {
+    vm.runInNewContext(files['background.js'], { browser, setTimeout, setInterval: fn => jobs.push(fn), fetch: async (_url, opts) => {
       if (opts) { emitted.push(JSON.parse(opts.body)); return { json: async () => ({ accepted: false }) }; }
       return { json: async () => ({ commands: [expired], visible: [], parked: [] }) };
     } });
