@@ -118,6 +118,28 @@ describe('parking initialization failures', () => {
       expect(launch.mock.calls.at(-1)[0]).toEqual({ headed: false, visibility: null });
     } finally { await fs.rm(root, { recursive: true, force: true }); }
   });
+  test('an /open whose parking init fails falls back straight to a headed launch', async () => {
+    const legacy = {};
+    const launch = jest.fn(async options => options.visibility ? { close: async () => {}, once() {} } : legacy);
+    const visibility = { park: {}, attach: async () => { throw Error('attach failed'); }, close: async () => {} };
+    expect(await launchWithVisibilityFallback({ display, profilePath: 'unused', fallbackHeaded: true, launch,
+      createVisibility: async () => visibility, prepareProfile: async () => {} })).toBe(legacy);
+    expect(launch.mock.calls.map(call => call[0].headed)).toEqual([true, true]);
+    expect(launch.mock.calls.at(-1)[0]).toEqual({ headed: true, visibility: null });
+    expect(legacy.sharedIdentityHeaded).toBe(true);
+  });
+  test('the opener focuses a headed fallback session instead of relaunching it', async () => {
+    const p = { isClosed: () => false };
+    const session = { headed: true, visibility: null, tabGroups: new Map() };
+    const sessions = new Map();
+    const getSession = jest.fn(async () => { sessions.set('identity', session); return session; });
+    const closeSession = jest.fn(), focus = jest.fn(async () => p);
+    const opener = createSharedIdentityWindowOpener({ parkingEnabled: true, sessions, manager: { failedClosures: new Map(), focus },
+      getSession, closeSession, registerPage: () => 'T', isBusy: () => false });
+    expect(await opener.openWindow('identity')).toMatchObject({ focused: true, tabId: 'T' });
+    expect(getSession).toHaveBeenCalledTimes(1); expect(getSession).toHaveBeenCalledWith('identity', { parkedOpen: true });
+    expect(closeSession).not.toHaveBeenCalled(); expect(focus).toHaveBeenCalledTimes(1);
+  });
   test('a fallback context still opens its requested tab through the legacy path', async () => {
     const p = { isClosed: () => false, bringToFront: jest.fn(async () => {}) };
     const session = { headed: true, visibility: null, tabGroups: new Map([['caller', new Map([['B', { page: p }]])]]) };
@@ -160,7 +182,7 @@ describe('parking initialization failures', () => {
 });
 
 describe('no-relaunch visibility with two concurrent callers', () => {
-  let root, visibility, context, windows, intervals, nextId, onCreated, browser, script;
+  let root, visibility, context, windows, intervals, nextId, onCreated, onTabRemoved, browser, script;
   beforeEach(async () => {
     root = await fs.mkdtemp(path.join(os.tmpdir(), 'park-visibility-'));
     context = new EventEmitter();
@@ -173,6 +195,7 @@ describe('no-relaunch visibility with two concurrent callers', () => {
         onCreated: { addListener: fn => { onCreated = fn; } },
         onRemoved: { addListener() {} },
         getAll: async () => [...windows.values()],
+        get: async id => { const w = windows.get(id); if (!w) throw Error('window ended'); return w; },
         update: jest.fn(async (id, bounds) => { const w = windows.get(id); if (!w) throw Error('window ended'); Object.assign(w, bounds); return w; }),
         remove: jest.fn(async id => {
           const w = windows.get(id); windows.delete(id);
@@ -188,6 +211,7 @@ describe('no-relaunch visibility with two concurrent callers', () => {
         },
       },
       tabs: {
+        onRemoved: { addListener: fn => { onTabRemoved = fn; } },
         update: async () => {},
         get: async id => { const t = [...windows.values()].flatMap(w => w.tabs).find(t => t.id === id); if (!t) throw Error('tab ended'); return t; },
         query: async ({ title, windowId } = {}) => [...windows.values()].flatMap(w => w.tabs).filter(t => (title == null || t.page.document.title === title) && (windowId == null || t.windowId === windowId)),
@@ -387,6 +411,79 @@ describe('no-relaunch visibility with two concurrent callers', () => {
     await start; await failed; resume();
     await new Promise(resolve => setTimeout(resolve, 100));
     expect(windows.get(1)).toMatchObject(windowBounds(display.park)); expect(visibility.visible.size).toBe(0);
+  });
+  test('a closed handoff tab inside a surviving window can still be parked, even if onRemoved was missed', async () => {
+    const a = await visibility.newPage(context), b = await visibility.newPage(context);
+    await visibility.open(a); await visibility.open(b);
+    // A human opens a second tab in the handoff window, then closes the original.
+    const w = windows.get(2), human = page('https://fixture.test/checkout');
+    w.tabs.push({ id: 99, windowId: 2, page: human, url: human.url(), active: true });
+    w.tabs = w.tabs.filter(t => t.id !== 2);
+    expect(visibility.visible.get(2)).toMatchObject({ tabId: 2 });
+    expect(await visibility.release()).toBe(true);
+    expect(windows.get(2)).toMatchObject(windowBounds(display.park));
+    expect(visibility.visible.has(2)).toBe(false);
+    // The remaining handoff still parks, so release({ all }) is not stuck either.
+    expect(await visibility.release({ all: true })).toBe(true);
+    expect(visibility.visible.size).toBe(0);
+    expect(windows.get(1)).toMatchObject(windowBounds(display.park));
+  });
+  test('tab removal re-keys the visible entry to a live tab in its window', async () => {
+    const p = await visibility.newPage(context); await visibility.open(p);
+    windows.get(1).tabs = [{ id: 7, windowId: 1, page: page('https://fixture.test/'), active: true }];
+    await onTabRemoved(1, { windowId: 1, isWindowClosing: false });
+    await new Promise(resolve => setTimeout(resolve, 20));
+    expect(visibility.visible.get(1)).toEqual({ windowId: 1, tabId: 7 });
+    expect(await visibility.release()).toBe(true);
+    expect(windows.get(1)).toMatchObject(windowBounds(display.park)); expect(visibility.visible.size).toBe(0);
+  });
+  test('a visible window that vanished without onRemoved is dropped on release', async () => {
+    const p = await visibility.newPage(context); await visibility.open(p);
+    windows.delete(1);
+    expect(await visibility.release({ all: true })).toBe(true);
+    expect(visibility.visible.size).toBe(0); expect(visibility.visible.has(1)).toBe(false);
+  });
+  test('one failed park does not keep other handoffs visible, and the error still surfaces', async () => {
+    const a = await visibility.newPage(context), b = await visibility.newPage(context);
+    await visibility.open(a); await visibility.open(b);
+    const original = browser.windows.update.getMockImplementation();
+    browser.windows.update.mockImplementation(async (id, bounds) => { if (id === 1) throw Error('stuck window'); return original(id, bounds); });
+    await expect(visibility.release({ all: true })).rejects.toThrow('1 of 2 window park operations failed');
+    expect(windows.get(2)).toMatchObject(windowBounds(display.park));
+    expect([...visibility.visible.keys()]).toEqual([1]);
+  });
+  test('an expired show never hides a window an earlier open already handed off', async () => {
+    const p = await visibility.newPage(context);
+    await visibility.open(p);
+    const original = browser.windows.update.getMockImplementation();
+    let resume, started; const start = new Promise(resolve => { started = resolve; });
+    browser.windows.update.mockImplementation(async (id, bounds) => {
+      if (bounds.focused) { started(); await new Promise(resolve => { resume = resolve; }); }
+      return original(id, bounds);
+    });
+    const failed = expect(visibility.open(p)).rejects.toThrow('timed out');
+    await start; await failed; resume();
+    await new Promise(resolve => setTimeout(resolve, 100));
+    expect(windows.get(1)).toMatchObject(windowBounds(display.main, true));
+    expect(visibility.visible.has(1)).toBe(true);
+  });
+  test('popups from parked tabs stay parked while another window is handed off', async () => {
+    const a = await visibility.newPage(context), b = await visibility.newPage(context);
+    await visibility.open(b);
+    const popup = page('https://fixture.test/automation-popup');
+    const w = { id: 60, tabs: [{ id: 60, windowId: 60, openerTabId: 1, page: popup, url: popup.url() }], ...windowBounds(display.park) };
+    windows.set(60, w); context.livePages.push(popup); await onCreated(w);
+    expect(w).toMatchObject(windowBounds(display.park));
+    expect(visibility.visible.has(60)).toBe(false);
+    expect(windows.get(2)).toMatchObject(windowBounds(display.main, true));
+    expect(context.pages()).toEqual([a, b, popup]);
+  });
+  test('an opener-less UI window during a handoff still goes to the main display', async () => {
+    const p = await visibility.newPage(context); await visibility.open(p);
+    const ui = page('about:newtab');
+    const w = { id: 61, tabs: [{ id: 61, windowId: 61, page: ui, url: ui.url() }], ...windowBounds(display.park) };
+    windows.set(61, w); context.livePages.push(ui); await onCreated(w);
+    expect(w).toMatchObject(windowBounds(display.main, true)); expect(visibility.visible.has(61)).toBe(true);
   });
   test('expired commands are acknowledged without creating a window', async () => {
     const emitted = [], jobs = [];

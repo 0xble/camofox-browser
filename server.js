@@ -275,6 +275,7 @@ app.post('/browser/identities/:userId/release', authMiddleware(), async (req, re
 app.use(createSharedIdentityRequestTracker({
   getSessions: () => sessions, manager: sharedIdentities, normalizeUserId, findTab,
   transitioning: key => identityTransitions.has(key) || sharedIdentityWindow?.transitioning(key), requests: sharedIdentityRequests,
+  parkedVisibility: sharedIdentityParked,
 }));
 // Agent requests, not browser focus or passive page events, determine hidden-tab
 // recency. Record before the handler so long-running actions count as active.
@@ -1497,10 +1498,11 @@ async function closeAllSessions(reason, { clearDownloads = true, clearLocks = tr
   }
 }
 
-async function createSharedIdentityContext(userId, profilePath, { headed = false } = {}) {
+async function createSharedIdentityContext(userId, profilePath, { headed = false, parkedOpen = false } = {}) {
   // A legacy headed transition after a parking failure must stay legacy.
-  // The normal parked opener creates contexts through the default headed=false path.
-  return launchWithVisibilityFallback({ display: headed ? null : sharedParkDisplay, profilePath, headed, log,
+  // The normal parked opener creates contexts through the default headed=false path;
+  // if parking then fails, an /open launches headed directly instead of twice.
+  return launchWithVisibilityFallback({ display: headed ? null : sharedParkDisplay, profilePath, headed, fallbackHeaded: headed || parkedOpen, log,
     launch: ({ headed, visibility }) => launchSharedIdentityContext(profilePath, {
       headed, visibility, extensions: extensionsForIdentity(CONFIG.sharedIdentityExtensions, userId),
       indicator: identityIndicator(CONFIG.sharedIdentityAliases, userId),
@@ -1509,7 +1511,7 @@ async function createSharedIdentityContext(userId, profilePath, { headed = false
   });
 }
 
-async function getSession(userId, { trace = false, headed = false } = {}) {
+async function getSession(userId, { trace = false, headed = false, parkedOpen = false } = {}) {
   const key = normalizeUserId(userId);
   if (sharedIdentities.failedClosures.has(key)) {
     throw Object.assign(new Error('shared identity close failed; profile ownership is unconfirmed'), { statusCode: 409 });
@@ -1588,7 +1590,7 @@ async function getSession(userId, { trace = false, headed = false } = {}) {
       // only to ephemeral contexts. Shared profiles restore cookies explicitly.
       if (!sharedIdentity) await pluginEvents.emitAsync('session:creating', { userId: key, contextOptions });
       const context = sharedIdentity
-        ? await sharedIdentities.open(key, profilePath => createSharedIdentityContext(key, profilePath, { headed }))
+        ? await sharedIdentities.open(key, profilePath => createSharedIdentityContext(key, profilePath, { headed, parkedOpen }))
         : await b.newContext(contextOptions);
 
       let tracePath = null;
@@ -1604,7 +1606,7 @@ async function getSession(userId, { trace = false, headed = false } = {}) {
         }
       }
 
-      const created = { context, tabGroups: new Map(), pageLeases: new Set(), lastAccess: Date.now(), proxySessionId: sessionProxy?.sessionId || null, tracePath, sharedIdentity, headed: sharedIdentity && headed, keepOpen: sharedIdentity };
+      const created = { context, tabGroups: new Map(), pageLeases: new Set(), lastAccess: Date.now(), proxySessionId: sessionProxy?.sessionId || null, tracePath, sharedIdentity, headed: sharedIdentity && (headed || Boolean(context.sharedIdentityHeaded)), keepOpen: sharedIdentity };
       created.visibility = context.sharedIdentityVisibility;
       if (created.visibility) created.createPage = () => created.visibility.newPage(context);
       sessions.set(key, created);
@@ -1629,7 +1631,7 @@ async function getSession(userId, { trace = false, headed = false } = {}) {
         for (const page of context.pages()) {
           if (!created.visibility?.isManagedPage(page)) registerSharedIdentityPage(created, key, page);
         }
-        if (!headed && sharedIdentityLastUrls.has(key)) {
+        if (!created.headed && sharedIdentityLastUrls.has(key)) {
           const url = sharedIdentityLastUrls.get(key);
           const page = context.pages().find(candidate => !candidate.isClosed?.() && candidate.url?.() === 'about:blank')
             || await context.newPage();
@@ -3164,8 +3166,13 @@ app.get('/browser/identities', authMiddleware(), (req, res) => {
 
 // Serialize opposite operations without returning an open result to a release
 // caller (or vice versa). A queued operation installs its gate immediately.
+// In parking mode visibility changes never relaunch, so they take no identity gate.
+function sharedIdentityParked(userId) {
+  return Boolean(sharedParkDisplay && (!sessions.has(userId) || sessions.get(userId)?.visibility));
+}
+
 function transitionIdentity(userId, action, operation, { coalesceKey = null } = {}) {
-  if (sharedParkDisplay && (!sessions.has(userId) || sessions.get(userId)?.visibility)) return operation();
+  if (sharedIdentityParked(userId)) return operation();
   const previous = identityTransitions.get(userId);
   if (previous?.action === action && Object.is(previous.coalesceKey, coalesceKey)) return previous.promise;
   const promise = (async () => {
@@ -3197,9 +3204,9 @@ async function releaseIdentity(userId, { headedOnly = false, all = false, tabId 
   if (parkedSession?.visibility) {
     const page = tabId == null ? undefined : findTab(parkedSession, tabId)?.tabState.page;
     if (tabId != null && !page) throw Object.assign(new Error('Tab not found'), { statusCode: 404 });
-    const released = await parkedSession.visibility.release({ all, page });
-    parkedSession.headed = parkedSession.visibility.visible.size > 0;
-    return { ok: true, released };
+    // Recompute even after a failed park so idle reaping reflects the windows still shown.
+    try { return { ok: true, released: await parkedSession.visibility.release({ all, page }) }; }
+    finally { parkedSession.headed = parkedSession.visibility.visible.size > 0; }
   }
   if (sharedParkDisplay && !parkedSession && !sessionCreations.has(userId)) return { ok: true, released: false };
   const deadline = Date.now() + 3000;

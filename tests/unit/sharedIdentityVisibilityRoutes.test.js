@@ -37,3 +37,27 @@ test('release passes the optional requested tab and distinct coalescing key', as
   expect(releaseIdentity).toHaveBeenCalledWith('identity', { tabId: 'B' });
   expect(transitionIdentity.mock.calls[0][3]).toEqual({ coalesceKey: 'B' });
 });
+
+function serverFunction(name, dependencies) {
+  const start = source.indexOf(`async function ${name}(`);
+  const end = source.indexOf('\n}\n', start) + 2;
+  return vm.runInNewContext(`(${source.slice(start, end)})`, dependencies);
+}
+
+test('parked release without tabId succeeds and always recomputes headed from live handoffs', async () => {
+  const visible = new Map([[2, { windowId: 2, tabId: 2 }]]);
+  const visibility = { visible, release: jest.fn(async () => { visible.clear(); return true; }) };
+  const session = { visibility, headed: true };
+  const releaseIdentity = serverFunction('releaseIdentity', { sessions: new Map([['identity', session]]), findTab: () => null });
+  await expect(releaseIdentity('identity')).resolves.toEqual({ ok: true, released: true });
+  expect(visibility.release).toHaveBeenCalledWith({ all: false, page: undefined });
+  expect(session.headed).toBe(false);
+  visible.set(3, { windowId: 3, tabId: 3 }); visible.set(4, { windowId: 4, tabId: 4 });
+  visibility.release.mockImplementationOnce(async () => { visible.delete(4); throw new Error('1 of 2 window park operations failed'); });
+  session.headed = false;
+  await expect(releaseIdentity('identity', { all: true })).rejects.toThrow('1 of 2');
+  expect(session.headed).toBe(true);
+  visibility.release.mockImplementationOnce(async () => { visible.clear(); throw new Error('1 of 1 window park operations failed'); });
+  await expect(releaseIdentity('identity', { all: true })).rejects.toThrow();
+  expect(session.headed).toBe(false);
+});
