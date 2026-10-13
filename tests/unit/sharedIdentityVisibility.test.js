@@ -416,6 +416,60 @@ describe('no-relaunch visibility with two concurrent callers', () => {
     expect(windows.get(1)).toMatchObject(windowBounds(display.park));
     expect(visibility.visible.size).toBe(0);
   });
+  test('show then release stays serialized when its tab moves while queued', async () => {
+    const p = await visibility.newPage(context), blocker = await visibility.newPage(context);
+    const source = windows.get(1), originalTab = source.tabs[0];
+    const blockerTab = windows.get(2).tabs.pop(); blockerTab.windowId = 1; source.tabs.push(blockerTab);
+    const destination = { id: 3, tabs: [], ...windowBounds(display.park) };
+    windows.set(3, destination);
+    let queuedLookupStarted, parkLookupStarted;
+    const queuedLookup = new Promise(resolve => { queuedLookupStarted = resolve; });
+    const parkLookup = new Promise(resolve => { parkLookupStarted = resolve; });
+    const originalGet = browser.tabs.get;
+    let lookups = 0;
+    browser.tabs.get = async id => {
+      const tab = { ...await originalGet(id) };
+      if (id === originalTab.id) {
+        if (++lookups === 1) queuedLookupStarted();
+        if (lookups >= 3) parkLookupStarted();
+      }
+      return tab;
+    };
+    let releaseSource, sourceStarted, releaseShow, showStarted, active = 0, maxActive = 0;
+    const sourceBlocked = new Promise(resolve => { releaseSource = resolve; });
+    const sourceStart = new Promise(resolve => { sourceStarted = resolve; });
+    const showBlocked = new Promise(resolve => { releaseShow = resolve; });
+    const showStart = new Promise(resolve => { showStarted = resolve; });
+    const originalUpdate = browser.windows.update.getMockImplementation();
+    browser.windows.update.mockImplementation(async (id, bounds) => {
+      if (id === destination.id) maxActive = Math.max(maxActive, ++active);
+      try {
+        if (bounds.focused && id === source.id) { sourceStarted(); await sourceBlocked; }
+        if (bounds.focused && id === destination.id) { showStarted(); await showBlocked; }
+        return await originalUpdate(id, bounds);
+      } finally { if (id === destination.id) active--; }
+    });
+    const blocking = visibility.open(blocker); await sourceStart;
+    const shown = visibility.open(p); await queuedLookup;
+    // The source update stays pending while dispatch appends the second show.
+    await new Promise(resolve => setTimeout(resolve, 30));
+    source.tabs.splice(source.tabs.indexOf(originalTab), 1);
+    originalTab.windowId = destination.id; destination.tabs.push(originalTab);
+    releaseSource(); await blocking; await showStart;
+    const released = visibility.release({ page: p });
+    await parkLookup;
+    // Allow the release to reach the destination queue while show is pending.
+    await new Promise(resolve => setTimeout(resolve, 30));
+    releaseShow(); await Promise.all([shown, released]);
+
+    expect(destination).toMatchObject(windowBounds(display.park));
+    expect([...visibility.visible.keys()]).toEqual([source.id]);
+    expect(maxActive).toBe(1);
+    expect(context.pages()).toEqual([p, blocker]);
+    expect(p.state.input).toBe('unsaved form state');
+    expect(context.close).not.toHaveBeenCalled();
+    browser.tabs.get = originalGet;
+  });
   test('moved tabs resolve their new window instead of cached creation geometry', async () => {
     const p = await visibility.newPage(context);
     const tab = windows.get(1).tabs.pop(); tab.windowId = 50;
