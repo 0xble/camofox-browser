@@ -224,9 +224,9 @@ describe('no-relaunch visibility with two concurrent callers', () => {
         query: async ({ title, windowId } = {}) => [...windows.values()].flatMap(w => w.tabs).filter(t => (title == null || t.page.document.title === title) && (windowId == null || t.windowId === windowId)),
       },
     };
-    visibility = await createSharedIdentityVisibility(display, { rootDir: root, timeoutMs: 2000 });
+    visibility = await createSharedIdentityVisibility(display, { nativeReadback: null, rootDir: root, timeoutMs: 2000 });
     script = await fs.readFile(path.join(visibility.addon, 'background.js'), 'utf8');
-    vm.runInNewContext(script, { browser, fetch, setInterval: fn => { const id = setInterval(fn, 10); intervals.push(id); return id; } });
+    vm.runInNewContext(script, { browser, fetch, setTimeout, setInterval: fn => { const id = setInterval(fn, 10); intervals.push(id); return id; } });
     await visibility.attach(context);
   });
   afterEach(async () => { for (const id of intervals) clearInterval(id); await visibility.close(); await fs.rm(root, { recursive: true, force: true }); });
@@ -277,11 +277,94 @@ describe('no-relaunch visibility with two concurrent callers', () => {
     const a = await visibility.newPage(context), b = await visibility.newPage(context);
     await visibility.open(b);
     for (const id of intervals) clearInterval(id);
-    vm.runInNewContext(script, { browser, fetch, setInterval: fn => { const id = setInterval(fn, 10); intervals.push(id); return id; } });
+    vm.runInNewContext(script, { browser, fetch, setTimeout, setInterval: fn => { const id = setInterval(fn, 10); intervals.push(id); return id; } });
     await new Promise(resolve => setTimeout(resolve, 50));
     expect(windows.get(2)).toMatchObject(windowBounds(display.main, true));
     expect(windows.get(1)).toMatchObject(windowBounds(display.park));
     expect(context.pages()).toEqual([a, b]);
+  });
+  test('startup classification cannot re-park an open that completes during restart', async () => {
+    const pages = [];
+    for (let i = 0; i < 4; i++) pages.push(await visibility.newPage(context));
+    for (const id of intervals) clearInterval(id);
+    let resume, started, ready;
+    const blocked = new Promise(resolve => { resume = resolve; });
+    const start = new Promise(resolve => { started = resolve; });
+    const finished = new Promise(resolve => { ready = resolve; });
+    const originalGet = browser.windows.get;
+    browser.windows.get = async id => {
+      if (id === 1) { started(); await blocked; }
+      return originalGet(id);
+    };
+    const monitoredFetch = async (url, options) => {
+      const response = await fetch(url, options);
+      if (options?.body && JSON.parse(options.body).ready) ready();
+      return response;
+    };
+    vm.runInNewContext(script, { browser, fetch: monitoredFetch, setTimeout,
+      setInterval: fn => { const id = setInterval(fn, 10); intervals.push(id); return id; } });
+    await start;
+    try {
+      await visibility.open(pages[3]);
+      expect(visibility.visible.has(4)).toBe(true);
+    } finally { resume(); }
+    await finished;
+    expect(windows.get(4)).toMatchObject(windowBounds(display.main, true));
+    expect(visibility.visible.has(4)).toBe(true);
+    expect(context.pages()).toEqual(pages);
+  });
+  test('onCreated classification cannot race a show already moving the same window', async () => {
+    const p = await visibility.newPage(context);
+    let resume, started;
+    const blocked = new Promise(resolve => { resume = resolve; });
+    const start = new Promise(resolve => { started = resolve; });
+    const originalUpdate = browser.windows.update.getMockImplementation();
+    browser.windows.update.mockImplementation(async (id, bounds) => {
+      const result = await originalUpdate(id, bounds);
+      if (bounds.focused) { started(); await blocked; }
+      return result;
+    });
+    const shown = visibility.open(p); await start;
+    const classification = onCreated(windows.get(1));
+    // Give the unqueued implementation time to acknowledge its stale parked state.
+    await new Promise(resolve => setTimeout(resolve, 80));
+    resume(); await Promise.all([shown, classification]);
+    expect(windows.get(1)).toMatchObject(windowBounds(display.main, true));
+    expect(visibility.visible.has(1)).toBe(true);
+    // Classification must not move or acknowledge while the show is pending.
+    expect(browser.windows.update.mock.calls.filter(([, bounds]) => !bounds.focused)).toHaveLength(0);
+  });
+  test('create verification and onCreated classification share the realized window queue', async () => {
+    let resume, started, blockedOnce = false;
+    const blocked = new Promise(resolve => { resume = resolve; });
+    const start = new Promise(resolve => { started = resolve; });
+    const originalGet = browser.windows.get;
+    browser.windows.get = async id => {
+      const w = await originalGet(id);
+      // The initial onCreated ignores the API URL. Block the later create
+      // verification, then simulate a UI navigation and another creation event.
+      if (!blockedOnce && id === 1 && w.tabs[0].url.startsWith('about:blank#camofox-')) {
+        blockedOnce = true; started(); await blocked;
+      }
+      return w;
+    };
+    // Let the mock's initial onCreated finish without blocking on the gate.
+    const originalCreate = browser.windows.create;
+    browser.windows.create = async args => {
+      const savedGet = browser.windows.get;
+      browser.windows.get = originalGet;
+      try { return await originalCreate(args); }
+      finally { browser.windows.get = savedGet; }
+    };
+    const created = visibility.newPage(context); await start;
+    const w = windows.get(1); w.tabs[0].url = 'https://fixture.test/ui';
+    const classification = onCreated(w);
+    await new Promise(resolve => setTimeout(resolve, 80));
+    const movesWhileVerifying = browser.windows.update.mock.calls.length;
+    resume(); await Promise.all([created, classification]);
+    expect(movesWhileVerifying).toBe(0);
+    expect(w).toMatchObject(windowBounds(display.park));
+    expect(visibility.visible.has(1)).toBe(false);
   });
   test('popup from a visible window inherits visibility, while new API windows stay parked', async () => {
     const a = await visibility.newPage(context); await visibility.open(a);
@@ -301,8 +384,16 @@ describe('no-relaunch visibility with two concurrent callers', () => {
     const popup = page('https://fixture.test/oauth');
     windows.set(50, { id: 50, tabs: [{ id: 50, windowId: 50, openerTabId: 2, page: popup, url: popup.url() }], ...windowBounds(display.park) });
     context.livePages.push(popup);
-    vm.runInNewContext(script, { browser, fetch, setInterval: fn => { const id = setInterval(fn, 10); intervals.push(id); return id; } });
-    await new Promise(resolve => setTimeout(resolve, 60));
+    let ready;
+    const finished = new Promise(resolve => { ready = resolve; });
+    const monitoredFetch = async (url, options) => {
+      const response = await fetch(url, options);
+      if (options?.body && JSON.parse(options.body).ready) ready();
+      return response;
+    };
+    vm.runInNewContext(script, { browser, fetch: monitoredFetch, setTimeout,
+      setInterval: fn => { const id = setInterval(fn, 10); intervals.push(id); return id; } });
+    await finished;
     expect(windows.get(50)).toMatchObject(windowBounds(display.main, true));
     expect(visibility.visible.has(50)).toBe(true);
     expect(windows.get(1)).toMatchObject(windowBounds(display.park)); expect(visibility.visible.has(1)).toBe(false);
@@ -535,7 +626,7 @@ describe('no-relaunch visibility with two concurrent callers', () => {
     const failed = expect(visibility.newPage(context)).rejects.toThrow('timed out');
     await start; for (const id of intervals) clearInterval(id); await failed;
     expect(windows.size).toBe(1);
-    vm.runInNewContext(script, { browser, fetch, setInterval: fn => { const id = setInterval(fn, 10); intervals.push(id); return id; } });
+    vm.runInNewContext(script, { browser, fetch, setTimeout, setInterval: fn => { const id = setInterval(fn, 10); intervals.push(id); return id; } });
     await new Promise(resolve => setTimeout(resolve, 100));
     expect(windows.size).toBe(0); expect(context.pages()).toEqual([]);
   });
@@ -694,6 +785,126 @@ describe('no-relaunch visibility with two concurrent callers', () => {
     expect(windows.get(2)).toMatchObject(windowBounds(display.main, true));
     expect(context.pages()).toEqual([a, b, popup]);
   });
+  test('new API windows verify park geometry when create ignores the requested position', async () => {
+    const originalCreate = browser.windows.create;
+    let ignored = true;
+    browser.windows.create = async args => {
+      const w = await originalCreate(args);
+      if (ignored) { ignored = false; w.left = 20; w.top = 50; }
+      return w;
+    };
+    try {
+      await visibility.newPage(context);
+      expect(windows.get(1)).toMatchObject(windowBounds(display.park));
+      expect(browser.windows.update).toHaveBeenCalledWith(1, windowBounds(display.park));
+      expect(visibility.visible.has(1)).toBe(false);
+    } finally { browser.windows.create = originalCreate; }
+  });
+  test('new API window drift during native placement is corrected before create acknowledges', async () => {
+    const originalCreate = browser.windows.create;
+    browser.windows.create = async args => {
+      const w = await originalCreate(args);
+      setTimeout(() => { w.left = 20; w.top = 50; }, 15);
+      return w;
+    };
+    try {
+      await visibility.newPage(context);
+      expect(windows.get(1)).toMatchObject(windowBounds(display.park));
+      expect(browser.windows.update).toHaveBeenCalledWith(1, windowBounds(display.park));
+    } finally { browser.windows.create = originalCreate; }
+  });
+  test('park retries successful updates whose native readback remains on main', async () => {
+    const p = await visibility.newPage(context); await visibility.open(p);
+    const originalUpdate = browser.windows.update.getMockImplementation();
+    let ignored = 0;
+    browser.windows.update.mockImplementation(async (id, bounds) => {
+      if (!bounds.focused && ignored++ < 2) return { ...windows.get(id), ...bounds };
+      return originalUpdate(id, bounds);
+    });
+    expect(await visibility.release({ page: p })).toBe(true);
+    expect(windows.get(1)).toMatchObject(windowBounds(display.park));
+    expect(ignored).toBe(3);
+    expect(visibility.visible.size).toBe(0);
+  });
+  test('uncorrectable create is bounded, reports geometry failure and closes only its own window', async () => {
+    const other = await visibility.newPage(context); await visibility.open(other);
+    const originalCreate = browser.windows.create;
+    browser.windows.create = async args => { const w = await originalCreate(args); w.left = 20; w.top = 50; return w; };
+    const originalUpdate = browser.windows.update.getMockImplementation();
+    browser.windows.update.mockImplementation(async (id, bounds) => id === 2 ? { ...windows.get(id), ...bounds } : originalUpdate(id, bounds));
+    const started = Date.now();
+    try {
+      await expect(visibility.newPage(context)).rejects.toThrow('did not park on the parking display');
+      expect(Date.now() - started).toBeLessThan(1500);
+      expect(browser.windows.update.mock.calls.filter(([id]) => id === 2)).toHaveLength(4);
+      expect(browser.windows.remove).toHaveBeenCalledWith(2);
+      expect(context.pages()).toEqual([other]);
+      expect(windows.get(1)).toMatchObject(windowBounds(display.main, true));
+    } finally { browser.windows.create = originalCreate; }
+  });
+  test('uncorrectable park does not acknowledge success or clear a human handoff', async () => {
+    const p = await visibility.newPage(context); await visibility.open(p);
+    browser.windows.update.mockImplementation(async (id, bounds) => ({ ...windows.get(id), ...bounds }));
+    await expect(visibility.release({ page: p })).rejects.toMatchObject({
+      message: '1 of 1 window park operations failed', errors: [expect.objectContaining({ message: expect.stringContaining('did not park on the parking display') })],
+    });
+    expect(visibility.visible.has(1)).toBe(true);
+    expect(visibility.parkingFailures.get(1)).toContain('did not park');
+    expect(windows.get(1)).toMatchObject(windowBounds(display.main, true));
+  });
+  test('parked UI onCreated verifies placement with a corrective retry and reports uncorrectable placement (windows.get path)', async () => {
+    const ui = page('https://fixture.test/ui');
+    const w = { id: 60, tabs: [{ id: 60, windowId: 60, page: ui, url: ui.url() }], ...windowBounds(display.main, true) };
+    windows.set(60, w); context.livePages.push(ui);
+    const originalUpdate = browser.windows.update.getMockImplementation();
+    let ignored = false;
+    browser.windows.update.mockImplementation(async (id, bounds) => {
+      if (!ignored) { ignored = true; return { ...windows.get(id), ...bounds }; }
+      return originalUpdate(id, bounds);
+    });
+    await onCreated(w);
+    expect(w).toMatchObject(windowBounds(display.park));
+    expect(visibility.parkingFailures.size).toBe(0);
+    Object.assign(w, windowBounds(display.main, true));
+    browser.windows.update.mockImplementation(async (id, bounds) => ({ ...windows.get(id), ...bounds }));
+    await onCreated(w);
+    expect(visibility.parkingFailures.get(60)).toContain('did not park');
+    // A later successful native move clears the failure without replacing the page.
+    browser.windows.update.mockImplementation(originalUpdate);
+    await onCreated(w);
+    expect(w).toMatchObject(windowBounds(display.park));
+    expect(visibility.parkingFailures.size).toBe(0);
+    expect(context.pages()).toEqual([ui]);
+  });
+  test('background restart re-verifies recorded parked API windows without touching visible windows', async () => {
+    const a = await visibility.newPage(context), b = await visibility.newPage(context);
+    await visibility.open(b);
+    Object.assign(windows.get(1), { left: 20, top: 50 });
+    for (const id of intervals) clearInterval(id);
+    vm.runInNewContext(script, { browser, fetch, setTimeout, setInterval: fn => { const id = setInterval(fn, 10); intervals.push(id); return id; } });
+    await new Promise(resolve => setTimeout(resolve, 120));
+    expect(windows.get(1)).toMatchObject(windowBounds(display.park));
+    expect(windows.get(2)).toMatchObject(windowBounds(display.main, true));
+    expect(context.pages()).toEqual([a, b]);
+  });
+  test('background restart with an unparkable parked window still polls commands; a later newPage succeeds', async () => {
+    const a = await visibility.newPage(context), b = await visibility.newPage(context);
+    for (const id of intervals) clearInterval(id);
+    // Window 1 drifted to main and refuses every park update.
+    Object.assign(windows.get(1), { left: 20, top: 50 });
+    const originalUpdate = browser.windows.update.getMockImplementation();
+    browser.windows.update.mockImplementation(async (id, bounds) => id === 1 ? { ...windows.get(id), ...bounds } : originalUpdate(id, bounds));
+    vm.runInNewContext(script, { browser, fetch, setTimeout, setInterval: fn => { const id = setInterval(fn, 10); intervals.push(id); return id; } });
+    const c = await visibility.newPage(context);
+    expect(windows.get(3)).toMatchObject(windowBounds(display.park));
+    expect(context.pages()).toEqual([a, b, c]);
+    expect(windows.get(2)).toMatchObject(windowBounds(display.park));
+    // Startup classification now runs independently of command polling. The
+    // unrelated create may complete before window 1's bounded failure report.
+    for (let i = 0; i < 100 && !visibility.parkingFailures.has(1); i++)
+      await new Promise(resolve => setTimeout(resolve, 10));
+    expect(visibility.parkingFailures.get(1)).toContain('did not park');
+  });
   test('an opener-less UI window during a handoff still goes to the main display', async () => {
     const p = await visibility.newPage(context); await visibility.open(p);
     const ui = page('about:newtab');
@@ -705,7 +916,7 @@ describe('no-relaunch visibility with two concurrent callers', () => {
     const emitted = [], jobs = [];
     const files = visibilityAddonFiles({ endpoint: 'fake', park: {}, main: {} });
     const expired = { id: 'expired', action: 'create', url: 'about:blank#camofox-expired', expiresAt: Date.now() - 1 };
-    vm.runInNewContext(files['background.js'], { browser, setInterval: fn => jobs.push(fn), fetch: async (_url, opts) => {
+    vm.runInNewContext(files['background.js'], { browser, setTimeout, setInterval: fn => jobs.push(fn), fetch: async (_url, opts) => {
       if (opts) { emitted.push(JSON.parse(opts.body)); return { json: async () => ({ accepted: false }) }; }
       return { json: async () => ({ commands: [expired], visible: [], parked: [] }) };
     } });
