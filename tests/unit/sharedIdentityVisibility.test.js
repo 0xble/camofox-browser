@@ -321,6 +321,61 @@ describe('no-relaunch visibility with two concurrent callers', () => {
     expect(windows.get(2)).toMatchObject(windowBounds(display.park));
     expect(context.pages()).toEqual([a, b]);
   });
+  test.each([['latest', {}], ['all', { all: true }]])('%s release parks the recorded handoff window after its original tab moves', async (_mode, options) => {
+    const a = await visibility.newPage(context), b = await visibility.newPage(context), c = await visibility.newPage(context);
+    await visibility.open(c); await visibility.open(a);
+    const human = page('https://fixture.test/checkout');
+    const original = windows.get(1), destination = windows.get(2);
+    const tab = original.tabs.pop(); tab.windowId = 2;
+    destination.tabs.push(tab);
+    original.tabs.push({ id: 99, windowId: 1, page: human, url: human.url(), active: true });
+    context.livePages.push(human);
+    browser.windows.update.mockClear();
+
+    expect(await visibility.release(options)).toBe(true);
+    expect(original).toMatchObject(windowBounds(display.park));
+    expect(destination).toMatchObject(windowBounds(display.park));
+    expect(browser.windows.update.mock.calls.map(([id]) => id).sort()).toEqual(options.all ? [1, 3] : [1]);
+    expect([...visibility.visible.keys()]).toEqual(options.all ? [] : [3]);
+    expect(windows.get(3)).toMatchObject(options.all ? windowBounds(display.park) : windowBounds(display.main, true));
+    expect(await visibility.release(options)).toBe(!options.all);
+    expect(await visibility.release({ all: true })).toBe(false);
+    expect(visibility.visible.size).toBe(0);
+    expect(context.pages()).toEqual([a, b, c, human]);
+    expect(a.state.input).toBe('unsaved form state');
+    expect(context.close).not.toHaveBeenCalled();
+    expect(browser.windows.remove).not.toHaveBeenCalled();
+  });
+  test('explicit page release follows its moved tab instead of the recorded handoff window', async () => {
+    const a = await visibility.newPage(context), b = await visibility.newPage(context);
+    await visibility.open(a); await visibility.open(b);
+    const original = windows.get(1), destination = windows.get(2);
+    const tab = original.tabs.pop(); tab.windowId = 2; destination.tabs.push(tab);
+    original.tabs.push({ id: 99, windowId: 1, page: page('https://fixture.test/checkout'), active: true });
+    browser.windows.update.mockClear();
+
+    expect(await visibility.release({ page: a })).toBe(true);
+    expect(browser.windows.update.mock.calls.map(([id]) => id)).toEqual([2]);
+    expect(original).toMatchObject(windowBounds(display.main, true));
+    expect(destination).toMatchObject(windowBounds(display.park));
+    expect([...visibility.visible.keys()]).toEqual([1]);
+    expect(await visibility.release({ all: true })).toBe(true);
+    expect(original).toMatchObject(windowBounds(display.park));
+    expect(visibility.visible.size).toBe(0);
+  });
+  test.each([['latest', {}], ['all', { all: true }]])('%s release drops a missing handoff window even when its original tab survives elsewhere', async (_mode, options) => {
+    const a = await visibility.newPage(context); await visibility.newPage(context);
+    await visibility.open(a);
+    const tab = windows.get(1).tabs.pop(); tab.windowId = 2; windows.get(2).tabs.push(tab);
+    windows.delete(1);
+    browser.windows.update.mockClear();
+
+    expect(await visibility.release(options)).toBe(true);
+    expect(visibility.visible.size).toBe(0);
+    expect(browser.windows.update).not.toHaveBeenCalled();
+    expect(windows.get(2)).toMatchObject(windowBounds(display.park));
+    expect(await visibility.release(options)).toBe(false);
+  });
   test('UI-created tabs with identical URLs resolve independently and restore their own titles', async () => {
     const a = await visibility.newPage(context), b = page(a.url(), 'UI title');
     windows.set(2, { id: 2, tabs: [{ id: 2, windowId: 2, page: b }] }); context.livePages.push(b);
