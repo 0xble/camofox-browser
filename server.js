@@ -1633,11 +1633,13 @@ async function getSession(userId, { trace = false, headed = false, parkedOpen = 
         }
         if (!created.headed && sharedIdentityLastUrls.has(key)) {
           const url = sharedIdentityLastUrls.get(key);
-          const page = created.createPage ? await created.createPage()
-            : context.pages().find(candidate => !candidate.isClosed?.() && candidate.url?.() === 'about:blank')
-              || await context.newPage();
-          if (created.visibility) registerSharedIdentityPage(created, key, page);
+          // The session is already published; a page-creation failure (e.g. a
+          // parking bridge timeout) must only skip restoration, not fail creation.
           try {
+            const page = created.createPage ? await created.createPage()
+              : context.pages().find(candidate => !candidate.isClosed?.() && candidate.url?.() === 'about:blank')
+                || await context.newPage();
+            if (created.visibility) registerSharedIdentityPage(created, key, page);
             await page.goto(url, { timeout: 10_000 });
             created.lastUsedPage = page;
             sharedIdentityLastUrls.delete(key);
@@ -3201,7 +3203,7 @@ function identityBusy(userId, session) {
   );
 }
 
-async function releaseIdentity(userId, { headedOnly = false, all = false, tabId = null } = {}) {
+async function releaseIdentity(userId, { headedOnly = false, all = false, tabId = null, keepHumanControlled = false } = {}) {
   let session = sessions.get(userId);
   if (!session && sharedParkDisplay && !sessionCreations.has(userId)) return { ok: true, released: false };
   const deadline = Date.now() + 3000;
@@ -3215,8 +3217,11 @@ async function releaseIdentity(userId, { headedOnly = false, all = false, tabId 
   if (session?.visibility) {
     const page = tabId == null ? undefined : findTab(session, tabId)?.tabState.page;
     if (tabId != null && !page) throw Object.assign(new Error('Tab not found'), { statusCode: 404 });
+    // Idle release must not move a person's checkout or auth window mid-flow.
+    const keep = keepHumanControlled ? [...session.tabGroups.values()].flatMap(group => [...group])
+      .filter(([id, tab]) => humanControlledTabs.has(id) && tab.page && !tab.page.isClosed?.()).map(([, tab]) => tab.page) : [];
     // Recompute even after a failed park so idle reaping reflects the windows still shown.
-    try { return { ok: true, released: await session.visibility.release({ all, page }) }; }
+    try { return { ok: true, released: await session.visibility.release(keep.length ? { all, page, keep } : { all, page }) }; }
     finally { session.headed = session.visibility.visible.size > 0; }
   }
   if (!session || (headedOnly && !session.headed)) return { ok: true, released: false };
@@ -3249,7 +3254,7 @@ async function cleanIdleSharedSessions() {
   if (headedCandidates.length && await sharedIdentityIdlePolicy.shouldReleaseHeaded(CONFIG.headedIdleReleaseMin)) {
     for (const [key, original] of headedCandidates) {
       if (sessions.get(key) !== original || !original.headed) continue;
-      await transitionIdentity(key, 'release', () => releaseIdentity(key, { headedOnly: true, all: true })).catch(err => {
+      await transitionIdentity(key, 'release', () => releaseIdentity(key, { headedOnly: true, all: true, keepHumanControlled: true })).catch(err => {
         log('warn', 'headed idle release failed', { userId: key, error: err.message });
       });
     }
@@ -3389,7 +3394,7 @@ app.post('/browser/identities/:userId/focus', async (req, res) => {
  *               userId: { type: string, description: Shared identity owner. }
  *               handoff: { type: string, enum: [human, agent] }
  *     responses:
- *       200: { description: Control transferred after the requested show or park completes; focused is true only after a human handoff succeeds. }
+ *       200: { description: "Control transferred after the requested show or park completes; focused is true only after a human handoff succeeds. If the park on an agent return fails, agent control is still returned and the response adds parked: false and a reason." }
  *       400: { description: Invalid handoff payload. }
  *       404: { description: Tab not found. }
  *       409: { description: Tab is not a shared identity tab or is no longer available. }
@@ -3411,6 +3416,7 @@ app.post('/tabs/:tabId/handoff', async (req, res) => {
         tabState: current?.tabState,
         session,
         humanControlledTabs,
+        log,
       });
     }, HANDLER_TIMEOUT_MS, undefined, { allowHumanControl: true });
     return res.json({ ok: true, ...result });

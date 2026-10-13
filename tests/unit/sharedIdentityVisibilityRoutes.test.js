@@ -66,6 +66,29 @@ test.each([false, true])('last-URL restoration respects the parked page factory 
   }
 });
 
+test('a parked createPage rejection during last-URL restore still yields a usable session', async () => {
+  const visibility = { newPage: jest.fn(async () => { throw new Error('window visibility operation timed out'); }), isManagedPage: () => true };
+  const context = { pages: () => [], newPage: jest.fn(), on: jest.fn(), sharedIdentityVisibility: visibility };
+  const urls = new Map([['identity', 'https://fixture.test/previous']]);
+  const sessions = new Map(), log = jest.fn(), registerSharedIdentityPage = jest.fn();
+  const getSession = serverFunction('getSession', {
+    normalizeUserId: String, sessions, sessionCreations: new Map(),
+    sharedIdentities: { failedClosures: new Set(), owns: () => true, open: async () => context, contexts: new Map([['identity', context]]) },
+    coalesceInflight: (_map, _key, operation) => operation(), MAX_SESSIONS: 10, FLY_MACHINE_ID: '',
+    proxyPool: null, browserLaunchProxy: null, CONFIG: {}, contextIdentityOptions: () => ({}),
+    sharedIdentityLastUrls: urls, registerSharedIdentityPage, log,
+  });
+  const session = await getSession('identity');
+  expect(sessions.get('identity')).toBe(session);
+  expect(session.visibility).toBe(visibility);
+  expect(registerSharedIdentityPage).not.toHaveBeenCalled();
+  expect(context.newPage).not.toHaveBeenCalled();
+  expect(urls.get('identity')).toBe('https://fixture.test/previous');
+  expect(log).toHaveBeenCalledWith('warn', 'shared identity URL restoration failed', { userId: 'identity', error: 'window visibility operation timed out' });
+  // The session is usable: the next call reuses it without recreating the context.
+  await expect(getSession('identity')).resolves.toBe(session);
+});
+
 function serverFunction(name, dependencies) {
   const start = source.indexOf(`async function ${name}(`);
   const end = source.indexOf('\n}\n', start) + 2;

@@ -728,8 +728,10 @@ moves only the requested tab's window to the main display and focuses it. A
 stale tab ID creates a new parked page before showing it, never an unrelated
 tab. `/focus` accepts the same optional tab ID and shows the requested window.
 `/release` with `{ "tabId": "..." }` parks only that tab's current window (unknown
-IDs return 404); without a tab ID it parks the latest handoff window. Idle release parks all visible
-windows of that identity. Neither operation closes or relaunches the context,
+IDs return 404); without a tab ID it parks the latest handoff window. Idle release parks the
+identity's visible windows except any window holding a tab under human handoff, so a checkout or
+sign-in in progress stays on the main display. An agent handoff return whose park fails still
+returns control to the agent and reports `parked: false` with a `reason`. Neither operation closes or relaunches the context,
 drops registered tabs, or gates another caller's requests. New automation tabs
 are created in independently parked windows, including while a handoff is shown.
 Human-created popup and Cmd+N windows inherit an active handoff's visibility;

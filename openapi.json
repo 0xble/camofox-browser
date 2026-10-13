@@ -629,7 +629,7 @@
         },
         "responses": {
           "200": {
-            "description": "Control transferred after the requested show or park completes; focused is true only after a human handoff succeeds."
+            "description": "Control transferred after the requested show or park completes; focused is true only after a human handoff succeeds. If the park on an agent return fails, agent control is still returned and the response adds parked: false and a reason."
           },
           "400": {
             "description": "Invalid handoff payload."

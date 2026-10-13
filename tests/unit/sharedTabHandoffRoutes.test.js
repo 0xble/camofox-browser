@@ -21,6 +21,7 @@ function fixture({ parked = true, visibleOther = false, handoff = 'agent' } = {}
   };
   const session = { sharedIdentity: true, headed: visible.size > 0, ...(parked ? { visibility } : {}) };
   let handler;
+  const log = jest.fn();
   const withTabLock = jest.fn(async (_id, operation) => operation());
   const start = source.indexOf("app.post('/tabs/:tabId/handoff'");
   const end = source.indexOf('\n});', start) + 5;
@@ -28,14 +29,14 @@ function fixture({ parked = true, visibleOther = false, handoff = 'agent' } = {}
     app: { post: (_path, fn) => { handler = fn; } }, normalizeUserId: String,
     sessions: new Map([['identity', session]]), findTab: (_session, id) => id === 'B' ? { tabState } : null,
     tabNotFoundResponse: res => res.status(404).json({ error: 'Tab not found' }),
-    withTabLock, HANDLER_TIMEOUT_MS: 1000, applySharedTabHandoff, humanControlledTabs,
+    withTabLock, HANDLER_TIMEOUT_MS: 1000, applySharedTabHandoff, humanControlledTabs, log,
     handleRouteError: (err, _req, res) => res.status(err.statusCode || 500).json({ error: err.message }),
   });
   const request = async (value, res = response()) => {
     await handler({ params: { tabId: 'B' }, body: { userId: 'identity', handoff: value } }, res);
     return res;
   };
-  return { request, handler, session, visibility, page, tabState, humanControlledTabs };
+  return { request, handler, session, visibility, page, tabState, humanControlledTabs, log };
 }
 
 test('parked human handoff moves the requested window even with another window visible', async () => {
@@ -92,15 +93,18 @@ test.each([false, true])('agent return parks only this tab and recomputes headed
   expect(f.page.bringToFront).not.toHaveBeenCalled();
 });
 
-test('failed park keeps human control and uses live visibility even after a partial failure', async () => {
+test('failed park still returns agent control, logs, and reports parked:false with live visibility', async () => {
   const f = fixture({ handoff: 'human' });
   f.visibility.release.mockImplementationOnce(async () => { f.visibility.visible.clear(); throw new Error('park failed'); });
   const res = await f.request('agent');
-  expect(res.status).toHaveBeenCalledWith(500);
-  expect(res.json).toHaveBeenCalledWith({ error: 'park failed' });
-  expect(f.humanControlledTabs.has('B')).toBe(true);
-  expect(f.tabState.handoff).toBe('human');
+  expect(res.status).not.toHaveBeenCalled();
+  expect(res.json).toHaveBeenCalledWith({ ok: true, handoff: 'agent', focused: false, parked: false, reason: 'park failed' });
+  expect(f.humanControlledTabs.has('B')).toBe(false);
+  expect(f.tabState.handoff).toBe('agent');
   expect(f.session.headed).toBe(false);
+  expect(f.log).toHaveBeenCalledWith('warn', 'agent handoff park failed; agent control returned', { tabId: 'B', error: 'park failed' });
+  // The tab is not stuck: a later agent return succeeds normally.
+  expect((await f.request('agent')).json).toHaveBeenCalledWith({ ok: true, handoff: 'agent', focused: false });
 });
 
 test('legacy handoff still brings the page forward and agent return does not park', async () => {

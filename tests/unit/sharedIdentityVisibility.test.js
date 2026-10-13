@@ -15,6 +15,12 @@ import { applySharedTabHandoff } from '../../lib/shared-tab-handoff.js';
 const screens = [{ name: 'Main', x: 0, y: 0, width: 2048, height: 1152 },
   { name: 'DeskPad Display', x: -3360, y: 1152, width: 3360, height: 2100 }];
 const display = selectParkDisplay(screens);
+const serverSource = await fs.readFile(new URL('../../server.js', import.meta.url), 'utf8');
+function serverFunction(name, dependencies) {
+  const start = serverSource.indexOf(`async function ${name}(`);
+  const end = serverSource.indexOf('\n}\n', start) + 2;
+  return vm.runInNewContext(`(${serverSource.slice(start, end)})`, dependencies);
+}
 
 function page(url, title = 'Original title') {
   const document = { title };
@@ -570,6 +576,51 @@ describe('no-relaunch visibility with two concurrent callers', () => {
     expect(visibility.visible.get(1)).toEqual({ windowId: 1, tabId: 7 });
     expect(await visibility.release()).toBe(true);
     expect(windows.get(1)).toMatchObject(windowBounds(display.park)); expect(visibility.visible.size).toBe(0);
+  });
+  test('idle release leaves a human-handoff window visible and parks the others', async () => {
+    const a = await visibility.newPage(context), b = await visibility.newPage(context), c = await visibility.newPage(context);
+    await visibility.open(a); await visibility.open(b); await visibility.open(c);
+    // The human's checkout opened a second tab in its handoff window.
+    const checkout = page('https://fixture.test/checkout');
+    windows.get(2).tabs.push({ id: 98, windowId: 2, page: checkout, url: checkout.url(), active: true });
+    const session = { sharedIdentity: true, headed: true, lastAccess: 0, visibility,
+      tabGroups: new Map([['caller', new Map([['A', { page: a }], ['B', { page: b, handoff: 'human' }], ['C', { page: c }]])]]) };
+    const sessions = new Map([['identity', session]]), humanControlledTabs = new Set(['B']);
+    const closeSession = jest.fn(), log = jest.fn();
+    const releaseIdentity = serverFunction('releaseIdentity', { sessions, sessionCreations: new Map(), sharedParkDisplay: {},
+      findTab: () => null, closeSession, identityBusy: () => true, humanControlledTabs, log });
+    const cleanIdleSharedSessions = serverFunction('cleanIdleSharedSessions', {
+      CONFIG: { hiddenTabIdleMin: 0, headedIdleReleaseMin: 30, hiddenSessionIdleMin: 0 }, sessions, identityTransitions: new Map(),
+      sharedIdentityIdlePolicy: { agentIdle: () => true, shouldReleaseHeaded: async () => true },
+      transitionIdentity: (_key, _action, operation) => operation(), releaseIdentity, log });
+    await cleanIdleSharedSessions();
+    expect(log).not.toHaveBeenCalledWith('warn', 'headed idle release failed', expect.anything());
+    expect(windows.get(2)).toMatchObject(windowBounds(display.main, true));
+    expect(windows.get(1)).toMatchObject(windowBounds(display.park));
+    expect(windows.get(3)).toMatchObject(windowBounds(display.park));
+    expect([...visibility.visible.keys()]).toEqual([2]);
+    expect(session.headed).toBe(true);
+    expect(context.pages()).toEqual([a, b, c]);
+    expect(closeSession).not.toHaveBeenCalled(); expect(context.close).not.toHaveBeenCalled();
+    // Explicit release is unchanged and still parks the human's window on request.
+    expect(await releaseIdentity('identity', { all: true })).toEqual({ ok: true, released: true });
+    expect(windows.get(2)).toMatchObject(windowBounds(display.park)); expect(session.headed).toBe(false);
+  });
+  test('a park failure on agent return still returns agent control and reports it', async () => {
+    const a = await visibility.newPage(context);
+    // A UI tab on a privileged page cannot carry the locate title marker.
+    const privileged = page('about:preferences');
+    privileged.evaluate.mockRejectedValue(new Error('Permission denied to access property'));
+    await visibility.open(a);
+    const session = { visibility, headed: true }, humanControlledTabs = new Set(['P']), log = jest.fn();
+    const tabState = { page: privileged, handoff: 'human' };
+    await expect(applySharedTabHandoff({ session, tabId: 'P', tabState, humanControlledTabs, handoff: 'agent', log }))
+      .resolves.toEqual({ handoff: 'agent', focused: false, parked: false, reason: 'Permission denied to access property' });
+    expect(humanControlledTabs.has('P')).toBe(false);
+    expect(tabState.handoff).toBe('agent');
+    expect(session.headed).toBe(true);
+    expect(log).toHaveBeenCalledWith('warn', 'agent handoff park failed; agent control returned', { tabId: 'P', error: 'Permission denied to access property' });
+    expect(windows.get(1)).toMatchObject(windowBounds(display.main, true));
   });
   test('a visible window that vanished without onRemoved is dropped on release', async () => {
     const p = await visibility.newPage(context); await visibility.open(p);
