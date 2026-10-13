@@ -18,3 +18,9 @@ Compare upstream identity routing, cookie restoration, and handoff behavior with
 - **Regression:** `npm run test:unit` (including `tests/unit/identityIndicator.test.js`) plus the disposable shared-browser acceptance harness, with a headed screenshot per mapped identity.
 - **Rollback:** `git revert <CAMOFOX-002 commit>`; do not delete preserved profiles.
 - **Retire when:** upstream ships equivalent lifecycle and identity-routing semantics.
+
+### Parked-window handoffs
+
+When a session has a visibility controller, human handoff must await that controller's `open(page)` before reporting focus or changing control ownership. Agent return must use the same targeted `release({ all: false, page })` behavior as `/release {tabId}`. Both paths recompute headed state from live visibility even on failure, retain the context and sibling tabs, and add no identity-wide lock or transition gate. Last-URL restoration must create an API parked page through `session.createPage`, rather than reuse an unowned initial UI page. Legacy behavior remains unchanged.
+
+Regression coverage: `sharedTabHandoffRoutes.test.js`, the generated-add-on bridge handoff test in `sharedIdentityVisibility.test.js`, and the parked/legacy last-URL restoration test in `sharedIdentityVisibilityRoutes.test.js`.

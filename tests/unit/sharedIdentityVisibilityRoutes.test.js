@@ -38,6 +38,34 @@ test('release passes the optional requested tab and distinct coalescing key', as
   expect(transitionIdentity.mock.calls[0][3]).toEqual({ coalesceKey: 'B' });
 });
 
+test.each([false, true])('last-URL restoration respects the parked page factory (parked=%s)', async parked => {
+  const blank = { isClosed: () => false, url: () => 'about:blank', goto: jest.fn(async () => {}) };
+  const restored = { isClosed: () => false, url: () => 'about:blank#camofox-restored', goto: jest.fn(async () => {}) };
+  const visibility = { newPage: jest.fn(async () => restored), isManagedPage: () => true };
+  const context = { pages: () => [blank], newPage: jest.fn(async () => restored), on: jest.fn(),
+    sharedIdentityVisibility: parked ? visibility : null };
+  const urls = new Map([['identity', 'https://fixture.test/previous']]);
+  const registerSharedIdentityPage = jest.fn();
+  const getSession = serverFunction('getSession', {
+    normalizeUserId: String, sessions: new Map(), sessionCreations: new Map(),
+    sharedIdentities: { failedClosures: new Set(), owns: () => true, open: async () => context },
+    coalesceInflight: (_map, _key, operation) => operation(), MAX_SESSIONS: 10, FLY_MACHINE_ID: '',
+    proxyPool: null, browserLaunchProxy: null, CONFIG: {}, contextIdentityOptions: () => ({}),
+    sharedIdentityLastUrls: urls, registerSharedIdentityPage, log: jest.fn(),
+  });
+  const session = await getSession('identity');
+  const target = parked ? restored : blank;
+  expect(target.goto).toHaveBeenCalledWith('https://fixture.test/previous', { timeout: 10_000 });
+  expect(session.lastUsedPage).toBe(target);
+  expect(urls.has('identity')).toBe(false);
+  expect(context.newPage).not.toHaveBeenCalled();
+  expect(visibility.newPage).toHaveBeenCalledTimes(parked ? 1 : 0);
+  if (parked) {
+    expect(blank.goto).not.toHaveBeenCalled();
+    expect(registerSharedIdentityPage).toHaveBeenCalledWith(session, 'identity', restored);
+  }
+});
+
 function serverFunction(name, dependencies) {
   const start = source.indexOf(`async function ${name}(`);
   const end = source.indexOf('\n}\n', start) + 2;

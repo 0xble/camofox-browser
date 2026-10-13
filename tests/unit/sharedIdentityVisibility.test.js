@@ -10,6 +10,7 @@ import { createSharedIdentityWindowOpener } from '../../lib/shared-identity-wind
 import { createSharedIdentityRequestTracker } from '../../lib/shared-identity-requests.js';
 import { launchSharedIdentityContext } from '../../lib/shared-identity-launch.js';
 import { createPageWithSessionRecovery } from '../../lib/new-page-recovery.js';
+import { applySharedTabHandoff } from '../../lib/shared-tab-handoff.js';
 
 const screens = [{ name: 'Main', x: 0, y: 0, width: 2048, height: 1152 },
   { name: 'DeskPad Display', x: -3360, y: 1152, width: 3360, height: 2100 }];
@@ -300,6 +301,30 @@ describe('no-relaunch visibility with two concurrent callers', () => {
     expect(visibility.visible.has(50)).toBe(true);
     expect(windows.get(1)).toMatchObject(windowBounds(display.park)); expect(visibility.visible.has(1)).toBe(false);
     expect(context.pages()).toEqual([a, b, popup]);
+  });
+  test('human handoff and agent return move only the target through the actual bridge', async () => {
+    const a = await visibility.newPage(context), b = await visibility.newPage(context);
+    await visibility.open(a);
+    const session = { visibility, headed: true };
+    const tabState = { page: b, handoff: 'agent' }, humanControlledTabs = new Set();
+    await expect(applySharedTabHandoff({ session, tabId: 'B', tabState, humanControlledTabs, handoff: 'human' }))
+      .resolves.toEqual({ handoff: 'human', focused: true });
+    expect(windows.get(2)).toMatchObject(windowBounds(display.main, true));
+    expect(windows.get(1)).toMatchObject(windowBounds(display.main, true));
+    expect(humanControlledTabs.has('B')).toBe(true);
+    await expect(applySharedTabHandoff({ session, tabId: 'B', tabState, humanControlledTabs, handoff: 'agent' }))
+      .resolves.toEqual({ handoff: 'agent', focused: false });
+    expect(windows.get(2)).toMatchObject(windowBounds(display.park));
+    expect(windows.get(1)).toMatchObject(windowBounds(display.main, true));
+    expect(session.headed).toBe(true);
+    expect(humanControlledTabs.has('B')).toBe(false);
+    await applySharedTabHandoff({ session, tabId: 'A', tabState: { page: a }, humanControlledTabs, handoff: 'agent' });
+    expect(session.headed).toBe(false);
+    expect(context.pages()).toEqual([a, b]);
+    expect(a.state.input).toBe('unsaved form state');
+    expect(b.state.input).toBe('unsaved form state');
+    expect(context.close).not.toHaveBeenCalled();
+    expect(browser.windows.remove).not.toHaveBeenCalled();
   });
   test('targeted release leaves the other callers visible window alone', async () => {
     const a = await visibility.newPage(context), b = await visibility.newPage(context);

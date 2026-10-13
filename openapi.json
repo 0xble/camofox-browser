@@ -589,7 +589,7 @@
         "tags": [
           "Browser"
         ],
-        "summary": "Mark a tab for human or agent control",
+        "summary": "Transfer human or agent control, showing or parking the tab window in parking mode",
         "parameters": [
           {
             "name": "tabId",
@@ -629,7 +629,7 @@
         },
         "responses": {
           "200": {
-            "description": "Handoff recorded."
+            "description": "Control transferred after the requested show or park completes; focused is true only after a human handoff succeeds."
           },
           "400": {
             "description": "Invalid handoff payload."

@@ -1633,8 +1633,10 @@ async function getSession(userId, { trace = false, headed = false, parkedOpen = 
         }
         if (!created.headed && sharedIdentityLastUrls.has(key)) {
           const url = sharedIdentityLastUrls.get(key);
-          const page = context.pages().find(candidate => !candidate.isClosed?.() && candidate.url?.() === 'about:blank')
-            || await context.newPage();
+          const page = created.createPage ? await created.createPage()
+            : context.pages().find(candidate => !candidate.isClosed?.() && candidate.url?.() === 'about:blank')
+              || await context.newPage();
+          if (created.visibility) registerSharedIdentityPage(created, key, page);
           try {
             await page.goto(url, { timeout: 10_000 });
             created.lastUsedPage = page;
@@ -3370,7 +3372,7 @@ app.post('/browser/identities/:userId/focus', async (req, res) => {
  * /tabs/{tabId}/handoff:
  *   post:
  *     tags: [Browser]
- *     summary: Mark a tab for human or agent control
+ *     summary: Transfer human or agent control, showing or parking the tab window in parking mode
  *     parameters:
  *       - name: tabId
  *         in: path
@@ -3387,7 +3389,7 @@ app.post('/browser/identities/:userId/focus', async (req, res) => {
  *               userId: { type: string, description: Shared identity owner. }
  *               handoff: { type: string, enum: [human, agent] }
  *     responses:
- *       200: { description: Handoff recorded. }
+ *       200: { description: Control transferred after the requested show or park completes; focused is true only after a human handoff succeeds. }
  *       400: { description: Invalid handoff payload. }
  *       404: { description: Tab not found. }
  *       409: { description: Tab is not a shared identity tab or is no longer available. }
@@ -3407,6 +3409,7 @@ app.post('/tabs/:tabId/handoff', async (req, res) => {
         tabId: req.params.tabId,
         handoff,
         tabState: current?.tabState,
+        session,
         humanControlledTabs,
       });
     }, HANDLER_TIMEOUT_MS, undefined, { allowHumanControl: true });
