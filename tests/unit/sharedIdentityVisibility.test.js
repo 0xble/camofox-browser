@@ -804,11 +804,14 @@ describe('no-relaunch visibility with two concurrent callers', () => {
     const originalUpdate = browser.windows.update.getMockImplementation();
     browser.windows.update.mockImplementation(async (id, bounds) => id === 1 ? { ...windows.get(id), ...bounds } : originalUpdate(id, bounds));
     vm.runInNewContext(script, { browser, fetch, setTimeout, setInterval: fn => { const id = setInterval(fn, 10); intervals.push(id); return id; } });
-    await new Promise(resolve => setTimeout(resolve, 150));
     const c = await visibility.newPage(context);
     expect(windows.get(3)).toMatchObject(windowBounds(display.park));
     expect(context.pages()).toEqual([a, b, c]);
     expect(windows.get(2)).toMatchObject(windowBounds(display.park));
+    // Startup classification now runs independently of command polling. The
+    // unrelated create may complete before window 1's bounded failure report.
+    for (let i = 0; i < 100 && !visibility.parkingFailures.has(1); i++)
+      await new Promise(resolve => setTimeout(resolve, 10));
     expect(visibility.parkingFailures.get(1)).toContain('did not park');
   });
   test('an opener-less UI window during a handoff still goes to the main display', async () => {
