@@ -761,7 +761,7 @@ describe('no-relaunch visibility with two concurrent callers', () => {
     expect(visibility.parkingFailures.get(1)).toContain('did not park');
     expect(windows.get(1)).toMatchObject(windowBounds(display.main, true));
   });
-  test('parked UI onCreated uses native readback and reports uncorrectable placement', async () => {
+  test('parked UI onCreated verifies placement with a corrective retry and reports uncorrectable placement (windows.get path)', async () => {
     const ui = page('https://fixture.test/ui');
     const w = { id: 60, tabs: [{ id: 60, windowId: 60, page: ui, url: ui.url() }], ...windowBounds(display.main, true) };
     windows.set(60, w); context.livePages.push(ui);
@@ -795,6 +795,21 @@ describe('no-relaunch visibility with two concurrent callers', () => {
     expect(windows.get(1)).toMatchObject(windowBounds(display.park));
     expect(windows.get(2)).toMatchObject(windowBounds(display.main, true));
     expect(context.pages()).toEqual([a, b]);
+  });
+  test('background restart with an unparkable parked window still polls commands; a later newPage succeeds', async () => {
+    const a = await visibility.newPage(context), b = await visibility.newPage(context);
+    for (const id of intervals) clearInterval(id);
+    // Window 1 drifted to main and refuses every park update.
+    Object.assign(windows.get(1), { left: 20, top: 50 });
+    const originalUpdate = browser.windows.update.getMockImplementation();
+    browser.windows.update.mockImplementation(async (id, bounds) => id === 1 ? { ...windows.get(id), ...bounds } : originalUpdate(id, bounds));
+    vm.runInNewContext(script, { browser, fetch, setTimeout, setInterval: fn => { const id = setInterval(fn, 10); intervals.push(id); return id; } });
+    await new Promise(resolve => setTimeout(resolve, 150));
+    const c = await visibility.newPage(context);
+    expect(windows.get(3)).toMatchObject(windowBounds(display.park));
+    expect(context.pages()).toEqual([a, b, c]);
+    expect(windows.get(2)).toMatchObject(windowBounds(display.park));
+    expect(visibility.parkingFailures.get(1)).toContain('did not park');
   });
   test('an opener-less UI window during a handoff still goes to the main display', async () => {
     const p = await visibility.newPage(context); await visibility.open(p);

@@ -750,6 +750,24 @@ are closed, and late shows are re-parked. Commands for one window are serialized
 An extension initialization or attach failure closes the attempted parked context
 and logs one warning before launching that context with the legacy path.
 
+Camoufox spoofs the geometry the WebExtension `windows` API reports, so every
+park is verified against native window bounds before it is acknowledged. The
+server reads `CGWindowListCopyWindowInfo` through `/usr/bin/osascript` and selects
+the on-screen, layer-0 windows owned by this server's own browser process for
+that profile. It never matches window titles. macOS returns window titles
+(`kCGWindowName`) of other processes only when the TCC-responsible process has
+Screen Recording permission. A launchd-started server is its own responsible
+process, so titles are hidden there. Owner PID, layer and bounds are always
+returned, so native verification needs no Screen Recording, Accessibility or
+Automation grant. Verification passes when every unparked browser window is
+accounted for by an active handoff, an in-flight show, or an already reported
+failure. A readback failure, such as a slow osascript or a list captured
+mid-update, is retried inside the same bounded loop. A failure that persists
+is logged as `native window readback failed` and reported as a parking failure
+for that window only. It never relaunches the context. During startup, one
+window that cannot be parked is reported and never stops command handling for
+the other windows.
+
 Without a usable park display (or with `CAMOFOX_PARK_DISPLAY=off`), the server
 logs one warning and retains the existing headless-to-headed relaunch behavior.
 That fallback cannot preserve in-memory tabs across a visibility transition.
