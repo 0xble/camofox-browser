@@ -62,8 +62,8 @@ describe('Navigation', () => {
         { userId: client.userId, url: `${testSiteUrl}/slow-navigation` },
         { timeout: 45000 },
       )).rejects.toMatchObject({
-        status: 410,
-        data: expect.objectContaining({ code: 'tab_timeout', retryable: true }),
+        status: 503,
+        data: expect.objectContaining({ code: 'operation_timeout', retryable: true }),
       });
 
       const existingTabSnapshot = await client.getSnapshot(existingTabId);

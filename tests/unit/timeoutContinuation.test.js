@@ -35,10 +35,10 @@ describe('timed-out tab operations', () => {
   });
 
   test('returns a stable recoverable error after a timeout', () => {
-    const error = Object.assign(new Error('action timed out after 5000ms'), { code: 'tab_timeout' });
+    const error = Object.assign(new Error('action timed out after 5000ms'), { code: 'operation_timeout' });
 
-    expect(browserErrorStatus(error)).toBe(410);
-    expect(browserErrorCode(error)).toBe('tab_timeout');
+    expect(browserErrorStatus(error)).toBe(503);
+    expect(browserErrorCode(error)).toBe('operation_timeout');
     expect(browserErrorRecovery(error)).toBe('retry');
   });
 
@@ -56,6 +56,24 @@ describe('timed-out tab operations', () => {
       await client.cleanup();
     }
   }, 30000);
+  test('reports a Playwright call timeout inside the tab lock as its own error', async () => {
+    const client = createClient(serverUrl);
+    try {
+      const { tabId } = await client.createTab(`${testSiteUrl}/slow-click?ms=10`);
+      // /act click uses a 3s Playwright timeout, well inside the 5s lock budget.
+      await expect(client.request('POST', '/act', {
+        userId: client.userId, targetId: tabId, kind: 'click', selector: '#does-not-exist',
+      })).rejects.toMatchObject({
+        status: 422,
+        data: expect.objectContaining({ code: 'element_not_actionable', recovery: 'snapshot_then_retry' }),
+      });
+      const stats = await client.getStats(tabId);
+      expect(stats.tabId).toBe(tabId);
+    } finally {
+      await client.cleanup();
+    }
+  }, 30000);
+
   test('keeps the tab available for queued evaluate work after an evaluate timeout', async () => {
     const client = createClient(serverUrl);
     const { tabId } = await client.createTab();
@@ -75,8 +93,8 @@ describe('timed-out tab operations', () => {
       const queued = client.evaluate(tabId, '42').catch(error => error);
       const [firstError, queuedError] = await Promise.all([first, queued]);
 
-      expect(firstError.status).toBe(410);
-      expect(firstError.data.code).toBe('tab_timeout');
+      expect(firstError.status).toBe(503);
+      expect(firstError.data.code).toBe('operation_timeout');
       expect(firstError.data.recovery).toBe('retry');
       expect(queuedError.status).toBeUndefined();
       expect(queuedError.result).toBe(42);

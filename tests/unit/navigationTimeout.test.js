@@ -47,11 +47,11 @@ function simulateErrorHandling(err, action, userId, tabState, canRotateSessions 
     return result;
   }
 
-  // Navigation timeouts are recoverable operation failures. They may record
-  // navigation health, but never destroy the user's session or tab.
+  // Navigation timeouts are recoverable operation failures. They neither
+  // destroy the session or tab nor count toward the navigation-failure
+  // threshold that triggers session recovery.
   const isNavigationTimeout = isTimeoutError(err) && userId && NAVIGATION_TIMEOUT_ACTIONS.has(action);
   if (isNavigationTimeout) {
-    result.navFailureRecorded = true;
     return result;
   }
 
@@ -76,7 +76,7 @@ describe('navigation timeout session destruction', () => {
     const result = simulateErrorHandling(timeoutError, action, 'user-1', {});
     expect(result.sessionDestroyed).toBe(false);
     expect(result.tabDestroyed).toBe(false);
-    expect(result.navFailureRecorded).toBe(true);
+    expect(result.navFailureRecorded).toBe(false);
   });
 
   test('type timeout does NOT destroy session, tracks per-tab', () => {
@@ -140,16 +140,16 @@ describe('navigation timeout with no proxy to rotate', () => {
     },
   );
 
-  test('the navigation failure is still recorded when there is no proxy', () => {
+  test('a navigation timeout does not count toward session recovery', () => {
     const result = simulateErrorHandling(timeoutError, 'navigate', 'user-1', {}, false);
-    expect(result.navFailureRecorded).toBe(true);
+    expect(result.navFailureRecorded).toBe(false);
   });
 
   test('the same timeout still preserves the session when a proxy can rotate', () => {
     const result = simulateErrorHandling(timeoutError, 'navigate', 'user-1', {}, true);
     expect(result.sessionDestroyed).toBe(false);
     expect(result.reason).toBe(null);
-    expect(result.navFailureRecorded).toBe(true);
+    expect(result.navFailureRecorded).toBe(false);
   });
 
   test('proxy errors also require a rotatable proxy', () => {
@@ -191,16 +191,16 @@ describe('navigation timeout with no proxy to rotate', () => {
     },
   );
 
-  test('the navigation failure is still recorded when there is no proxy', () => {
+  test('a navigation timeout does not count toward session recovery', () => {
     const result = simulateErrorHandling(timeoutError, 'navigate', 'user-1', {}, false);
-    expect(result.navFailureRecorded).toBe(true);
+    expect(result.navFailureRecorded).toBe(false);
   });
 
   test('the same timeout still preserves the session when a proxy can rotate', () => {
     const result = simulateErrorHandling(timeoutError, 'navigate', 'user-1', {}, true);
     expect(result.sessionDestroyed).toBe(false);
     expect(result.reason).toBe(null);
-    expect(result.navFailureRecorded).toBe(true);
+    expect(result.navFailureRecorded).toBe(false);
   });
 
   test('proxy errors also require a rotatable proxy', () => {

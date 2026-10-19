@@ -703,12 +703,12 @@ async function withTabLock(tabId, operation, timeoutMs = HANDLER_TIMEOUT_MS, _on
     if (humanControlledTabs.has(tabId) && !allowHumanControl) {
       throw Object.assign(new Error('Tab is handed off to a human'), { statusCode: 409, code: 'tab_handed_off' });
     }
-    const result = await withTimeout(operation(), timeoutMs, 'action');
+    const result = await withTimeout(operation(), timeoutMs, 'action', 'tab_lock_timeout');
     const owner = findTabOwner(tabId);
     if (owner) owner.tabState.consecutiveTimeouts = 0;
     return result;
   } catch (err) {
-    if (isTimeoutError(err)) {
+    if (err?.code === 'tab_lock_timeout') {
       const timeoutResult = await handleTimedOutTab(tabId);
       if (timeoutResult?.destroyed) {
         throw Object.assign(err, {
@@ -719,8 +719,8 @@ async function withTabLock(tabId, operation, timeoutMs = HANDLER_TIMEOUT_MS, _on
         });
       }
       throw Object.assign(err, {
-        code: 'tab_timeout',
-        statusCode: 410,
+        code: 'operation_timeout',
+        statusCode: 503,
         retryable: true,
         recovery: 'retry',
       });
@@ -731,11 +731,11 @@ async function withTabLock(tabId, operation, timeoutMs = HANDLER_TIMEOUT_MS, _on
   }
 }
 
-function withTimeout(promise, ms, label) {
+function withTimeout(promise, ms, label, timeoutCode = null) {
   return Promise.race([
     promise,
     new Promise((_, reject) =>
-      setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms)
+      setTimeout(() => reject(Object.assign(new Error(`${label} timed out after ${ms}ms`), timeoutCode ? { code: timeoutCode } : {})), ms)
     )
   ]);
 }
@@ -1828,7 +1828,6 @@ function handleRouteError(err, req, res, extraFields = {}) {
     log('warn', 'navigation timeout — preserving session and tab', {
       action, userId, error: err.message,
     });
-    recordNavFailure(userId);
   }
   // Lock queue timeout means the tab may be unresponsive, but the shared
   // timeout path has already applied its bounded liveness policy. Never report
@@ -4630,7 +4629,7 @@ app.post('/tabs/:tabId/click', async (req, res) => {
     res.json(result);
   } catch (err) {
     log('error', 'click failed', { reqId: req.reqId, tabId, error: err.message });
-    if (err.code !== 'tab_timeout' && err.code !== 'tab_destroyed' && err.message?.includes('timed out')) {
+    if (err.code !== 'operation_timeout' && err.code !== 'tab_destroyed' && err.message?.includes('timed out')) {
       try {
         const session = sessions.get(normalizeUserId(req.body.userId));
         const found = session && findTab(session, tabId);
