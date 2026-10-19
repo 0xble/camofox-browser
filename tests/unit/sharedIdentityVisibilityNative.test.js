@@ -152,6 +152,24 @@ describe('native readback in the add-on (Camoufox-spoofed windows.get)', () => {
     expect(nativelyParked(windows.get(1).native, display)).toBe(true);
     expect(visibility.visible.has(1)).toBe(false);
   });
+  test('a show retries after the native move is initially ignored', async () => {
+    await setup();
+    const p = await visibility.newPage(context);
+    const originalUpdate = browser.windows.update.getMockImplementation();
+    let showMoves = 0;
+    browser.windows.update.mockImplementation(async (id, bounds) => {
+      if (bounds.focused) {
+        showMoves++;
+        if (showMoves > 1) windows.get(id).native = { ...bounds };
+        return { ...windows.get(id), ...bounds };
+      }
+      return originalUpdate(id, bounds);
+    });
+
+    await visibility.open(p);
+    expect(showMoves).toBeGreaterThan(1);
+    expect(visibility.visible.has(1)).toBe(true);
+  });
   test('transient native readback failures are retried inside the bounded loop', async () => {
     await setup();
     let failures = 2;
@@ -298,12 +316,26 @@ describe('/geometry bridge validation', () => {
     readback.mockResolvedValue([{ ...owned, ...onMain }, { number: 45678, ...windowBounds(display.park) }]);
     expect(await (await post({ windowId: 9, action: 'show' })).json()).toMatchObject({ onMain: true, parked: false, number: 12345 });
     readback.mockResolvedValue([{ ...owned, ...onMain }, { number: 54321, ...onMain }, { number: 45678, ...windowBounds(display.park) }]);
-    expect(await (await post({ windowId: 10, action: 'show' })).json()).toMatchObject({ onMain: true, parked: false, number: 54321 });
+    expect(await (await post({ windowId: 10, action: 'show' })).json()).toMatchObject({ onMain: false, parked: false, number: null });
     readback.mockResolvedValue([{ ...owned, ...onMain }, { number: 45678, ...windowBounds(display.park) }]);
     expect(await (await post({ windowId: 9 })).json()).toMatchObject({ parked: false, number: 12345 });
     // Disappearance does not make an unrelated parked window count as this one.
     readback.mockResolvedValue([{ number: 45678, ...first.bounds }]);
     expect(await (await post({ windowId: 9 })).json()).toMatchObject({ parked: false, number: 12345, actual: null });
+  });
+  test('show binds a previously unresolved parking signature before checking main placement', async () => {
+    const first = await (await post({ windowId: 9 })).json();
+    const owned = { number: 12345, ...first.bounds };
+    readback.mockResolvedValue([owned]);
+    expect(await (await post({ windowId: 9, action: 'show' })).json()).toMatchObject({ parked: true, onMain: false, number: 12345 });
+    readback.mockResolvedValue([{ number: 12345, ...onMain }]);
+    expect(await (await post({ windowId: 9, action: 'show' })).json()).toMatchObject({ parked: false, onMain: true, number: 12345 });
+  });
+  test('show never binds a unique or multiple unbound main candidates', async () => {
+    readback.mockResolvedValue([{ number: 1, ...onMain }]);
+    expect(await (await post({ windowId: 9, action: 'show' })).json()).toMatchObject({ parked: false, onMain: false, number: null });
+    readback.mockResolvedValue([{ number: 2, ...onMain }, { number: 3, ...onMain }]);
+    expect(await (await post({ windowId: 10, action: 'show' })).json()).toMatchObject({ parked: false, onMain: false, number: null });
   });
   test('overlapping allocations get distinct signatures, excluding every currently observed native size', async () => {
     readback.mockResolvedValue([{ number: 1, ...windowBounds(display.park), width: 1279, height: 899 }]);
