@@ -112,6 +112,13 @@ describe('browser error normalization', () => {
     expect(isRetryableBrowserError(err)).toBe(false);
   });
 
+  test('Playwright call timeouts keep the tab and retry without a missing-tab code', () => {
+    const err = new Error('page.goto: Timeout 30000ms exceeded.\nCall log:\n  - navigating to "http://x/slow", waiting until "commit"');
+    expect(browserErrorStatus(err)).toBe(503);
+    expect(browserErrorCode(err)).toBe('operation_timeout');
+    expect(browserErrorRecovery(err)).toBe('retry');
+  });
+
   test('launch and user concurrency timeouts normalize to 503 retry', () => {
     const launch = new Error('Browser launch timeout (60s)');
     const concurrency = new Error('User concurrency limit reached, try again');

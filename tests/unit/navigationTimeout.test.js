@@ -1,16 +1,12 @@
 /**
- * Tests for navigation timeout session destruction.
+ * Tests for the shared operation-timeout policy.
  *
- * When a click/navigate/open_url times out, the proxy session may be poisoned
- * (e.g., Cloudflare holding the connection). The server should destroy the
- * entire user session so the next request gets a fresh BrowserContext + proxy.
+ * A slow click, navigate, or open_url operation must return a recoverable
+ * timeout without destroying the session or any sibling tabs. Proxy errors are
+ * different: they indicate a dead transport and may still rotate a session.
  *
- * That teardown is conditional on there being a proxy to rotate. With no proxy
- * pool configured there is nothing to get fresh, and destroying the session
- * only costs every other tab under that userId.
- *
- * Non-navigation timeouts (type, scroll) should only track per-tab consecutive
- * timeouts without destroying the session.
+ * The actual bounded timeout streak and liveness probe are covered by
+ * tabTimeout.test.js; these tests keep the route-level classification honest.
  */
 
 import { actionFromReq, classifyError } from '../../lib/request-utils.js';
@@ -51,27 +47,18 @@ function simulateErrorHandling(err, action, userId, tabState, canRotateSessions 
     return result;
   }
 
-  // Navigation timeouts destroy session (proxy may be poisoned)
+  // Navigation timeouts are recoverable operation failures. They neither
+  // destroy the session or tab nor count toward the navigation-failure
+  // threshold that triggers session recovery.
   const isNavigationTimeout = isTimeoutError(err) && userId && NAVIGATION_TIMEOUT_ACTIONS.has(action);
-  if (isNavigationTimeout && canRotateSessions) {
-    result.sessionDestroyed = true;
-    result.reason = 'navigation_timeout';
-    result.navFailureRecorded = true;
-    return result;
-  }
-  // No proxy to rotate: keep the health signal, spare everyone else's tabs.
   if (isNavigationTimeout) {
-    result.navFailureRecorded = true;
     return result;
   }
 
-  // Non-navigation timeouts track per-tab consecutive count
-  if (isTimeoutError(err) && userId && !NAVIGATION_TIMEOUT_ACTIONS.has(action) && tabState) {
+  // Non-navigation timeouts only track the streak. The shared timeout handler
+  // performs the liveness probe before any destruction decision.
+  if (isTimeoutError(err) && userId && tabState) {
     tabState.consecutiveTimeouts = (tabState.consecutiveTimeouts || 0) + 1;
-    if (tabState.consecutiveTimeouts >= MAX_CONSECUTIVE_TIMEOUTS) {
-      result.tabDestroyed = true;
-      result.reason = 'consecutive_timeouts';
-    }
     return result;
   }
 
@@ -85,22 +72,11 @@ describe('navigation timeout session destruction', () => {
   const playwrightTimeout = new Error('page.goto: Timeout 30000ms exceeded.\nCall log:\n  - navigating to "https://www.google.com/", waiting until "domcontentloaded"');
   const proxyError = new Error('NS_ERROR_PROXY_CONNECTION_REFUSED');
 
-  test('click timeout destroys session', () => {
-    const result = simulateErrorHandling(timeoutError, 'click', 'user-1', {});
-    expect(result.sessionDestroyed).toBe(true);
-    expect(result.reason).toBe('navigation_timeout');
-  });
-
-  test('navigate timeout destroys session', () => {
-    const result = simulateErrorHandling(playwrightTimeout, 'navigate', 'user-1', {});
-    expect(result.sessionDestroyed).toBe(true);
-    expect(result.reason).toBe('navigation_timeout');
-  });
-
-  test('open_url timeout destroys session', () => {
-    const result = simulateErrorHandling(timeoutError, 'open_url', 'user-1', {});
-    expect(result.sessionDestroyed).toBe(true);
-    expect(result.reason).toBe('navigation_timeout');
+  test.each(['click', 'navigate', 'open_url'])('%s timeout preserves the session', (action) => {
+    const result = simulateErrorHandling(timeoutError, action, 'user-1', {});
+    expect(result.sessionDestroyed).toBe(false);
+    expect(result.tabDestroyed).toBe(false);
+    expect(result.navFailureRecorded).toBe(false);
   });
 
   test('type timeout does NOT destroy session, tracks per-tab', () => {
@@ -118,14 +94,14 @@ describe('navigation timeout session destruction', () => {
     expect(tabState.consecutiveTimeouts).toBe(1);
   });
 
-  test('3 consecutive type timeouts destroys tab (not session)', () => {
+  test('3 consecutive type timeouts still preserve the tab until liveness fails', () => {
     const tabState = { consecutiveTimeouts: 0 };
     simulateErrorHandling(timeoutError, 'type', 'user-1', tabState);
     simulateErrorHandling(timeoutError, 'type', 'user-1', tabState);
     const result = simulateErrorHandling(timeoutError, 'type', 'user-1', tabState);
-    expect(result.tabDestroyed).toBe(true);
+    expect(result.tabDestroyed).toBe(false);
     expect(result.sessionDestroyed).toBe(false);
-    expect(result.reason).toBe('consecutive_timeouts');
+    expect(tabState.consecutiveTimeouts).toBe(3);
   });
 
   test('proxy error still destroys session', () => {
@@ -164,15 +140,16 @@ describe('navigation timeout with no proxy to rotate', () => {
     },
   );
 
-  test('the navigation failure is still recorded when there is no proxy', () => {
+  test('a navigation timeout does not count toward session recovery', () => {
     const result = simulateErrorHandling(timeoutError, 'navigate', 'user-1', {}, false);
-    expect(result.navFailureRecorded).toBe(true);
+    expect(result.navFailureRecorded).toBe(false);
   });
 
-  test('the same timeout still destroys the session when a proxy can rotate', () => {
+  test('the same timeout still preserves the session when a proxy can rotate', () => {
     const result = simulateErrorHandling(timeoutError, 'navigate', 'user-1', {}, true);
-    expect(result.sessionDestroyed).toBe(true);
-    expect(result.reason).toBe('navigation_timeout');
+    expect(result.sessionDestroyed).toBe(false);
+    expect(result.reason).toBe(null);
+    expect(result.navFailureRecorded).toBe(false);
   });
 
   test('proxy errors also require a rotatable proxy', () => {
@@ -187,12 +164,12 @@ describe('navigation timeout with no proxy to rotate', () => {
     expect(tabState.consecutiveTimeouts).toBe(1);
   });
 
-  test('a stuck tab is still collected after 3 consecutive timeouts with no proxy', () => {
+  test('a stuck tab remains until the shared liveness probe fails', () => {
     const tabState = { consecutiveTimeouts: 0 };
     simulateErrorHandling(timeoutError, 'type', 'user-1', tabState, false);
     simulateErrorHandling(timeoutError, 'type', 'user-1', tabState, false);
     const result = simulateErrorHandling(timeoutError, 'type', 'user-1', tabState, false);
-    expect(result.tabDestroyed).toBe(true);
+    expect(result.tabDestroyed).toBe(false);
     expect(result.sessionDestroyed).toBe(false);
   });
 });
@@ -214,15 +191,16 @@ describe('navigation timeout with no proxy to rotate', () => {
     },
   );
 
-  test('the navigation failure is still recorded when there is no proxy', () => {
+  test('a navigation timeout does not count toward session recovery', () => {
     const result = simulateErrorHandling(timeoutError, 'navigate', 'user-1', {}, false);
-    expect(result.navFailureRecorded).toBe(true);
+    expect(result.navFailureRecorded).toBe(false);
   });
 
-  test('the same timeout still destroys the session when a proxy can rotate', () => {
+  test('the same timeout still preserves the session when a proxy can rotate', () => {
     const result = simulateErrorHandling(timeoutError, 'navigate', 'user-1', {}, true);
-    expect(result.sessionDestroyed).toBe(true);
-    expect(result.reason).toBe('navigation_timeout');
+    expect(result.sessionDestroyed).toBe(false);
+    expect(result.reason).toBe(null);
+    expect(result.navFailureRecorded).toBe(false);
   });
 
   test('proxy errors also require a rotatable proxy', () => {
@@ -237,12 +215,12 @@ describe('navigation timeout with no proxy to rotate', () => {
     expect(tabState.consecutiveTimeouts).toBe(1);
   });
 
-  test('a stuck tab is still collected after 3 consecutive timeouts with no proxy', () => {
+  test('a stuck tab remains until the shared liveness probe fails', () => {
     const tabState = { consecutiveTimeouts: 0 };
     simulateErrorHandling(timeoutError, 'type', 'user-1', tabState, false);
     simulateErrorHandling(timeoutError, 'type', 'user-1', tabState, false);
     const result = simulateErrorHandling(timeoutError, 'type', 'user-1', tabState, false);
-    expect(result.tabDestroyed).toBe(true);
+    expect(result.tabDestroyed).toBe(false);
     expect(result.sessionDestroyed).toBe(false);
   });
 });
