@@ -200,6 +200,28 @@ function createTestApp() {
     res.json({ ok: true });
   });
   
+  // A button whose handler blocks the page long enough to exceed a short
+  // handler timeout, like a click that launches a heavy CAPTCHA challenge.
+  app.get('/slow-click', (req, res) => {
+    const blockMs = Math.min(Number(req.query.ms) || 8000, 20000);
+    res.send(`
+      <!DOCTYPE html>
+      <html><head><title>Slow Click</title></head>
+      <body>
+        <h1>Slow Click Page</h1>
+        <button id="slow">Sign In With Email</button>
+        <div id="result"></div>
+        <script>
+          document.getElementById('slow').addEventListener('click', () => {
+            const end = Date.now() + ${blockMs};
+            while (Date.now() < end) {}
+            document.getElementById('result').textContent = 'Slow click finished';
+          });
+        </script>
+      </body></html>
+    `);
+  });
+
   // Page with clickable button
   app.get('/click', (req, res) => {
     res.send(`

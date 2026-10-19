@@ -35,7 +35,9 @@ function fixture({ initialSession, pendingPage, navigation } = {}) {
     FLY_MACHINE_ID: null, MAX_TABS_PER_SESSION: 10, MAX_TABS_GLOBAL: 30,
     sessions, normalizeUserId: value => value,
     withRequestDeadline, requestTimeoutMs: () => 10,
+    navigationRequestTimeoutMs: () => 10,
     getSession: jest.fn(() => initialSession?.promise || Promise.resolve(session)),
+    withTabLock: async (_tabId, operation) => operation(),
     getTotalTabCount: () => 1,
     createPageWithRecoveryForUser: (_user, current, options) => createPageWithSessionRecovery({
       userId: 'shared', session: current, ...options, timeoutMs: 1000,

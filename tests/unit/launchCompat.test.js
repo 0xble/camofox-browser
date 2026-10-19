@@ -116,6 +116,6 @@ describe('launch compatibility source contract', () => {
     expect(serverSource).toContain('function navigationRequestTimeoutMs()');
     expect(serverSource).toContain('NAVIGATE_TIMEOUT_MS + 5000');
     expect(navigateRoute).toContain('timeout: NAVIGATE_TIMEOUT_MS');
-    expect(navigateRoute).toContain("})(), navigationRequestTimeoutMs(), 'navigate'))");
+    expect(navigateRoute).toContain("})());");
   });
 });

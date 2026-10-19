@@ -69,6 +69,7 @@ import { createProfileCleanupGuard, isEligibleForAutomaticCleanup } from './lib/
 import { closeSessionOnce, teardownEphemeralSession, reapAbandonedContexts } from './lib/session-close.js';
 import { tabClosable, latestAgentTabId, sweepIdleEphemeralTabs } from './lib/idle-tabs.js';
 import { applySharedTabHandoff } from './lib/shared-tab-handoff.js';
+import { handleTabTimeout } from './lib/tab-timeout.js';
 import { createVirtualDisplayRegistry } from './lib/plugin-capabilities.js';
 import { killProcessIds } from './lib/browser-processes.js';
 import { snapshotOwnedBrowserProcesses, survivingOwnedBrowserProcesses, liveBrowserProfilePaths } from './lib/process-ownership.js';
@@ -621,6 +622,7 @@ const NATIVE_MEM_RESTART_THRESHOLD_MB = CONFIG.nativeMemRestartThresholdMb;
 let _nativeMemBaseline = null; // RSS - heapUsed at first idle measurement
 const FAILURE_THRESHOLD = 3;
 const MAX_CONSECUTIVE_TIMEOUTS = 3;
+const TAB_LIVENESS_TIMEOUT_MS = 1000;
 const TAB_LOCK_TIMEOUT_MS = 35000; // Must be > HANDLER_TIMEOUT_MS so active op times out first
 
 
@@ -685,19 +687,43 @@ function getTabLock(tabId) {
 }
 
 // Timeout is INSIDE the lock so each operation gets its full budget
-// regardless of how long it waited in the queue.
-async function withTabLock(tabId, operation, timeoutMs = HANDLER_TIMEOUT_MS, onTimeout, { allowHumanControl = false } = {}) {
+// regardless of how long it waited in the queue. A timed-out operation is a
+// recoverable failure: the tab is retained unless repeated timeouts and a
+// failed liveness probe prove that the page is actually stuck.
+async function withTabLock(tabId, operation, timeoutMs = HANDLER_TIMEOUT_MS, _onTimeout, { allowHumanControl = false } = {}) {
   const lock = getTabLock(tabId);
-  await lock.acquire(TAB_LOCK_TIMEOUT_MS);
+  try {
+    await lock.acquire(TAB_LOCK_TIMEOUT_MS);
+  } catch (err) {
+    if (isTabLockQueueTimeout(err)) await handleTimedOutTab(tabId);
+    throw err;
+  }
+
   try {
     if (humanControlledTabs.has(tabId) && !allowHumanControl) {
       throw Object.assign(new Error('Tab is handed off to a human'), { statusCode: 409, code: 'tab_handed_off' });
     }
-    return await withTimeout(operation(), timeoutMs, 'action');
+    const result = await withTimeout(operation(), timeoutMs, 'action');
+    const owner = findTabOwner(tabId);
+    if (owner) owner.tabState.consecutiveTimeouts = 0;
+    return result;
   } catch (err) {
-    if (onTimeout && isTimeoutError(err)) {
-      await onTimeout();
-      throw Object.assign(err, { code: 'tab_timeout', statusCode: 410 });
+    if (isTimeoutError(err)) {
+      const timeoutResult = await handleTimedOutTab(tabId);
+      if (timeoutResult?.destroyed) {
+        throw Object.assign(err, {
+          code: 'tab_destroyed',
+          statusCode: 410,
+          retryable: true,
+          recovery: 'create_new_tab',
+        });
+      }
+      throw Object.assign(err, {
+        code: 'tab_timeout',
+        statusCode: 410,
+        retryable: true,
+        recovery: 'retry',
+      });
     }
     throw err;
   } finally {
@@ -712,6 +738,32 @@ function withTimeout(promise, ms, label) {
       setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms)
     )
   ]);
+}
+
+function findTabOwner(tabId) {
+  for (const [userId, session] of sessions) {
+    const found = findTab(session, tabId);
+    if (found) return { ...found, session, userId };
+  }
+  return null;
+}
+
+async function handleTimedOutTab(tabId) {
+  const owner = findTabOwner(tabId);
+  if (!owner) return { handled: false, destroyed: false, reason: 'tab_missing' };
+  return handleTabTimeout({
+    tabId,
+    userId: owner.userId,
+    findTab: findTabId => {
+      const current = findTabOwner(findTabId);
+      return current ? { ...current, session: current.session } : null;
+    },
+    isHumanControlled: currentTabId => humanControlledTabs.has(currentTabId),
+    probeLiveness: page => withTimeout(page.evaluate(() => 1), TAB_LIVENESS_TIMEOUT_MS, 'tab liveness').then(() => true),
+    destroyTab: destroyUnresponsiveTab,
+    maxConsecutiveTimeouts: MAX_CONSECUTIVE_TIMEOUTS,
+    log,
+  });
 }
 
 function requestTimeoutMs(baseMs = HANDLER_TIMEOUT_MS) {
@@ -1725,7 +1777,7 @@ function handleRouteError(err, req, res, extraFields = {}) {
   }
 
   const userId = req.body?.userId || req.query?.userId;
-  const tabId = req.body?.tabId || req.query?.tabId || req.params?.tabId;
+  const tabId = req.body?.tabId || req.body?.targetId || req.query?.tabId || req.params?.tabId;
   let foundForContext = null;
   if (userId && tabId) {
     const session = sessions.get(normalizeUserId(userId));
@@ -1769,63 +1821,24 @@ function handleRouteError(err, req, res, extraFields = {}) {
     browserRestartsTotal.labels('proxy_error').inc();
     destroySession(userId).catch(() => {});
   }
-  // Navigation-related timeouts can poison the proxy session (e.g., Cloudflare holding
-  // the connection open for 30s). The browser context shares a single proxy session, so
-  // one poisoned page kills all subsequent navigations in that context. Destroy the
-  // entire session so the next request gets a fresh BrowserContext + proxy.
-  //
-  // Guarded on proxyPool?.canRotateSessions, exactly as the proxy-error branch above
-  // is. Proxy poisoning is the whole justification for destroying a session here, so
-  // when no proxy is configured there is nothing to rotate and the teardown costs
-  // every tab under that userId for no benefit -- subsequent calls get 404 "Tab not
-  // found". #8559 reported that blast radius: one caller's timeout killing every
-  // concurrent tab, because parallel callers share a userId. v1.14.0 fixed the
-  // trigger described there (bare image URLs now complete at commit) but left the
-  // radius, so any other timeout -- a slow page, a hung connection -- still takes the
-  // whole session.
-  //
-  // Without a proxy, the per-tab consecutive-timeout reaper below is the right
-  // granularity and still collects a genuinely stuck tab. recordNavFailure is kept on
-  // both paths so session health tracking is unchanged either way.
+  // A navigation timeout is a recoverable operation failure. Do not rotate or
+  // destroy the browser context: it may contain an in-progress login or CAPTCHA.
   const NAVIGATION_TIMEOUT_ACTIONS = new Set(['click', 'navigate', 'open_url']);
-  const isNavigationTimeout =
-    isTimeoutError(err) && err.code !== 'tab_timeout' && userId && NAVIGATION_TIMEOUT_ACTIONS.has(action);
-  if (isNavigationTimeout && proxyPool?.canRotateSessions) {
-    log('warn', 'navigation timeout — destroying session for fresh proxy', {
-      action, userId, error: err.message,
-    });
-    browserRestartsTotal.labels('navigation_timeout').inc();
-    recordNavFailure(userId);
-    destroySession(userId).catch(() => {});
-  } else if (isNavigationTimeout) {
-    log('warn', 'navigation timeout — no proxy to rotate, leaving the session up', {
+  if (isTimeoutError(err) && userId && NAVIGATION_TIMEOUT_ACTIONS.has(action)) {
+    log('warn', 'navigation timeout — preserving session and tab', {
       action, userId, error: err.message,
     });
     recordNavFailure(userId);
   }
-  // Track consecutive timeouts per tab and auto-destroy stuck tabs
-  // (for non-navigation timeouts like type, scroll that don't poison the proxy)
-  if (userId && isTimeoutError(err) && !NAVIGATION_TIMEOUT_ACTIONS.has(action)) {
-    const tabId = req.body?.tabId || req.query?.tabId || req.params?.tabId;
-    const session = sessions.get(normalizeUserId(userId));
-    if (session && tabId) {
-      const found = findTab(session, tabId);
-      if (found) {
-        found.tabState.consecutiveTimeouts++;
-        if (found.tabState.consecutiveTimeouts >= MAX_CONSECUTIVE_TIMEOUTS) {
-          log('warn', 'auto-destroying tab after consecutive timeouts', { tabId, count: found.tabState.consecutiveTimeouts });
-          destroyTab(session, tabId, 'consecutive_timeouts', userId);
-        }
-      }
-    }
-  }
-  // Lock queue timeout = tab is stuck. Destroy immediately.
+  // Lock queue timeout means the tab may be unresponsive, but the shared
+  // timeout path has already applied its bounded liveness policy. Never report
+  // that the tab was destroyed unless that policy actually removed it.
   if (userId && isTabLockQueueTimeout(err)) {
-    const session = sessions.get(normalizeUserId(userId));
-    if (session && tabId) {
-      destroyTab(session, tabId, 'lock_queue', userId);
+    const stillPresent = findTabOwner(tabId);
+    if (stillPresent) {
+      return res.status(503).json({ error: 'Tab is still busy; retry the operation.', code: 'tab_unresponsive', retryable: true, recovery: 'retry', ...extraFields });
     }
-    return res.status(503).json({ error: 'Tab unresponsive and has been destroyed. Open a new tab.', code: 'tab_unresponsive', retryable: true, recovery: 'create_new_tab', ...extraFields });
+    return res.status(410).json({ error: 'Tab was destroyed after repeated unresponsive timeouts. Open a new tab.', code: 'tab_destroyed', retryable: true, recovery: 'create_new_tab', ...extraFields });
   }
   // Tab was destroyed while this request was queued in the lock
   if (isTabDestroyedError(err)) {
@@ -1901,16 +1914,17 @@ function destroyTab(session, tabId, reason, userId) {
   return false;
 }
 
-async function destroyTimedOutTab(session, tabId, reason, userId) {
+async function destroyUnresponsiveTab(session, tabId, reason, userId) {
+  if (humanControlledTabs.has(tabId)) return false;
   const found = session && findTab(session, tabId);
-  if (!found) return;
+  if (!found) return false;
   const { tabState, group, listItemId } = found;
-  log('warn', 'destroying timed-out tab', { tabId, listItemId, toolCalls: tabState.toolCalls, reason });
+  log('warn', 'destroying unresponsive tab', { tabId, listItemId, toolCalls: tabState.toolCalls, reason });
   try {
     await safePageClose(tabState.page);
     await clearTabDownloads(tabState);
   } catch (err) {
-    log('warn', 'timed-out tab cleanup failed', { tabId, error: err.message });
+    log('warn', 'unresponsive tab cleanup failed', { tabId, error: err.message });
   } finally {
     humanControlledTabs.delete(tabId);
     group.delete(tabId);
@@ -1925,6 +1939,7 @@ async function destroyTimedOutTab(session, tabId, reason, userId) {
     tabsDestroyedTotal.labels(reason).inc();
     pluginEvents.emit('tab:destroyed', { userId: userId || null, tabId, reason });
   }
+  return true;
 }
 
 /**
@@ -3576,13 +3591,17 @@ app.post('/tabs', async (req, res) => {
         if (urlErr) throw Object.assign(new Error(urlErr), { statusCode: 400 });
         tabState.lastRequestedUrl = url;
         try {
-          const navigationResponse = await withPageLoadDuration('open_url', () => navigatePage(page, url));
+          const navigationResponse = await withTabLock(
+            tabId,
+            () => withPageLoadDuration('open_url', () => navigatePage(page, url)),
+            navigationRequestTimeoutMs(),
+          );
           signal.throwIfAborted();
           tabState.lastNavigationHttpStatus = typeof navigationResponse?.status === 'function' ? navigationResponse.status() : null;
           recordNavSuccess(userId);
         } catch (navErr) {
           signal.throwIfAborted();
-          if ((isProxyError(navErr) || isTimeoutError(navErr)) && proxyPool?.canRotateSessions) {
+          if (isProxyError(navErr) && proxyPool?.canRotateSessions) {
             log('warn', 'tab create navigate failed, retrying with fresh proxy', {
               reqId: req.reqId, tabId, error: navErr.message,
             });
@@ -3601,16 +3620,20 @@ app.post('/tabs', async (req, res) => {
               signal.throwIfAborted();
             }
             tabState = registerPage(session, userId, retryPage, resolvedSessionKey, { tabId }).tabState;
-            tabState.lastRequestedUrl = url;
             activeTab = { session, tabId };
+            tabState.lastRequestedUrl = url;
             releasePageLease(session, retryLease);
             refreshActiveTabsGauge();
-            const navigationResponse = await withPageLoadDuration('open_url', () => navigatePage(retryPage, url));
+            const navigationResponse = await withTabLock(
+              tabId,
+              () => withPageLoadDuration('open_url', () => navigatePage(retryPage, url)),
+              navigationRequestTimeoutMs(),
+            );
             signal.throwIfAborted();
             tabState.lastNavigationHttpStatus = typeof navigationResponse?.status === 'function' ? navigationResponse.status() : null;
             recordNavSuccess(userId);
           } else {
-            if (recordNavFailure(userId)) {
+            if (!isTimeoutError(navErr) && recordNavFailure(userId)) {
               await recoverUserSession(userId, 'tab_create_nav_failure');
             }
             throw navErr;
@@ -3737,11 +3760,11 @@ app.post('/tabs/:tabId/navigate', async (req, res) => {
     if (!found) return tabNotFoundResponse(res, tabId);
     session.lastAccess = Date.now();
 
-    const result = await withUserLimit(userId, () => withTimeout((async () => {
+    const result = await withUserLimit(userId, () => (async () => {
       await ensureBrowser();
       const resolvedSessionKey = sessionKey || listItemId || found.listItemId || 'default';
       let tabState = found.tabState;
-      tabState.toolCalls++; tabState.consecutiveTimeouts = 0; tabState.consecutiveFailures = 0;
+      tabState.toolCalls++; tabState.consecutiveFailures = 0;
       
       let targetUrl = url;
       if (macro && macro !== '__NO__' && macro !== 'none' && macro !== 'null') {
@@ -3972,7 +3995,7 @@ app.post('/tabs/:tabId/navigate', async (req, res) => {
           await navigateWithDeadPageRecovery();
           recordNavSuccess(userId);
         } catch (navErr) {
-          if ((isProxyError(navErr) || isTimeoutError(navErr)) && proxyPool?.canRotateSessions) {
+          if (isProxyError(navErr) && proxyPool?.canRotateSessions) {
             log('warn', 'navigate failed, retrying with fresh proxy session', {
               reqId: req.reqId, tabId, error: navErr.message,
             });
@@ -3990,7 +4013,7 @@ app.post('/tabs/:tabId/navigate', async (req, res) => {
             // The Google request failed upstream; a successful fallback is the
             // existing search behavior and is the only success reported here.
           } else {
-            if (recordNavFailure(userId)) {
+            if (!isTimeoutError(navErr) && recordNavFailure(userId)) {
               await recoverUserSession(userId, 'navigate_failure');
             }
             throw navErr;
@@ -4064,7 +4087,7 @@ app.post('/tabs/:tabId/navigate', async (req, res) => {
           ...searchFallback,
         };
       }, navigationRequestTimeoutMs());
-    })(), navigationRequestTimeoutMs(), 'navigate'));
+    })());
     
     log('info', 'navigated', { reqId: req.reqId, tabId, url: result.url });
     pluginEvents.emit('tab:navigated', { userId: req.body.userId, tabId, url: result.url, prevUrl: null });
@@ -4177,7 +4200,7 @@ app.get('/tabs/:tabId/snapshot', async (req, res) => {
     session.lastAccess = Date.now();
     
     let { tabState } = found;
-    tabState.toolCalls++; tabState.consecutiveTimeouts = 0; tabState.consecutiveFailures = 0;
+    tabState.toolCalls++; tabState.consecutiveFailures = 0;
 
     // Cached chunk retrieval for offset>0 requests
     if (offset > 0 && tabState.lastSnapshot) {
@@ -4438,7 +4461,7 @@ app.post('/tabs/:tabId/click', async (req, res) => {
     session.lastAccess = Date.now();
     
     const { tabState } = found;
-    tabState.toolCalls++; tabState.consecutiveTimeouts = 0; tabState.consecutiveFailures = 0;
+    tabState.toolCalls++; tabState.consecutiveFailures = 0;
     
     if (!ref && !selector) {
       return res.status(400).json({ error: 'ref or selector required' });
@@ -4600,14 +4623,14 @@ app.post('/tabs/:tabId/click', async (req, res) => {
       const newUrl = tabState.page.url();
       tabState.visitedUrls.add(newUrl);
       return { ok: true, url: newUrl, refsAvailable: tabState.refs.size > 0 };
-    }, HANDLER_TIMEOUT_MS, () => destroyTimedOutTab(session, tabId, 'operation_timeout', userId)));
-    
+    }, HANDLER_TIMEOUT_MS));
+
     log('info', 'clicked', { reqId: req.reqId, tabId, url: result.url });
     pluginEvents.emit('tab:click', { userId: req.body.userId, tabId, ref: req.body.ref, selector: req.body.selector });
     res.json(result);
   } catch (err) {
     log('error', 'click failed', { reqId: req.reqId, tabId, error: err.message });
-    if (err.code !== 'tab_timeout' && err.message?.includes('timed out')) {
+    if (err.code !== 'tab_timeout' && err.code !== 'tab_destroyed' && err.message?.includes('timed out')) {
       try {
         const session = sessions.get(normalizeUserId(req.body.userId));
         const found = session && findTab(session, tabId);
@@ -4724,7 +4747,7 @@ app.post('/tabs/:tabId/upload', async (req, res) => {
     if (!found) return tabNotFoundResponse(res, req.params.tabId || req.body?.tabId);
     session.lastAccess = Date.now();
     const { tabState } = found;
-    tabState.toolCalls++; tabState.consecutiveTimeouts = 0; tabState.consecutiveFailures = 0;
+    tabState.toolCalls++; tabState.consecutiveFailures = 0;
 
     const result = await withUserLimit(userId, () => withTabLock(tabId, async () => {
       const directInput = tabState.page.locator('input[type="file"]').first();
@@ -4924,7 +4947,7 @@ app.post('/tabs/:tabId/type', async (req, res) => {
     session.lastAccess = Date.now();
     
     const { tabState } = found;
-    tabState.toolCalls++; tabState.consecutiveTimeouts = 0; tabState.consecutiveFailures = 0;
+    tabState.toolCalls++; tabState.consecutiveFailures = 0;
     
     if (mode !== 'fill' && mode !== 'keyboard') {
       return res.status(400).json({ error: "mode must be 'fill' or 'keyboard'" });
@@ -5064,7 +5087,7 @@ app.post('/tabs/:tabId/select', async (req, res) => {
     if (selectorErr) throw invalidSelectorError(selectorErr);
     session.lastAccess = Date.now();
     const { tabState } = found;
-    tabState.toolCalls++; tabState.consecutiveTimeouts = 0; tabState.consecutiveFailures = 0;
+    tabState.toolCalls++; tabState.consecutiveFailures = 0;
     await withTabLock(tabId, async () => {
       let locator = ref ? refToLocator(tabState.page, ref, tabState.refs) : tabState.page.locator(selector);
       if (!locator && ref) {
@@ -5141,7 +5164,7 @@ app.post('/tabs/:tabId/press', async (req, res) => {
     session.lastAccess = Date.now();
     
     const { tabState } = found;
-    tabState.toolCalls++; tabState.consecutiveTimeouts = 0; tabState.consecutiveFailures = 0;
+    tabState.toolCalls++; tabState.consecutiveFailures = 0;
     const normalizedKey = normalizeBrowserKey(key);
     
     await withTabLock(tabId, async () => {
@@ -5211,7 +5234,7 @@ app.post('/tabs/:tabId/scroll', async (req, res) => {
     session.lastAccess = Date.now();
     
     const { tabState } = found;
-    tabState.toolCalls++; tabState.consecutiveTimeouts = 0; tabState.consecutiveFailures = 0;
+    tabState.toolCalls++; tabState.consecutiveFailures = 0;
     
     await withTabLock(req.params.tabId, async () => {
       const isVertical = direction === 'up' || direction === 'down';
@@ -5298,7 +5321,7 @@ app.post('/tabs/:tabId/viewport', async (req, res) => {
     session.lastAccess = Date.now();
 
     const { tabState } = found;
-    tabState.toolCalls++; tabState.consecutiveTimeouts = 0; tabState.consecutiveFailures = 0;
+    tabState.toolCalls++; tabState.consecutiveFailures = 0;
 
     await tabState.page.setViewportSize({ width: Math.round(width), height: Math.round(height) });
     await tabState.page.waitForTimeout(150);
@@ -5364,7 +5387,7 @@ app.post('/tabs/:tabId/back', async (req, res) => {
     session.lastAccess = Date.now();
     
     const { tabState } = found;
-    tabState.toolCalls++; tabState.consecutiveTimeouts = 0; tabState.consecutiveFailures = 0;
+    tabState.toolCalls++; tabState.consecutiveFailures = 0;
     
     const result = await withTabLock(tabId, async () => {
       try {
@@ -5442,7 +5465,7 @@ app.post('/tabs/:tabId/forward', async (req, res) => {
     session.lastAccess = Date.now();
     
     const { tabState } = found;
-    tabState.toolCalls++; tabState.consecutiveTimeouts = 0; tabState.consecutiveFailures = 0;
+    tabState.toolCalls++; tabState.consecutiveFailures = 0;
     
     const result = await withTabLock(tabId, async () => {
       await tabState.page.goForward({ timeout: 10000 });
@@ -5510,7 +5533,7 @@ app.post('/tabs/:tabId/refresh', async (req, res) => {
     session.lastAccess = Date.now();
     
     const { tabState } = found;
-    tabState.toolCalls++; tabState.consecutiveTimeouts = 0; tabState.consecutiveFailures = 0;
+    tabState.toolCalls++; tabState.consecutiveFailures = 0;
     
     const result = await withTabLock(tabId, async () => {
       await tabState.page.reload({ timeout: 30000 });
@@ -5583,7 +5606,7 @@ app.get('/tabs/:tabId/links', async (req, res) => {
     session.lastAccess = Date.now();
     
     const { tabState } = found;
-    tabState.toolCalls++; tabState.consecutiveTimeouts = 0; tabState.consecutiveFailures = 0;
+    tabState.toolCalls++; tabState.consecutiveFailures = 0;
     
     const result = await withTabLock(req.params.tabId, async () => {
       const allLinks = await tabState.page.evaluate(() => {
@@ -6034,14 +6057,13 @@ app.post('/tabs/:tabId/evaluate', express.json({ limit: CONFIG.evaluateMaxBodySi
 
     session.lastAccess = Date.now();
     const { tabState } = found;
-    tabState.toolCalls++; tabState.consecutiveTimeouts = 0; tabState.consecutiveFailures = 0;
+    tabState.toolCalls++; tabState.consecutiveFailures = 0;
 
     pluginEvents.emit('tab:evaluate', { userId, tabId: req.params.tabId, expression });
     const result = await withUserLimit(userId, () => withTabLock(
       req.params.tabId,
       () => tabState.page.evaluate(expression),
       requestTimeoutMs(),
-      () => destroyTimedOutTab(session, req.params.tabId, 'operation_timeout', userId),
     ));
     pluginEvents.emit('tab:evaluated', { userId, tabId: req.params.tabId, result });
     log('info', 'evaluate', { reqId: req.reqId, tabId: req.params.tabId, userId, resultType: typeof result });
@@ -6971,10 +6993,14 @@ app.post('/tabs/open', async (req, res) => {
     refreshActiveTabsGauge();
     
     try {
-      await withPageLoadDuration('open_url', () => navigatePage(page, url));
+      await withTabLock(
+        tabId,
+        () => withPageLoadDuration('open_url', () => navigatePage(page, url)),
+        navigationRequestTimeoutMs(),
+      );
       recordNavSuccess(userId);
     } catch (navErr) {
-      if ((isProxyError(navErr) || isTimeoutError(navErr)) && proxyPool?.canRotateSessions) {
+      if (isProxyError(navErr) && proxyPool?.canRotateSessions) {
         log('warn', 'tab open failed, retrying with fresh proxy', {
           reqId: req.reqId, tabId, error: navErr.message,
         });
@@ -6989,10 +7015,14 @@ app.post('/tabs/open', async (req, res) => {
         tabState = registerPage(session, userId, page, listItemId, { tabId }).tabState;
         releasePageLease(session, lease);
         refreshActiveTabsGauge();
-        await withPageLoadDuration('open_url', () => navigatePage(page, url));
+        await withTabLock(
+          tabId,
+          () => withPageLoadDuration('open_url', () => navigatePage(page, url)),
+          navigationRequestTimeoutMs(),
+        );
         recordNavSuccess(userId);
       } else {
-        if (recordNavFailure(userId)) {
+        if (!isTimeoutError(navErr) && recordNavFailure(userId)) {
           await recoverUserSession(userId, 'tab_open_nav_failure');
         }
         throw navErr;
@@ -7159,7 +7189,7 @@ app.post('/navigate', async (req, res) => {
     }
     
     const { tabState } = found;
-    tabState.toolCalls++; tabState.consecutiveTimeouts = 0; tabState.consecutiveFailures = 0;
+    tabState.toolCalls++; tabState.consecutiveFailures = 0;
     
     const result = await withTabLock(targetId, async () => {
       await withPageLoadDuration('navigate', () => navigatePage(tabState.page, url));
@@ -7180,7 +7210,7 @@ app.post('/navigate', async (req, res) => {
     res.json(result);
   } catch (err) {
     log('error', 'openclaw navigate failed', { reqId: req.reqId, error: err.message });
-    if (recordNavFailure(req.body?.userId)) {
+    if (!isTimeoutError(err) && recordNavFailure(req.body?.userId)) {
       await recoverUserSession(req.body.userId, 'openclaw_navigate_failure');
     }
     handleRouteError(err, req, res);
@@ -7255,7 +7285,7 @@ app.get('/snapshot', async (req, res) => {
     }
     
     const { tabState } = found;
-    tabState.toolCalls++; tabState.consecutiveTimeouts = 0; tabState.consecutiveFailures = 0;
+    tabState.toolCalls++; tabState.consecutiveFailures = 0;
 
     // Cached chunk retrieval
     if (offset > 0 && tabState.lastSnapshot) {
@@ -7425,7 +7455,7 @@ app.post('/act', async (req, res) => {
     }
     
     const { tabState } = found;
-    tabState.toolCalls++; tabState.consecutiveTimeouts = 0; tabState.consecutiveFailures = 0;
+    tabState.toolCalls++; tabState.consecutiveFailures = 0;
     
     const result = await withTabLock(targetId, async () => {
       switch (kind) {
