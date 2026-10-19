@@ -139,6 +139,18 @@ describe('native readback in the add-on (Camoufox-spoofed windows.get)', () => {
     // No window-title marker is used any more.
     expect(browser.windows.update.mock.calls.some(([, b]) => 'titlePreface' in b)).toBe(false);
   });
+  test('show binds an unbound window through a fresh parking signature before moving it to main', async () => {
+    await setup();
+    const p = { url: () => 'https://ui.test', isClosed: () => false, evaluate: async (_fn, value) => typeof value === 'string' ? value : undefined };
+    context.livePages.push(p);
+    windows.set(60, { id: 60, tabs: [{ id: 60, windowId: 60, url: 'https://ui.test' }], state: 'normal', native: { ...onMain } });
+    browser.tabs.query = async ({ title } = {}) => title ? [{ id: 60, windowId: 60 }] : [];
+
+    await visibility.open(p);
+    expect(visibility.visible.has(60)).toBe(true);
+    expect(windows.get(60).native).toMatchObject(onMain);
+    expect(browser.windows.update.mock.calls.some(([id, bounds]) => id === 60 && bounds.width === 1279)).toBe(true);
+  });
   test('an already-parked handoff is not acknowledged when native show placement is ignored', async () => {
     await setup();
     const p = await visibility.newPage(context);
@@ -286,6 +298,44 @@ describe('native readback in the add-on (Camoufox-spoofed windows.get)', () => {
       body: JSON.stringify({ windowId: 60, action: 'show' }),
     });
     expect(await response.json()).toMatchObject({ onMain: true, parked: false, number: 1060 });
+  });
+  test('a slow bind readback retries before handing an inherited UI window to the main display', async () => {
+    await setup();
+    visibility.visible.set(77, { windowId: 77, tabId: 77 });
+    const w = { id: 60, tabs: [{ id: 60, windowId: 60, url: 'https://ui.test' }], state: 'normal', native: { ...onMain } };
+    windows.set(60, w);
+    const real = readback.getMockImplementation();
+    let calls = 0;
+    readback.mockImplementation(async () => {
+      calls++;
+      if (calls === 2 || calls === 3) return [{ number: 1060, ...onMain }];
+      return real();
+    });
+
+    await onCreated(w);
+    expect(calls).toBeGreaterThanOrEqual(4);
+    expect(browser.windows.update.mock.calls.filter(([, bounds]) => bounds.width === 1279).length).toBeGreaterThan(1);
+    expect(visibility.visible.has(60)).toBe(true);
+    expect(w.native).toMatchObject(onMain);
+  });
+  test('a failed bind still returns an inherited UI window to the main display', async () => {
+    await setup();
+    visibility.visible.set(77, { windowId: 77, tabId: 77 });
+    const w = { id: 60, tabs: [{ id: 60, windowId: 60, url: 'https://ui.test' }], state: 'normal', native: { ...onMain } };
+    windows.set(60, w);
+    const real = readback.getMockImplementation();
+    let calls = 0;
+    readback.mockImplementation(async () => {
+      calls++;
+      if (calls > 1) throw new Error('osascript timed out');
+      return real();
+    });
+
+    await onCreated(w);
+    expect(calls).toBeGreaterThanOrEqual(5);
+    expect(w.native).toMatchObject(onMain);
+    expect(visibility.inheritFailures.has(60)).toBe(true);
+    expect(visibility.parkingFailures.has(60)).toBe(false);
   });
   test('UI onCreated window that cannot move to main records inheritFailed, not parkingFailed', async () => {
     await setup();
