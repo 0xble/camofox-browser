@@ -28,9 +28,19 @@ describe('tab timeout handling', () => {
     expect(state.destroyed).toHaveLength(0);
   });
 
+  test('navigation in flight is preserved without incrementing the timeout streak', async () => {
+    const state = setup({ responsive: false });
+    state.isNavigationInFlight = () => true;
+
+    const result = await handleTabTimeout({ tabId: 'tab-1', userId: 'user-1', ...state });
+
+    expect(result).toMatchObject({ destroyed: false, reason: 'navigation_in_flight' });
+    expect(state.tabState.consecutiveTimeouts).toBe(0);
+    expect(state.destroyed).toHaveLength(0);
+  });
+
   test('repeated timeouts destroy only after a failed liveness probe', async () => {
     const state = setup({ responsive: false });
-
     await handleTabTimeout({ tabId: 'tab-1', userId: 'user-1', ...state });
     await handleTabTimeout({ tabId: 'tab-1', userId: 'user-1', ...state });
     const result = await handleTabTimeout({ tabId: 'tab-1', userId: 'user-1', ...state });

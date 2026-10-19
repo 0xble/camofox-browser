@@ -34,6 +34,16 @@ describe('timed-out tab operations', () => {
     expect(clickRoute).not.toContain('destroyTimedOutTab');
   });
 
+  test('explicit tab_destroyed code wins over generic timeout classification', () => {
+    const error = Object.assign(new Error('action timed out after 5000ms'), {
+      code: 'tab_destroyed', statusCode: 410,
+    });
+
+    expect(browserErrorStatus(error)).toBe(410);
+    expect(browserErrorCode(error)).toBe('tab_destroyed');
+    expect(browserErrorRecovery(error)).toBe('create_new_tab');
+  });
+
   test('returns a stable recoverable error after a timeout', () => {
     const error = Object.assign(new Error('action timed out after 5000ms'), { code: 'operation_timeout' });
 
@@ -69,6 +79,27 @@ describe('timed-out tab operations', () => {
       });
       const stats = await client.getStats(tabId);
       expect(stats.tabId).toBe(tabId);
+    } finally {
+      await client.cleanup();
+    }
+  }, 30000);
+
+  test('returns tab_destroyed after 3 timed-out operations and a failed liveness probe', async () => {
+    const client = createClient(serverUrl);
+    const { tabId } = await client.createTab();
+
+    try {
+      for (let attempt = 1; attempt <= 2; attempt++) {
+        await expect(client.evaluate(tabId, 'new Promise(() => {})')).rejects.toMatchObject({
+          status: 503,
+          data: expect.objectContaining({ code: 'operation_timeout', recovery: 'retry' }),
+        });
+      }
+
+      await expect(client.evaluate(tabId, 'new Promise(() => {})')).rejects.toMatchObject({
+        status: 410,
+        data: expect.objectContaining({ code: 'tab_destroyed', recovery: 'create_new_tab' }),
+      });
     } finally {
       await client.cleanup();
     }

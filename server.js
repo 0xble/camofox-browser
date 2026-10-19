@@ -623,7 +623,9 @@ let _nativeMemBaseline = null; // RSS - heapUsed at first idle measurement
 const FAILURE_THRESHOLD = 3;
 const MAX_CONSECUTIVE_TIMEOUTS = 3;
 const TAB_LIVENESS_TIMEOUT_MS = 1000;
-const TAB_LOCK_TIMEOUT_MS = 35000; // Must be > HANDLER_TIMEOUT_MS so active op times out first
+// Bounds queue waits only. Navigation may hold the lock longer than this, which
+// is why queue timeouts during navigation do not count toward reaping the tab.
+const TAB_LOCK_TIMEOUT_MS = CONFIG.tabLockTimeoutMs;
 
 
 
@@ -690,7 +692,9 @@ function getTabLock(tabId) {
 // regardless of how long it waited in the queue. A timed-out operation is a
 // recoverable failure: the tab is retained unless repeated timeouts and a
 // failed liveness probe prove that the page is actually stuck.
-async function withTabLock(tabId, operation, timeoutMs = HANDLER_TIMEOUT_MS, _onTimeout, { allowHumanControl = false } = {}) {
+// Timeouts observed while a navigation holds the lock never count toward the
+// unresponsive streak or trigger the liveness probe.
+async function withTabLock(tabId, operation, timeoutMs = HANDLER_TIMEOUT_MS, { allowHumanControl = false, navigation = false } = {}) {
   const lock = getTabLock(tabId);
   try {
     await lock.acquire(TAB_LOCK_TIMEOUT_MS);
@@ -699,6 +703,7 @@ async function withTabLock(tabId, operation, timeoutMs = HANDLER_TIMEOUT_MS, _on
     throw err;
   }
 
+  lock.navigating = navigation;
   try {
     if (humanControlledTabs.has(tabId) && !allowHumanControl) {
       throw Object.assign(new Error('Tab is handed off to a human'), { statusCode: 409, code: 'tab_handed_off' });
@@ -708,9 +713,14 @@ async function withTabLock(tabId, operation, timeoutMs = HANDLER_TIMEOUT_MS, _on
     if (owner) owner.tabState.consecutiveTimeouts = 0;
     return result;
   } catch (err) {
+    // The timed-out operation no longer counts as in-flight navigation, so a
+    // navigation that itself exceeds its budget still feeds the streak.
+    lock.navigating = false;
     if (err?.code === 'tab_lock_timeout') {
       const timeoutResult = await handleTimedOutTab(tabId);
-      if (timeoutResult?.destroyed) {
+      // tab_missing means a concurrent timeout or close already removed the
+      // tab while this operation held the lock, so it is gone either way.
+      if (timeoutResult?.destroyed || timeoutResult?.reason === 'tab_missing') {
         throw Object.assign(err, {
           code: 'tab_destroyed',
           statusCode: 410,
@@ -727,6 +737,7 @@ async function withTabLock(tabId, operation, timeoutMs = HANDLER_TIMEOUT_MS, _on
     }
     throw err;
   } finally {
+    lock.navigating = false;
     lock.release();
   }
 }
@@ -759,6 +770,7 @@ async function handleTimedOutTab(tabId) {
       return current ? { ...current, session: current.session } : null;
     },
     isHumanControlled: currentTabId => humanControlledTabs.has(currentTabId),
+    isNavigationInFlight: currentTabId => Boolean(tabLocks.get(currentTabId)?.navigating),
     probeLiveness: page => withTimeout(page.evaluate(() => 1), TAB_LIVENESS_TIMEOUT_MS, 'tab liveness').then(() => true),
     destroyTab: destroyUnresponsiveTab,
     maxConsecutiveTimeouts: MAX_CONSECUTIVE_TIMEOUTS,
@@ -1777,7 +1789,7 @@ function handleRouteError(err, req, res, extraFields = {}) {
   }
 
   const userId = req.body?.userId || req.query?.userId;
-  const tabId = req.body?.tabId || req.body?.targetId || req.query?.tabId || req.params?.tabId;
+  const tabId = req.body?.tabId || req.body?.targetId || req.query?.tabId || req.query?.targetId || req.params?.tabId;
   let foundForContext = null;
   if (userId && tabId) {
     const session = sessions.get(normalizeUserId(userId));
@@ -1808,6 +1820,9 @@ function handleRouteError(err, req, res, extraFields = {}) {
   if (isPageCrashedError(err)) {
     if (foundForContext) destroyTab(sessions.get(normalizeUserId(userId)), tabId, 'page_crashed', userId);
     return res.status(410).json({ error: 'Page crashed. Open a new tab.', code: 'page_crashed', retryable: true, recovery: 'create_new_tab', ...extraFields });
+  }
+  if (err?.code === 'tab_destroyed') {
+    return res.status(410).json({ error: 'Tab was destroyed. Open a new tab.', code: 'tab_destroyed', retryable: true, recovery: 'create_new_tab', ...extraFields });
   }
   if (userId && isDeadContextError(err)) {
     destroySession(userId).catch(() => {});
@@ -3432,7 +3447,7 @@ app.post('/tabs/:tabId/handoff', async (req, res) => {
         humanControlledTabs,
         log,
       });
-    }, HANDLER_TIMEOUT_MS, undefined, { allowHumanControl: true });
+    }, HANDLER_TIMEOUT_MS, { allowHumanControl: true });
     return res.json({ ok: true, ...result });
   } catch (err) {
     return handleRouteError(err, req, res);
@@ -3594,6 +3609,7 @@ app.post('/tabs', async (req, res) => {
             tabId,
             () => withPageLoadDuration('open_url', () => navigatePage(page, url)),
             navigationRequestTimeoutMs(),
+            { navigation: true },
           );
           signal.throwIfAborted();
           tabState.lastNavigationHttpStatus = typeof navigationResponse?.status === 'function' ? navigationResponse.status() : null;
@@ -3627,6 +3643,7 @@ app.post('/tabs', async (req, res) => {
               tabId,
               () => withPageLoadDuration('open_url', () => navigatePage(retryPage, url)),
               navigationRequestTimeoutMs(),
+              { navigation: true },
             );
             signal.throwIfAborted();
             tabState.lastNavigationHttpStatus = typeof navigationResponse?.status === 'function' ? navigationResponse.status() : null;
@@ -4085,7 +4102,7 @@ app.post('/tabs/:tabId/navigate', async (req, res) => {
           navigationOk: navigationHttpStatus === null || navigationHttpStatus < 400,
           ...searchFallback,
         };
-      }, navigationRequestTimeoutMs());
+      }, navigationRequestTimeoutMs(), { navigation: true });
     })());
     
     log('info', 'navigated', { reqId: req.reqId, tabId, url: result.url });
@@ -6996,6 +7013,7 @@ app.post('/tabs/open', async (req, res) => {
         tabId,
         () => withPageLoadDuration('open_url', () => navigatePage(page, url)),
         navigationRequestTimeoutMs(),
+        { navigation: true },
       );
       recordNavSuccess(userId);
     } catch (navErr) {
@@ -7018,6 +7036,7 @@ app.post('/tabs/open', async (req, res) => {
           tabId,
           () => withPageLoadDuration('open_url', () => navigatePage(page, url)),
           navigationRequestTimeoutMs(),
+          { navigation: true },
         );
         recordNavSuccess(userId);
       } else {
