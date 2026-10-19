@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import vm from 'node:vm';
 import { EventEmitter } from 'node:events';
-import { createSharedIdentityVisibility, createNativeWindowReadback, nativelyParked, visibilityAddonFiles } from '../../lib/shared-identity-visibility.js';
+import { createSharedIdentityVisibility, createNativeWindowReadback, nativelyParked, nativelyOnMain, visibilityAddonFiles } from '../../lib/shared-identity-visibility.js';
 import { listNativeWindows, windowBounds } from '../../lib/park-display-launcher.js';
 import { findBrowserPid, parseDarwinProcesses } from '../../lib/darwin-processes.js';
 
@@ -113,7 +113,10 @@ describe('native readback in the add-on (Camoufox-spoofed windows.get)', () => {
           return { ...w, ...bounds };
         },
       },
-      tabs: { onRemoved: { addListener() {} }, query: async () => [], get: async () => null, update: async () => {} },
+      tabs: { onRemoved: { addListener() {} }, query: async () => [], get: jest.fn(async id => {
+        for (const w of windows.values()) { const tab = w.tabs?.find(value => value.id === id); if (tab) return tab; }
+        return null;
+      }), update: async () => {} },
     };
     visibility = await createSharedIdentityVisibility(display, { nativeReadback: readback, rootDir: root, timeoutMs: 2000 });
     const script = await fs.readFile(path.join(visibility.addon, 'background.js'), 'utf8');
@@ -135,6 +138,49 @@ describe('native readback in the add-on (Camoufox-spoofed windows.get)', () => {
     expect(readback).toHaveBeenCalled();
     // No window-title marker is used any more.
     expect(browser.windows.update.mock.calls.some(([, b]) => 'titlePreface' in b)).toBe(false);
+  });
+  test('show binds an unbound window through a fresh parking signature before moving it to main', async () => {
+    await setup();
+    const p = { url: () => 'https://ui.test', isClosed: () => false, evaluate: async (_fn, value) => typeof value === 'string' ? value : undefined };
+    context.livePages.push(p);
+    windows.set(60, { id: 60, tabs: [{ id: 60, windowId: 60, url: 'https://ui.test' }], state: 'normal', native: { ...onMain } });
+    browser.tabs.query = async ({ title } = {}) => title ? [{ id: 60, windowId: 60 }] : [];
+
+    await visibility.open(p);
+    expect(visibility.visible.has(60)).toBe(true);
+    expect(windows.get(60).native).toMatchObject(onMain);
+    expect(browser.windows.update.mock.calls.some(([id, bounds]) => id === 60 && bounds.width === 1279)).toBe(true);
+  });
+  test('an already-parked handoff is not acknowledged when native show placement is ignored', async () => {
+    await setup();
+    const p = await visibility.newPage(context);
+    const originalUpdate = browser.windows.update.getMockImplementation();
+    browser.windows.update.mockImplementation(async (id, bounds) => {
+      if (bounds.focused) return { ...windows.get(id), ...bounds };
+      return originalUpdate(id, bounds);
+    });
+
+    await expect(visibility.open(p)).rejects.toThrow('did not move to the main display');
+    expect(nativelyParked(windows.get(1).native, display)).toBe(true);
+    expect(visibility.visible.has(1)).toBe(false);
+  });
+  test('a show retries after the native move is initially ignored', async () => {
+    await setup();
+    const p = await visibility.newPage(context);
+    const originalUpdate = browser.windows.update.getMockImplementation();
+    let showMoves = 0;
+    browser.windows.update.mockImplementation(async (id, bounds) => {
+      if (bounds.focused) {
+        showMoves++;
+        if (showMoves > 1) windows.get(id).native = { ...bounds };
+        return { ...windows.get(id), ...bounds };
+      }
+      return originalUpdate(id, bounds);
+    });
+
+    await visibility.open(p);
+    expect(showMoves).toBeGreaterThan(1);
+    expect(visibility.visible.has(1)).toBe(true);
   });
   test('transient native readback failures are retried inside the bounded loop', async () => {
     await setup();
@@ -231,6 +277,101 @@ describe('native readback in the add-on (Camoufox-spoofed windows.get)', () => {
     await expect(visibility.newPage(context)).rejects.toThrow('did not park');
     expect(windows.has(1)).toBe(false);
   });
+  test('an inherited UI window already on main is bound from its window event, not an arbitrary main window', async () => {
+    await setup();
+    const script = await fs.readFile(path.join(visibility.addon, 'background.js'), 'utf8');
+    const endpoint = script.match(/const endpoint="([^\"]+)"/)[1];
+    const inherited = { id: 60, tabs: [{ id: 60, windowId: 60, url: 'https://ui.test' }], state: 'normal', native: { ...onMain } };
+    const unrelated = { id: 61, tabs: [], state: 'normal', native: { ...onMain } };
+    windows.set(60, inherited);
+    windows.set(61, unrelated);
+    visibility.visible.set(77, { windowId: 77, tabId: 77 });
+
+    await onCreated(inherited);
+    expect(visibility.visible.has(60)).toBe(true);
+    expect(inherited.native).toMatchObject(onMain);
+    expect(unrelated.native).toEqual(onMain);
+
+    const response = await fetch(endpoint + '/geometry', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ windowId: 60, action: 'show' }),
+    });
+    expect(await response.json()).toMatchObject({ onMain: true, parked: false, number: 1060 });
+  });
+  test('a slow bind readback retries before handing an inherited UI window to the main display', async () => {
+    await setup();
+    visibility.visible.set(77, { windowId: 77, tabId: 77 });
+    const w = { id: 60, tabs: [{ id: 60, windowId: 60, url: 'https://ui.test' }], state: 'normal', native: { ...onMain } };
+    windows.set(60, w);
+    const real = readback.getMockImplementation();
+    let calls = 0;
+    readback.mockImplementation(async () => {
+      calls++;
+      if (calls === 2 || calls === 3) return [{ number: 1060, ...onMain }];
+      return real();
+    });
+
+    await onCreated(w);
+    expect(calls).toBeGreaterThanOrEqual(4);
+    expect(browser.windows.update.mock.calls.filter(([, bounds]) => bounds.width === 1279).length).toBeGreaterThan(1);
+    expect(visibility.visible.has(60)).toBe(true);
+    expect(w.native).toMatchObject(onMain);
+  });
+  test('a failed bind still returns an inherited UI window to the main display', async () => {
+    await setup();
+    visibility.visible.set(77, { windowId: 77, tabId: 77 });
+    const w = { id: 60, tabs: [{ id: 60, windowId: 60, url: 'https://ui.test' }], state: 'normal', native: { ...onMain } };
+    windows.set(60, w);
+    const real = readback.getMockImplementation();
+    let calls = 0;
+    readback.mockImplementation(async () => {
+      calls++;
+      if (calls > 1) throw new Error('osascript timed out');
+      return real();
+    });
+
+    await onCreated(w);
+    expect(calls).toBeGreaterThanOrEqual(5);
+    expect(nativelyOnMain(w.native, display)).toBe(true);
+    expect(visibility.inheritFailures.has(60)).toBe(true);
+    expect(visibility.parkingFailures.has(60)).toBe(false);
+  });
+  test('an inherited UI window whose first native move back to main is ignored is retried before it is recorded visible', async () => {
+    await setup();
+    visibility.visible.set(77, { windowId: 77, tabId: 77 });
+    const w = { id: 60, tabs: [{ id: 60, windowId: 60, url: 'https://ui.test' }], state: 'normal', native: { ...onMain } };
+    windows.set(60, w);
+    const originalUpdate = browser.windows.update.getMockImplementation();
+    let mainMoves = 0;
+    browser.windows.update.mockImplementation(async (id, bounds) => {
+      if (bounds.focused && ++mainMoves === 1) return { ...windows.get(id), ...bounds };
+      return originalUpdate(id, bounds);
+    });
+
+    await onCreated(w);
+    expect(mainMoves).toBeGreaterThan(1);
+    expect(nativelyOnMain(w.native, display)).toBe(true);
+    expect(visibility.visible.has(60)).toBe(true);
+    expect(visibility.inheritFailures.has(60)).toBe(false);
+  });
+  test('an inherited UI window that never natively leaves the parking display records inheritFailed, not visible', async () => {
+    await setup();
+    visibility.visible.set(77, { windowId: 77, tabId: 77 });
+    const w = { id: 60, tabs: [{ id: 60, windowId: 60, url: 'https://ui.test' }], state: 'normal', native: { ...onMain } };
+    windows.set(60, w);
+    const originalUpdate = browser.windows.update.getMockImplementation();
+    browser.windows.update.mockImplementation(async (id, bounds) => {
+      if (bounds.focused) return { ...windows.get(id), ...bounds };
+      return originalUpdate(id, bounds);
+    });
+
+    await onCreated(w);
+    expect(nativelyParked(w.native, display)).toBe(true);
+    expect(visibility.visible.has(60)).toBe(false);
+    expect(visibility.inheritFailures.has(60)).toBe(true);
+    expect(visibility.parkingFailures.has(60)).toBe(false);
+  });
   test('UI onCreated window that cannot move to main records inheritFailed, not parkingFailed', async () => {
     await setup();
     visibility.visible.set(77, { windowId: 77, tabId: 77 });
@@ -246,6 +387,12 @@ describe('native readback in the add-on (Camoufox-spoofed windows.get)', () => {
 
 describe('/geometry bridge validation', () => {
   let root, visibility, endpoint, readback;
+  test('a window is on main only when native bounds are substantially on main and off park', () => {
+    expect(nativelyOnMain(onMain, display)).toBe(true);
+    expect(nativelyOnMain({ left: -1260, top: -910, width: 1280, height: 774 }, display)).toBe(false);
+    expect(nativelyOnMain({ left: -20, top: -40, width: 1280, height: 900 }, display)).toBe(false);
+  });
+
   beforeEach(async () => {
     root = await fs.mkdtemp(path.join(os.tmpdir(), 'park-geometry-'));
     readback = jest.fn(async () => [{ number: 1, ...onMain }, { number: 2, ...windowBounds(display.park) }, { number: 3, left: 0, top: 0, width: 2048, height: 30 }]);
@@ -274,10 +421,28 @@ describe('/geometry bridge validation', () => {
     visibility.visible.set(11, { windowId: 11 });
     visibility.parkingFailures.set(11, 'already reported');
     readback.mockResolvedValue([{ ...owned, ...onMain }, { number: 45678, ...windowBounds(display.park) }]);
+    expect(await (await post({ windowId: 9, action: 'show' })).json()).toMatchObject({ onMain: true, parked: false, number: 12345 });
+    readback.mockResolvedValue([{ ...owned, ...onMain }, { number: 54321, ...onMain }, { number: 45678, ...windowBounds(display.park) }]);
+    expect(await (await post({ windowId: 10, action: 'show' })).json()).toMatchObject({ onMain: false, parked: false, number: null });
+    readback.mockResolvedValue([{ ...owned, ...onMain }, { number: 45678, ...windowBounds(display.park) }]);
     expect(await (await post({ windowId: 9 })).json()).toMatchObject({ parked: false, number: 12345 });
     // Disappearance does not make an unrelated parked window count as this one.
     readback.mockResolvedValue([{ number: 45678, ...first.bounds }]);
     expect(await (await post({ windowId: 9 })).json()).toMatchObject({ parked: false, number: 12345, actual: null });
+  });
+  test('show binds a previously unresolved parking signature before checking main placement', async () => {
+    const first = await (await post({ windowId: 9 })).json();
+    const owned = { number: 12345, ...first.bounds };
+    readback.mockResolvedValue([owned]);
+    expect(await (await post({ windowId: 9, action: 'show' })).json()).toMatchObject({ parked: true, onMain: false, number: 12345 });
+    readback.mockResolvedValue([{ number: 12345, ...onMain }]);
+    expect(await (await post({ windowId: 9, action: 'show' })).json()).toMatchObject({ parked: false, onMain: true, number: 12345 });
+  });
+  test('show never binds a unique or multiple unbound main candidates', async () => {
+    readback.mockResolvedValue([{ number: 1, ...onMain }]);
+    expect(await (await post({ windowId: 9, action: 'show' })).json()).toMatchObject({ parked: false, onMain: false, number: null });
+    readback.mockResolvedValue([{ number: 2, ...onMain }, { number: 3, ...onMain }]);
+    expect(await (await post({ windowId: 10, action: 'show' })).json()).toMatchObject({ parked: false, onMain: false, number: null });
   });
   test('overlapping allocations get distinct signatures, excluding every currently observed native size', async () => {
     readback.mockResolvedValue([{ number: 1, ...windowBounds(display.park), width: 1279, height: 899 }]);
