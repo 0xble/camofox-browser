@@ -96,14 +96,41 @@ describe('timed-out tab operations', () => {
         });
       }
 
-      await expect(client.evaluate(tabId, 'new Promise(() => {})')).rejects.toMatchObject({
+      // A never-settling promise leaves the page's main thread free, so the
+      // liveness probe would pass and correctly retain the tab. Only a page
+      // whose main thread is blocked past the handler and probe budgets
+      // (5s + 1s) is actually stuck. The loop is bounded so it cannot outlive
+      // the test.
+      await expect(client.evaluate(
+        tabId,
+        '(() => { const end = Date.now() + 9000; while (Date.now() < end) {} })()',
+      )).rejects.toMatchObject({
         status: 410,
         data: expect.objectContaining({ code: 'tab_destroyed', recovery: 'create_new_tab' }),
       });
+      await expect(client.getStats(tabId)).rejects.toMatchObject({ status: 404 });
     } finally {
       await client.cleanup();
     }
-  }, 30000);
+  }, 45000);
+
+  test('retains a tab after 3 timed-out operations when the liveness probe passes', async () => {
+    const client = createClient(serverUrl);
+    const { tabId } = await client.createTab();
+
+    try {
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        await expect(client.evaluate(tabId, 'new Promise(() => {})')).rejects.toMatchObject({
+          status: 503,
+          data: expect.objectContaining({ code: 'operation_timeout', recovery: 'retry' }),
+        });
+      }
+
+      expect((await client.evaluate(tabId, '42')).result).toBe(42);
+    } finally {
+      await client.cleanup();
+    }
+  }, 45000);
 
   test('keeps the tab available for queued evaluate work after an evaluate timeout', async () => {
     const client = createClient(serverUrl);
