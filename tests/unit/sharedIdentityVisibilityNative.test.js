@@ -337,6 +337,41 @@ describe('native readback in the add-on (Camoufox-spoofed windows.get)', () => {
     expect(visibility.inheritFailures.has(60)).toBe(true);
     expect(visibility.parkingFailures.has(60)).toBe(false);
   });
+  test('an inherited UI window whose first native move back to main is ignored is retried before it is recorded visible', async () => {
+    await setup();
+    visibility.visible.set(77, { windowId: 77, tabId: 77 });
+    const w = { id: 60, tabs: [{ id: 60, windowId: 60, url: 'https://ui.test' }], state: 'normal', native: { ...onMain } };
+    windows.set(60, w);
+    const originalUpdate = browser.windows.update.getMockImplementation();
+    let mainMoves = 0;
+    browser.windows.update.mockImplementation(async (id, bounds) => {
+      if (bounds.focused && ++mainMoves === 1) return { ...windows.get(id), ...bounds };
+      return originalUpdate(id, bounds);
+    });
+
+    await onCreated(w);
+    expect(mainMoves).toBeGreaterThan(1);
+    expect(nativelyOnMain(w.native, display)).toBe(true);
+    expect(visibility.visible.has(60)).toBe(true);
+    expect(visibility.inheritFailures.has(60)).toBe(false);
+  });
+  test('an inherited UI window that never natively leaves the parking display records inheritFailed, not visible', async () => {
+    await setup();
+    visibility.visible.set(77, { windowId: 77, tabId: 77 });
+    const w = { id: 60, tabs: [{ id: 60, windowId: 60, url: 'https://ui.test' }], state: 'normal', native: { ...onMain } };
+    windows.set(60, w);
+    const originalUpdate = browser.windows.update.getMockImplementation();
+    browser.windows.update.mockImplementation(async (id, bounds) => {
+      if (bounds.focused) return { ...windows.get(id), ...bounds };
+      return originalUpdate(id, bounds);
+    });
+
+    await onCreated(w);
+    expect(nativelyParked(w.native, display)).toBe(true);
+    expect(visibility.visible.has(60)).toBe(false);
+    expect(visibility.inheritFailures.has(60)).toBe(true);
+    expect(visibility.parkingFailures.has(60)).toBe(false);
+  });
   test('UI onCreated window that cannot move to main records inheritFailed, not parkingFailed', async () => {
     await setup();
     visibility.visible.set(77, { windowId: 77, tabId: 77 });
