@@ -61,6 +61,43 @@ describe('tab timeout handling', () => {
     expect(state.tabState.consecutiveTimeouts).toBe(0);
   });
 
+  test('navigation that starts during the liveness probe preserves the tab', async () => {
+    const state = setup({ responsive: false });
+    let navigating = false;
+    state.isNavigationInFlight = () => navigating;
+    state.probeLiveness = async () => {
+      navigating = true;
+      return false;
+    };
+
+    await handleTabTimeout({ tabId: 'tab-1', userId: 'user-1', ...state });
+    await handleTabTimeout({ tabId: 'tab-1', userId: 'user-1', ...state });
+    const result = await handleTabTimeout({ tabId: 'tab-1', userId: 'user-1', ...state });
+
+    expect(result).toMatchObject({ destroyed: false, reason: 'navigation_in_flight' });
+    expect(state.destroyed).toHaveLength(0);
+    expect(state.tabState.consecutiveTimeouts).toBe(0);
+  });
+
+  test('a replacement tab with the same ID is not destroyed after the liveness probe', async () => {
+    const state = setup({ responsive: false });
+    let replacement = false;
+    state.findTab = () => replacement
+      ? { tabState: { page: {} }, session: {} }
+      : { tabState: state.tabState, session: state.session };
+    state.probeLiveness = async () => {
+      replacement = true;
+      return false;
+    };
+
+    await handleTabTimeout({ tabId: 'tab-1', userId: 'user-1', ...state });
+    await handleTabTimeout({ tabId: 'tab-1', userId: 'user-1', ...state });
+    const result = await handleTabTimeout({ tabId: 'tab-1', userId: 'user-1', ...state });
+
+    expect(result).toMatchObject({ destroyed: false, reason: 'tab_changed' });
+    expect(state.destroyed).toHaveLength(0);
+  });
+
   test('human-controlled tabs are never destroyed', async () => {
     const state = setup({ responsive: false, human: true });
 

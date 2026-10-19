@@ -1462,10 +1462,11 @@ function normalizeUserId(userId) {
 const sessionCreations = new Map();
 const sharedIdentityLastUrls = new Map();
 
-function clearSessionLocks(session) {
+function clearSessionLocks(session, { preserveTabIds = new Set() } = {}) {
   if (!session?.tabGroups) return;
   for (const [, group] of session.tabGroups) {
     for (const tabId of group.keys()) {
+      if (preserveTabIds.has(tabId)) continue;
       const lock = tabLocks.get(tabId);
       if (lock) {
         lock.drain();
@@ -1488,6 +1489,7 @@ async function closeSessionNow(userId, session, {
   reason = 'session_closed',
   clearDownloads = true,
   clearLocks = true,
+  preserveLockTabIds = new Set(),
 } = {}) {
   const key = normalizeUserId(userId);
   const transition = (reason === 'headed_transition' || reason === 'headed_release') && session.sharedIdentity;
@@ -1498,7 +1500,7 @@ async function closeSessionNow(userId, session, {
   // Drain locks BEFORE closing context — queued operations get clean "Tab destroyed"
   // (410) instead of messy "Target page closed" (500) errors.
   if (clearLocks) {
-    clearSessionLocks(session);
+    clearSessionLocks(session, { preserveTabIds: preserveLockTabIds });
   }
 
   if (clearDownloads) {
@@ -2320,7 +2322,12 @@ async function rotateGoogleTab(userId, sessionKey, tabId, previousTabState, reas
   const key = normalizeUserId(userId);
   const oldSession = sessions.get(key);
   if (oldSession) {
-    await closeSession(key, oldSession, { reason: 'google_rotate_context', clearDownloads: true, clearLocks: true });
+    await closeSession(key, oldSession, {
+      reason: 'google_rotate_context',
+      clearDownloads: true,
+      clearLocks: true,
+      preserveLockTabIds: new Set([tabId]),
+    });
   }
   const session = await getSession(userId);
   const { page, lease } = await createLeasedPage(session);
@@ -3984,7 +3991,12 @@ app.post('/tabs/:tabId/navigate', async (req, res) => {
           const key = normalizeUserId(userId);
           const oldSession = sessions.get(key);
           if (oldSession) {
-            await closeSession(key, oldSession, { reason: 'google_blocked_context_rotate', clearDownloads: true, clearLocks: true });
+            await closeSession(key, oldSession, {
+              reason: 'google_blocked_context_rotate',
+              clearDownloads: true,
+              clearLocks: true,
+              preserveLockTabIds: new Set([tabId]),
+            });
           }
           session = await getSession(userId);
           const { page, lease } = await createLeasedPage(session);

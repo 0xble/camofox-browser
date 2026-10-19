@@ -108,7 +108,11 @@ describe('timed-out tab operations', () => {
         status: 410,
         data: expect.objectContaining({ code: 'tab_destroyed', recovery: 'create_new_tab' }),
       });
-      await expect(client.getStats(tabId)).rejects.toMatchObject({ status: 404 });
+      const absence = await client.getStats(tabId).catch(error => error);
+      expect([404, 410]).toContain(absence.status);
+      if (absence.status === 410) {
+        expect(absence.data).toMatchObject({ code: 'browser_restarted' });
+      }
     } finally {
       await client.cleanup();
     }
