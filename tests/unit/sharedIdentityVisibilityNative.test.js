@@ -333,7 +333,7 @@ describe('native readback in the add-on (Camoufox-spoofed windows.get)', () => {
 
     await onCreated(w);
     expect(calls).toBeGreaterThanOrEqual(5);
-    expect(w.native).toMatchObject(onMain);
+    expect(nativelyOnMain(w.native, display)).toBe(true);
     expect(visibility.inheritFailures.has(60)).toBe(true);
     expect(visibility.parkingFailures.has(60)).toBe(false);
   });
