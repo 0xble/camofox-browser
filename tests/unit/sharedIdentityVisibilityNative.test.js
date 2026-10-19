@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import vm from 'node:vm';
 import { EventEmitter } from 'node:events';
-import { createSharedIdentityVisibility, createNativeWindowReadback, nativelyParked, visibilityAddonFiles } from '../../lib/shared-identity-visibility.js';
+import { createSharedIdentityVisibility, createNativeWindowReadback, nativelyParked, nativelyOnMain, visibilityAddonFiles } from '../../lib/shared-identity-visibility.js';
 import { listNativeWindows, windowBounds } from '../../lib/park-display-launcher.js';
 import { findBrowserPid, parseDarwinProcesses } from '../../lib/darwin-processes.js';
 
@@ -113,7 +113,10 @@ describe('native readback in the add-on (Camoufox-spoofed windows.get)', () => {
           return { ...w, ...bounds };
         },
       },
-      tabs: { onRemoved: { addListener() {} }, query: async () => [], get: async () => null, update: async () => {} },
+      tabs: { onRemoved: { addListener() {} }, query: async () => [], get: jest.fn(async id => {
+        for (const w of windows.values()) { const tab = w.tabs?.find(value => value.id === id); if (tab) return tab; }
+        return null;
+      }), update: async () => {} },
     };
     visibility = await createSharedIdentityVisibility(display, { nativeReadback: readback, rootDir: root, timeoutMs: 2000 });
     const script = await fs.readFile(path.join(visibility.addon, 'background.js'), 'utf8');
@@ -135,6 +138,19 @@ describe('native readback in the add-on (Camoufox-spoofed windows.get)', () => {
     expect(readback).toHaveBeenCalled();
     // No window-title marker is used any more.
     expect(browser.windows.update.mock.calls.some(([, b]) => 'titlePreface' in b)).toBe(false);
+  });
+  test('an already-parked handoff is not acknowledged when native show placement is ignored', async () => {
+    await setup();
+    const p = await visibility.newPage(context);
+    const originalUpdate = browser.windows.update.getMockImplementation();
+    browser.windows.update.mockImplementation(async (id, bounds) => {
+      if (bounds.focused) return { ...windows.get(id), ...bounds };
+      return originalUpdate(id, bounds);
+    });
+
+    await expect(visibility.open(p)).rejects.toThrow('did not move to the main display');
+    expect(nativelyParked(windows.get(1).native, display)).toBe(true);
+    expect(visibility.visible.has(1)).toBe(false);
   });
   test('transient native readback failures are retried inside the bounded loop', async () => {
     await setup();
@@ -246,6 +262,12 @@ describe('native readback in the add-on (Camoufox-spoofed windows.get)', () => {
 
 describe('/geometry bridge validation', () => {
   let root, visibility, endpoint, readback;
+  test('a window is on main only when native bounds are substantially on main and off park', () => {
+    expect(nativelyOnMain(onMain, display)).toBe(true);
+    expect(nativelyOnMain({ left: -1260, top: -910, width: 1280, height: 774 }, display)).toBe(false);
+    expect(nativelyOnMain({ left: -20, top: -40, width: 1280, height: 900 }, display)).toBe(false);
+  });
+
   beforeEach(async () => {
     root = await fs.mkdtemp(path.join(os.tmpdir(), 'park-geometry-'));
     readback = jest.fn(async () => [{ number: 1, ...onMain }, { number: 2, ...windowBounds(display.park) }, { number: 3, left: 0, top: 0, width: 2048, height: 30 }]);
@@ -273,6 +295,10 @@ describe('/geometry bridge validation', () => {
     // A handoff/failure is parked while the checked native window drifts to main.
     visibility.visible.set(11, { windowId: 11 });
     visibility.parkingFailures.set(11, 'already reported');
+    readback.mockResolvedValue([{ ...owned, ...onMain }, { number: 45678, ...windowBounds(display.park) }]);
+    expect(await (await post({ windowId: 9, action: 'show' })).json()).toMatchObject({ onMain: true, parked: false, number: 12345 });
+    readback.mockResolvedValue([{ ...owned, ...onMain }, { number: 54321, ...onMain }, { number: 45678, ...windowBounds(display.park) }]);
+    expect(await (await post({ windowId: 10, action: 'show' })).json()).toMatchObject({ onMain: true, parked: false, number: 54321 });
     readback.mockResolvedValue([{ ...owned, ...onMain }, { number: 45678, ...windowBounds(display.park) }]);
     expect(await (await post({ windowId: 9 })).json()).toMatchObject({ parked: false, number: 12345 });
     // Disappearance does not make an unrelated parked window count as this one.
