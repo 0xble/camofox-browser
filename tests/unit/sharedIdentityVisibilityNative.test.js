@@ -265,6 +265,28 @@ describe('native readback in the add-on (Camoufox-spoofed windows.get)', () => {
     await expect(visibility.newPage(context)).rejects.toThrow('did not park');
     expect(windows.has(1)).toBe(false);
   });
+  test('an inherited UI window already on main is bound from its window event, not an arbitrary main window', async () => {
+    await setup();
+    const script = await fs.readFile(path.join(visibility.addon, 'background.js'), 'utf8');
+    const endpoint = script.match(/const endpoint="([^\"]+)"/)[1];
+    const inherited = { id: 60, tabs: [{ id: 60, windowId: 60, url: 'https://ui.test' }], state: 'normal', native: { ...onMain } };
+    const unrelated = { id: 61, tabs: [], state: 'normal', native: { ...onMain } };
+    windows.set(60, inherited);
+    windows.set(61, unrelated);
+    visibility.visible.set(77, { windowId: 77, tabId: 77 });
+
+    await onCreated(inherited);
+    expect(visibility.visible.has(60)).toBe(true);
+    expect(inherited.native).toMatchObject(onMain);
+    expect(unrelated.native).toEqual(onMain);
+
+    const response = await fetch(endpoint + '/geometry', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ windowId: 60, action: 'show' }),
+    });
+    expect(await response.json()).toMatchObject({ onMain: true, parked: false, number: 1060 });
+  });
   test('UI onCreated window that cannot move to main records inheritFailed, not parkingFailed', async () => {
     await setup();
     visibility.visible.set(77, { windowId: 77, tabId: 77 });
