@@ -9,15 +9,36 @@ import { launchSharedIdentityContext } from '../../lib/shared-identity-launch.js
 
 const id = c => `hermes_camofox_${c.repeat(24)}`;
 const aliases = { meridian: id('c'), brianle: id('a'), lpg: id('b') };
+const brandColors = { lpg: '#1e5a46', meridian: '#ff1a3c', brianle: '#3f3f46' };
 
 describe('identity indicator table', () => {
-  test('colors come from the shared identity map by sorted alias, not per-alias code', () => {
+  test('unmapped aliases take the palette by sorted alias, not per-alias code', () => {
     expect(identityIndicator(aliases, id('a'))).toMatchObject({ alias: 'brianle', name: 'blue' });
     expect(identityIndicator(aliases, id('b'))).toMatchObject({ alias: 'lpg', name: 'green' });
     expect(identityIndicator(aliases, id('c'))).toMatchObject({ alias: 'meridian', name: 'purple' });
-    expect(identityIndicator(aliases, 'lpg')).toMatchObject({ alias: 'lpg' });
+    expect(identityIndicator(aliases, 'lpg')).toMatchObject({ alias: 'lpg', name: 'green' });
     expect(identityIndicator(aliases, id('d'))).toBeNull();
     expect(identityIndicator(undefined, id('a'))).toBeNull();
+  });
+
+  test('a configured brand color replaces only that alias and darkens until white text passes AA', () => {
+    const lpg = identityIndicator(aliases, 'lpg', brandColors);
+    const meridian = identityIndicator(aliases, 'meridian', brandColors);
+    const brianle = identityIndicator(aliases, 'brianle', brandColors);
+    expect(lpg).toMatchObject({ alias: 'lpg', name: 'brand', brand: '#1e5a46', toolbar: '#1e5a46' });
+    expect(meridian.brand).toBe('#ff1a3c');
+    expect(meridian.toolbar).not.toBe('#ff1a3c');
+    expect(brianle).toMatchObject({ alias: 'brianle', name: 'brand', toolbar: '#3f3f46' });
+    expect(identityIndicator(aliases, 'lpg', { meridian: '#ff1a3c' })).toMatchObject({ name: 'green' });
+    expect(identityIndicator(aliases, 'lpg', { lpg: 'not-a-color' })).toMatchObject({ name: 'green' });
+    expect(identityIndicator(aliases, 'lpg', { lpg: '#000000' })).toMatchObject({ name: 'green' });
+    expect(identityIndicator(aliases, 'lpg', { lpg: '#ffffff' }).toolbar).not.toBe('#ffffff');
+    for (const row of [lpg, meridian, brianle]) {
+      expect(contrastRatio(row.toolbar, '#ffffff')).toBeGreaterThanOrEqual(4.5);
+      expect(contrastRatio(row.frame, '#ffffff')).toBeGreaterThanOrEqual(4.5);
+      expect(contrastRatio(row.frame, '#ffffff')).toBeGreaterThan(contrastRatio(row.toolbar, '#ffffff'));
+    }
+    expect(new Set([lpg.toolbar, meridian.toolbar, brianle.toolbar]).size).toBe(3);
   });
 
   test('palette colors are distinct and keep white text and labels accessible (WCAG AA)', () => {
@@ -37,6 +58,9 @@ describe('identity indicator table', () => {
     expect(files['background.js']).toContain('browser.theme.update');
     expect(files['background.js']).toContain('#047857');
     expect(files['label.svg']).toContain('>lpg</text>');
+    const branded = indicatorAddonFiles(identityIndicator(aliases, id('b'), brandColors));
+    expect(branded['background.js']).toContain('#1e5a46');
+    expect(branded['background.js']).not.toContain('#047857');
   });
 
   test('writing is content-addressed and idempotent', async () => {

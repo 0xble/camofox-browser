@@ -189,5 +189,11 @@ describe('loadConfig', () => {
     expect(config.sharedIdentityAliases).toEqual({ personal: 'hermes_camofox_native' });
     expect(config.sharedIdentityNames).toEqual(['hermes_camofox_native']);
     expect(config.serverEnv.CAMOFOX_SHARED_IDENTITY_MAP).toBe(process.env.CAMOFOX_SHARED_IDENTITY_MAP);
+    delete process.env.CAMOFOX_SHARED_IDENTITY_MAP;
+    process.env.CAMOFOX_IDENTITY_COLORS = JSON.stringify({ personal: '#1E5A46', other: 'red', '': '#000000' });
+    expect(loadConfig().identityColors).toEqual({ personal: '#1e5a46' });
+    expect(loadConfig().serverEnv.CAMOFOX_IDENTITY_COLORS).toBe(process.env.CAMOFOX_IDENTITY_COLORS);
+    process.env.CAMOFOX_IDENTITY_COLORS = '{';
+    expect(loadConfig().identityColors).toEqual({});
   });
 });
