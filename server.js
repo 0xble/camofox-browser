@@ -1571,7 +1571,7 @@ async function createSharedIdentityContext(userId, profilePath, { headed = false
   return launchWithVisibilityFallback({ display: headed ? null : sharedParkDisplay, profilePath, headed, fallbackHeaded: headed || parkedOpen, log,
     launch: ({ headed, visibility }) => launchSharedIdentityContext(profilePath, {
       headed, visibility, extensions: extensionsForIdentity(CONFIG.sharedIdentityExtensions, userId),
-      indicator: identityIndicator(CONFIG.sharedIdentityAliases, userId),
+      indicator: identityIndicator(CONFIG.sharedIdentityAliases, userId, CONFIG.identityColors),
       launchOptions, firefox, os, getHostOS, config: CONFIG, events: pluginEvents, log,
     }),
   });
