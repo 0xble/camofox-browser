@@ -31,7 +31,7 @@ describe('identity indicator table', () => {
     expect(brianle).toMatchObject({ alias: 'brianle', name: 'brand', toolbar: '#3f3f46' });
     expect(identityIndicator(aliases, 'lpg', { meridian: '#ff1a3c' })).toMatchObject({ name: 'green' });
     expect(identityIndicator(aliases, 'lpg', { lpg: 'not-a-color' })).toMatchObject({ name: 'green' });
-    expect(identityIndicator(aliases, 'lpg', { lpg: '#000000' }).toolbar).toBe('#000000');
+    expect(identityIndicator(aliases, 'lpg', { lpg: '#000000' })).toMatchObject({ name: 'green' });
     expect(identityIndicator(aliases, 'lpg', { lpg: '#ffffff' }).toolbar).not.toBe('#ffffff');
     for (const row of [lpg, meridian, brianle]) {
       expect(contrastRatio(row.toolbar, '#ffffff')).toBeGreaterThanOrEqual(4.5);
