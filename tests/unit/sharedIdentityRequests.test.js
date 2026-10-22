@@ -1,5 +1,6 @@
 import { jest } from '@jest/globals';
 import express from 'express';
+import { EventEmitter } from 'node:events';
 import { createSharedIdentityRequestTracker } from '../../lib/shared-identity-requests.js';
 
 async function fixture() {
@@ -39,7 +40,7 @@ describe('shared identity HTTP tracking and transition gate', () => {
     expect((await f.post('/tabs/tab-1/navigate', { userId: 'alias' })).status).toBe(409);
   });
 
-  test('legacy focus keeps the transition gate; parked focus bypasses it without counting', async () => {
+  test('legacy focus keeps the transition gate; parked focus bypasses it', async () => {
     f.setBusy(true);
     const gated = await f.post('/browser/identities/alias/focus', {});
     expect(gated.status).toBe(409); expect(await gated.json()).toEqual({ error: 'identity busy' });
@@ -59,4 +60,24 @@ describe('shared identity HTTP tracking and transition gate', () => {
     f.setBusy(true);
     expect((await f.post('/tabs/tab-1/evaluate', { userId: 'other' })).status).toBe(409);
   });
+});
+
+test.each(['open', 'focus'])('parked %s is active work without a transition gate or wait', action => {
+  const requests = new Map();
+  const manager = { owns: key => key === 'fixture', closings: new Set() };
+  const tracker = createSharedIdentityRequestTracker({ getSessions: () => new Map(), manager,
+    normalizeUserId: String, findTab: () => null, transitioning: () => true, requests,
+    parkedVisibility: () => true });
+  const response = Object.assign(new EventEmitter(), { status: jest.fn().mockReturnThis(), json: jest.fn() });
+  const next = jest.fn();
+  tracker({ path: `/browser/identities/fixture/${action}` }, response, next);
+  expect(next).toHaveBeenCalledTimes(1);
+  expect(requests.get('fixture')).toBe(1);
+  response.emit('close');
+  expect(requests.size).toBe(0);
+  manager.closings.add('fixture');
+  tracker({ path: `/browser/identities/fixture/${action}` }, response, next);
+  expect(next).toHaveBeenCalledTimes(1);
+  expect(response.status).toHaveBeenCalledWith(409);
+  expect(requests.size).toBe(0);
 });

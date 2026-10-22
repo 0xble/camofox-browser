@@ -23,6 +23,15 @@ Compare upstream identity routing, cookie restoration, and handoff behavior with
 
 When a session has a visibility controller, human handoff must await that controller's `open(page)` before reporting focus or changing control ownership. Agent return must use the same targeted `release({ all: false, page })` behavior as `/release {tabId}`. Both paths recompute headed state from live visibility even on failure, retain the context and sibling tabs, and add no identity-wide lock or transition gate. Last-URL restoration must create an API parked page through `session.createPage`, rather than reuse an unowned initial UI page. Legacy behavior remains unchanged.
 
+Hidden-session expiry is distinct from visibility release: eligible expired
+contexts snapshot cookies and recheck eligibility immediately before closing,
+without parking them again or adding an identity transition gate. The final check
+excludes visible windows, active or queued work, page leases, downloads, human
+control, and in-progress transitions. Parked open/focus requests count as active
+work without gating one another, and honor the existing closing-state refusal.
+Expiry only clears locks after that check and downloads after teardown.
+Regression coverage: `sharedIdentityExpiry.test.js`.
+
 Regression coverage: `sharedTabHandoffRoutes.test.js`, the generated-add-on bridge handoff test in `sharedIdentityVisibility.test.js`, and the parked/legacy last-URL restoration test in `sharedIdentityVisibilityRoutes.test.js`.
 
 ### Native park verification
