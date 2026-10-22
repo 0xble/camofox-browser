@@ -35,7 +35,7 @@ test('release passes the optional requested tab and distinct coalescing key', as
     sharedIdentities: { owns: () => true }, releaseIdentity, transitionIdentity });
   const res = response(); await handler({ params: { userId: 'identity' }, body: { tabId: 'B' } }, res);
   expect(releaseIdentity).toHaveBeenCalledWith('identity', { tabId: 'B' });
-  expect(transitionIdentity.mock.calls[0][3]).toEqual({ coalesceKey: 'B' });
+  expect(transitionIdentity.mock.calls[0][3]).toEqual({ coalesceKey: '["B",false]' });
 });
 
 test.each([false, true])('last-URL restoration respects the parked page factory (parked=%s)', async parked => {

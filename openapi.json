@@ -112,7 +112,12 @@
                 "properties": {
                   "tabId": {
                     "type": "string",
-                    "description": "In parking mode, release only this tab's window; unknown IDs return 404."
+                    "description": "Release only this tab's window; unknown IDs return 404 in parking mode. Without parking, live-tab release is refused unless all is true."
+                  },
+                  "all": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Explicitly accept releasing every window, including closing the entire context and losing live tab state in legacy mode. Cannot be combined with tabId."
                   }
                 }
               }
@@ -145,6 +150,9 @@
               }
             }
           },
+          "400": {
+            "description": "all and tabId cannot be combined."
+          },
           "403": {
             "description": "Bearer authentication required."
           },
@@ -152,7 +160,7 @@
             "description": "Shared identity is not configured."
           },
           "409": {
-            "description": "Identity is busy with work, human control, or a download; error is identity busy."
+            "description": "Identity is busy, or context_close_required because no parking display can preserve live tabs."
           },
           "500": {
             "description": "Cookie snapshot or checkpoint/close failed."
@@ -321,6 +329,34 @@
                     },
                     "consecutiveFailures": {
                       "type": "integer"
+                    },
+                    "visibility": {
+                      "type": "object",
+                      "description": "Parking capability independent of liveness. Existing legacy headless contexts require an explicitly accepted restart before show.",
+                      "properties": {
+                        "mode": {
+                          "type": "string",
+                          "enum": [
+                            "parking",
+                            "unavailable",
+                            "disabled",
+                            "unsupported",
+                            "unconfigured"
+                          ]
+                        },
+                        "parking": {
+                          "type": "boolean"
+                        },
+                        "sameContextSessions": {
+                          "type": "integer"
+                        },
+                        "restartRequiredSessions": {
+                          "type": "integer"
+                        },
+                        "failedWindows": {
+                          "type": "integer"
+                        }
+                      }
                     }
                   }
                 }
@@ -328,7 +364,7 @@
             }
           },
           "503": {
-            "description": "Unhealthy or recovering.",
+            "description": "Unhealthy or recovering. Visibility capability is reported separately on every response.",
             "content": {
               "application/json": {
                 "schema": {
@@ -520,6 +556,11 @@
                   "tabId": {
                     "type": "string",
                     "description": "Caller-owned tab to focus or restore; stale IDs open a new tab."
+                  },
+                  "allowRestart": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Explicitly accept restarting a legacy headless context and discarding every live tab's in-memory state. Has no effect in parking mode."
                   }
                 }
               }
@@ -534,7 +575,8 @@
             "description": "Identity is not configured for shared mode."
           },
           "409": {
-            "description": "Identity has work in flight; retry after it finishes."
+            "description": "Identity is busy",
+            "or context_restart_required because a legacy headless context still has live tabs.": null
           }
         }
       }
