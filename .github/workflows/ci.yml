@@ -26,7 +26,7 @@ jobs:
           cache: npm
 
       # postinstall would fetch whatever Camoufox is latest upstream; CI pins
-      # the deployed engine instead (see scripts/ci-install-camoufox.sh).
+      # the selected deployment engine instead (see scripts/ci-install-camoufox.sh).
       - name: Install dependencies
         run: npm ci
         env:
@@ -36,7 +36,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cache/camoufox
-          key: camoufox-152.0.4-beta.30-lin.x86_64-${{ hashFiles('scripts/ci-install-camoufox.sh') }}
+          key: camoufox-158.0-beta.40-lin.x86_64-${{ hashFiles('scripts/ci-install-camoufox.sh') }}
 
       - name: Install pinned Camoufox engine
         run: scripts/ci-install-camoufox.sh
@@ -95,7 +95,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cache/camoufox
-          key: camoufox-152.0.4-beta.30-lin.x86_64-${{ hashFiles('scripts/ci-install-camoufox.sh') }}
+          key: camoufox-158.0-beta.40-lin.x86_64-${{ hashFiles('scripts/ci-install-camoufox.sh') }}
 
       - name: Install pinned Camoufox engine
         run: scripts/ci-install-camoufox.sh
@@ -116,6 +116,9 @@ jobs:
       - name: Install browser system deps (cache hit)
         if: steps.playwright-cache.outputs.cache-hit == 'true'
         run: npx playwright install-deps firefox
+
+      - name: Verify pinned engine native input
+        run: xvfb-run --auto-servernum node --test tests/native-input-engine.test.mjs
 
       - name: Run e2e + browser-dependent unit tests
         run: |
