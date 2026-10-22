@@ -722,7 +722,9 @@ DeskPad, a Virtual display, or a BetterDisplay dummy. A physical secondary monit
 is never selected implicitly. The
 parked browser windows must remain drawn, not minimized or hidden. DeskPad's
 mirror window can be minimized without minimizing the browsers on its display.
-Keep the park display connected for the lifetime of the server.
+The main display is never eligible, even if it is named DeskPad. Display discovery
+is refreshed on creation, visibility commands, and health checks. Disconnecting,
+reconnecting, promoting a display to main, or resizing it does not require a server restart.
 
 On these installations, `/browser/identities/:userId/open` with `{ "tabId": "..." }`
 moves only the requested tab's window to the main display and focuses it. A
@@ -765,13 +767,33 @@ accounted for by an active handoff, an in-flight show, or an already reported
 failure. A readback failure, such as a slow osascript or a list captured
 mid-update, is retried inside the same bounded loop. A failure that persists
 is logged as `native window readback failed` and reported as a parking failure
-for that window only. It never relaunches the context. During startup, one
-window that cannot be parked is reported and never stops command handling for
-the other windows.
+for that window only after startup. A first-launch native-readback failure that
+reaches the add-on's `readyError` instead fails attachment and invokes the legacy
+launch fallback described above. It can close and relaunch the newly attempted
+context before any caller's tabs exist. A normal window parking failure at startup
+is reported without stopping command handling for the other windows.
 
-Without a usable park display (or with `CAMOFOX_PARK_DISPLAY=off`), the server
-logs one warning and retains the existing headless-to-headed relaunch behavior.
-That fallback cannot preserve in-memory tabs across a visibility transition.
+When an active parking context loses its display, new tabs use ordinary creation
+in the same context. They are not guaranteed hidden. Show and release return 409
+`parking_unavailable` rather than moving windows to stale coordinates or closing
+the context. Reconnecting an eligible secondary display re-enables parking with
+fresh geometry in that same context, preserving sibling tabs and in-memory state.
+
+Contexts initially launched without parking (including `CAMOFOX_PARK_DISPLAY=off`)
+cannot turn a headless process into a headed one in place. Show refuses with 409
+`context_restart_required` while live tabs exist. Only `/open` with
+`{ "allowRestart": true }` explicitly accepts discarding all live tab state and
+restoring at most 1 URL. No-park release likewise refuses to close live tabs with
+409 `context_close_required`, even when a `tabId` is supplied. `/release` with
+`{ "all": true }` explicitly accepts releasing the whole legacy identity. Do not
+combine `all` and `tabId`. Existing legacy contexts remain legacy until an
+explicitly accepted restart or close. New contexts discover the reconnected display normally.
+
+`/health` keeps liveness separate from `visibility`: `mode` reports `parking`,
+`unavailable`, `disabled`, `unsupported`, or `unconfigured`; `parking` reports
+display eligibility. `sameContextSessions`, `restartRequiredSessions`, and
+`failedWindows` distinguish active parking controllers, legacy headless contexts,
+and window verification failures. A missing display alone does not make liveness fail.
 
 
 When a session's tab limit is reached, the oldest/least-used tab is automatically recycled instead of returning an error -- so long-running agent sessions don't hit dead ends.

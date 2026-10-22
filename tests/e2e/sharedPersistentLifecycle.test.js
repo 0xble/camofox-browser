@@ -33,6 +33,10 @@ describe('shared persistent identity lifecycle over HTTP', () => {
       CAMOFOX_PARK_DISPLAY: 'off',
       CAMOFOX_SHARED_IDENTITIES: userId,
       CAMOFOX_SHARED_PROFILE_DIR: profileDir,
+      CAMOFOX_PROFILE_DIR: path.join(profileDir, 'ephemeral'),
+      CAMOFOX_COOKIES_DIR: path.join(profileDir, 'cookies'),
+      CAMOFOX_TRACES_DIR: path.join(profileDir, 'traces'),
+      CAMOFOX_UPLOADS_DIR: path.join(profileDir, 'uploads'),
       MAX_TABS_PER_SESSION: '3',
     });
     await startTestSite();
@@ -118,7 +122,7 @@ describe('shared persistent identity lifecycle over HTTP', () => {
     expect(agent.response.status).toBe(200);
     const navigated = await request('POST', `/tabs/${opened.data.tabId}/navigate`, { userId, url: `${testSiteUrl}/pageA` });
     expect(navigated.response.status).toBe(200);
-    const released = await request('POST', `/browser/identities/${userId}/release`);
+    const released = await request('POST', `/browser/identities/${userId}/release`, { all: true });
     expect(released.response.status).toBe(200);
     expect(released.data).toEqual({ ok: true, released: true });
     const checkpoint = JSON.parse(await fs.readFile(cookieCheckpointPath(profileDir, userId), 'utf8'));
@@ -138,7 +142,7 @@ describe('shared persistent identity lifecycle over HTTP', () => {
   test('release followed by open serializes opposite actions and starts a fresh headed session', async () => {
     const first = await request('POST', `/browser/identities/${userId}/open`);
     expectOk(first);
-    const release = request('POST', `/browser/identities/${userId}/release`);
+    const release = request('POST', `/browser/identities/${userId}/release`, { all: true });
     const reopen = request('POST', `/browser/identities/${userId}/open`);
     const [released, opened] = await Promise.all([release, reopen]);
     expect(released.response.status).toBe(200);
@@ -151,7 +155,7 @@ describe('shared persistent identity lifecycle over HTTP', () => {
   test('explicit release closes a headless session and is idempotent', async () => {
     const tab = await request('POST', '/tabs', { userId, sessionKey: 'headless-release', url: `${testSiteUrl}/pageA` });
     expect(tab.response.status).toBe(200);
-    const released = await request('POST', `/browser/identities/${userId}/release`);
+    const released = await request('POST', `/browser/identities/${userId}/release`, { all: true });
     expect(released.data).toEqual({ ok: true, released: true });
     const gone = await request('GET', `/tabs?userId=${userId}`);
     expect(gone.data.tabs).toEqual([]);
@@ -214,6 +218,32 @@ describe('shared persistent identity lifecycle over HTTP', () => {
     } finally {
       await request('DELETE', `/sessions/${userId}`);
     }
+  }, 90000);
+
+  test('no-park create works, while release/show refuse to discard idle siblings and unsaved input', async () => {
+    const a = await request('POST', '/tabs', { userId, sessionKey: 'no-park-a', url: `${testSiteUrl}/form` });
+    const b = await request('POST', '/tabs', { userId, sessionKey: 'no-park-b', url: `${testSiteUrl}/form` });
+    expectOk(a); expectOk(b);
+    for (const [tab, text] of [[a, 'unsaved A'], [b, 'unsaved B']]) {
+      expectOk(await request('POST', `/tabs/${tab.data.tabId}/type`, { userId, selector: '#username', text }));
+    }
+    const before = await request('GET', `/tabs?userId=${userId}`);
+    const released = await request('POST', `/browser/identities/${userId}/release`, { tabId: a.data.tabId });
+    expect(released.response.status).toBe(409);
+    expect(released.data.code).toBe('context_close_required');
+    const shown = await request('POST', `/browser/identities/${userId}/open`, { tabId: a.data.tabId });
+    expect(shown.response.status).toBe(409);
+    expect(shown.data.code).toBe('context_restart_required');
+    const after = await request('GET', `/tabs?userId=${userId}`);
+    expect(after.data.tabs.map(tab => tab.tabId).sort()).toEqual(before.data.tabs.map(tab => tab.tabId).sort());
+    for (const [tab, text] of [[a, 'unsaved A'], [b, 'unsaved B']]) {
+      const state = await request('POST', `/tabs/${tab.data.tabId}/evaluate`, { userId, expression: 'document.querySelector("#username").value' });
+      expectOk(state); expect(state.data.result).toBe(text);
+    }
+    const health = await request('GET', '/health');
+    expectOk(health);
+    expect(health.data).toMatchObject({ ok: true, visibility: { mode: 'disabled', parking: false, restartRequiredSessions: 1 } });
+    await request('DELETE', `/sessions/${userId}`);
   }, 90000);
 
   test('normal use launches headless, and /focus refuses a headless identity', async () => {

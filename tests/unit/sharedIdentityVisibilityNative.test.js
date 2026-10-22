@@ -5,7 +5,7 @@ import path from 'node:path';
 import vm from 'node:vm';
 import { EventEmitter } from 'node:events';
 import { createSharedIdentityVisibility, createNativeWindowReadback, nativelyParked, nativelyOnMain, visibilityAddonFiles } from '../../lib/shared-identity-visibility.js';
-import { listNativeWindows, windowBounds } from '../../lib/park-display-launcher.js';
+import { listNativeWindows, windowBounds, selectParkDisplay } from '../../lib/park-display-launcher.js';
 import { findBrowserPid, parseDarwinProcesses } from '../../lib/darwin-processes.js';
 
 const display = {
@@ -85,10 +85,11 @@ describe('browser pid resolution for native readback', () => {
 });
 
 describe('native readback in the add-on (Camoufox-spoofed windows.get)', () => {
-  let root, visibility, context, windows, intervals, nextId, browser, readback, onCreated;
+  let root, visibility, context, windows, intervals, nextId, browser, readback, onCreated, currentDisplay;
   // Camoufox spoofs windows.get: it always reports the requested park geometry.
   // `native` is what CGWindowList would report.
   async function setup({ failReads = 0 } = {}) {
+    currentDisplay = display;
     root = await fs.mkdtemp(path.join(os.tmpdir(), 'park-native-'));
     context = new EventEmitter(); context.livePages = []; context.pages = () => context.livePages;
     windows = new Map(); intervals = []; nextId = 1;
@@ -118,13 +119,66 @@ describe('native readback in the add-on (Camoufox-spoofed windows.get)', () => {
         return null;
       }), update: async () => {} },
     };
-    visibility = await createSharedIdentityVisibility(display, { nativeReadback: readback, rootDir: root, timeoutMs: 2000 });
+    visibility = await createSharedIdentityVisibility(display, { nativeReadback: readback, rootDir: root, timeoutMs: 2000, discoverDisplay: async () => currentDisplay });
     const script = await fs.readFile(path.join(visibility.addon, 'background.js'), 'utf8');
     vm.runInNewContext(script, { browser, fetch, setTimeout, setInterval: fn => { const id = setInterval(fn, 10); intervals.push(id); return id; } });
     await visibility.attach(context);
   }
   afterEach(async () => { for (const id of intervals) clearInterval(id); await visibility?.close(); await fs.rm(root, { recursive: true, force: true }); });
   // The startup snapshot must also pass for windows Camoufox restored at launch.
+  test.each([
+    ['removed', [{ name: 'Studio', x: 0, y: 0, width: 2048, height: 1152 }]],
+    ['becomes main', [{ name: 'DeskPad Display', x: 0, y: 0, width: 1280, height: 960 }]],
+  ])('park display %s degrades creation and refuses visibility changes without discarding sibling state, then reconnects', async (_change, screens) => {
+    await setup();
+    const a = await visibility.newPage(context), b = await visibility.newPage(context);
+    a.input = 'unsaved A'; b.input = 'unsaved B';
+    context.close = jest.fn();
+    const extra = { url: () => 'about:blank', isClosed: () => false, input: 'unsaved C' };
+    context.newPage = jest.fn(async () => { context.livePages.push(extra); return extra; });
+    currentDisplay = selectParkDisplay(screens, 'DeskPad Display');
+    expect(currentDisplay).toBe(null);
+    await expect(visibility.newPage(context)).resolves.toBe(extra);
+    expect(visibility.capability()).toMatchObject({ mode: 'unavailable', parking: false, sameContextHandoff: false });
+    const moves = browser.windows.update.mock.calls.length;
+    await expect(visibility.open(a)).rejects.toMatchObject({ statusCode: 409, code: 'parking_unavailable' });
+    await expect(visibility.release({ page: a })).rejects.toMatchObject({ statusCode: 409, code: 'parking_unavailable' });
+    expect(browser.windows.update.mock.calls).toHaveLength(moves);
+    expect(context.pages()).toEqual([a, b, extra]);
+    currentDisplay = { ...display, park: { left: -1000, top: -700, width: 1000, height: 700 } };
+    await visibility.open(a);
+    await visibility.release({ page: a });
+    expect(nativelyParked(windows.get(1).native, currentDisplay)).toBe(true);
+    const c = await visibility.newPage(context);
+    expect(nativelyParked(windows.get(3).native, currentDisplay)).toBe(true);
+    expect(visibility.capability().parking).toBe(true);
+    expect(context.pages()).toEqual([a, b, extra, c]);
+    expect([a.input, b.input, extra.input]).toEqual(['unsaved A', 'unsaved B', 'unsaved C']);
+    expect(context.close).not.toHaveBeenCalled();
+  });
+  test('resizing the display invalidates native bindings and uses current geometry without relaunch', async () => {
+    await setup();
+    const a = await visibility.newPage(context), b = await visibility.newPage(context);
+    a.input = 'unsaved A'; b.input = 'unsaved B';
+    currentDisplay = { ...display, park: { left: 2048, top: 0, width: 800, height: 600 } };
+    await visibility.open(a);
+    await visibility.release({ page: a });
+    expect(nativelyParked(windows.get(1).native, currentDisplay)).toBe(true);
+    expect(windows.get(1).native.width).toBeLessThanOrEqual(800);
+    expect(context.pages()).toEqual([a, b]);
+    expect([a.input, b.input]).toEqual(['unsaved A', 'unsaved B']);
+  });
+  test('display loss during a failed create recovers through ordinary creation instead of a 500', async () => {
+    await setup();
+    const a = await visibility.newPage(context);
+    a.input = 'unsaved A';
+    const extra = { url: () => 'about:blank', isClosed: () => false };
+    context.newPage = jest.fn(async () => { context.livePages.push(extra); return extra; });
+    browser.windows.update.mockImplementation(async () => { currentDisplay = null; throw Error('display disappeared'); });
+    await expect(visibility.newPage(context)).resolves.toBe(extra);
+    expect(context.pages()).toContain(a);
+    expect(a.input).toBe('unsaved A');
+  });
   test('startup with native readback acknowledges ready', async () => {
     await setup();
     expect(readback).not.toHaveBeenCalled();
@@ -403,6 +457,21 @@ describe('/geometry bridge validation', () => {
   });
   afterEach(async () => { await visibility.close(); await fs.rm(root, { recursive: true, force: true }); });
   const post = body => fetch(endpoint + '/geometry', { method: 'POST', body: typeof body === 'string' ? body : JSON.stringify(body) });
+
+  test('a topology change during native readback invalidates its proof and late parked acknowledgments', async () => {
+    visibility.visible.set(9, { windowId: 9 });
+    readback.mockImplementationOnce(async () => {
+      visibility.updateDisplay(null);
+      return [{ number: 2, ...windowBounds(display.park) }];
+    });
+    const result = await post({ windowId: 9 });
+    expect(result.status).toBe(409);
+    await fetch(endpoint, { method: 'POST', body: JSON.stringify({ parked: 9, topologyVersion: 0 }) });
+    const snapshot = await (await fetch(endpoint)).json();
+    expect(snapshot.display).toBe(null);
+    expect(snapshot.parked).toEqual([]);
+    expect(visibility.visible.has(9)).toBe(true);
+  });
 
   test('allocates an unused size signature regardless of handoffs or helper strips', async () => {
     visibility.visible.set(5, { windowId: 5 }); visibility.visible.set(9, { windowId: 9 });
