@@ -36,7 +36,7 @@ test.each([false, true])('timed-out work refuses retries and handoff until it se
   }).catch(error => error);
   await turn();
   const queued = f.run('A', async () => events.push('queued-mutation')).catch(error => error);
-  expect(await first).toMatchObject({ code: 'operation_timeout' });
+  expect(await first).toMatchObject({ code: 'operation_timeout', message: expect.stringContaining('Work may still be running') });
   expect(await queued).toMatchObject(busy);
   await expect(f.run('A', async () => events.push('retry-mutation'))).rejects.toMatchObject(busy);
   const handoff = () => f.run('A', async () => { f.human.add('A'); events.push('human-handoff'); }, 10, { allowHumanControl: true });
