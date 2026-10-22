@@ -45,11 +45,26 @@ describe('shared identity headed transition', () => {
   });
   afterEach(async () => fs.rm(root, { recursive: true, force: true }));
 
-  test('normal use launches headless on the same profile subsequently used headed', async () => {
+  test.each([null, 'tab-a', 'missing'])('no-park show (%s) refuses to discard idle sibling input without explicit acceptance', async requested => {
+    const session = await opener.getSession('personal');
+    const a = session.context.pages()[0], b = fakePage('https://example.test/form');
+    a.input = 'unsaved A'; b.input = 'unsaved B';
+    session.context.pages.mockReturnValue([a, b]);
+    session.tabGroups.set('a', new Map([['tab-a', { page: a }]]));
+    session.tabGroups.set('b', new Map([['tab-b', { page: b }]]));
+    await expect(opener.openWindow('personal', requested)).rejects.toMatchObject({ statusCode: 409, code: 'context_restart_required' });
+    expect(opener.closeSession).not.toHaveBeenCalled();
+    expect(session.context.close).not.toHaveBeenCalled();
+    expect(session.context.pages()).toEqual([a, b]);
+    expect([a.input, b.input]).toEqual(['unsaved A', 'unsaved B']);
+    expect(sessions.get('personal')).toBe(session);
+  });
+
+  test('normal use only relaunches on the same profile after explicit acceptance', async () => {
     const original = await opener.getSession('personal');
     expect(contexts[0].options.headless).toBe(true);
     const profile = launcher.mock.calls[0][0];
-    await opener.openWindow('personal');
+    await opener.openWindow('personal', null, { allowRestart: true });
     expect(contexts[1].options.headless).toBe(false);
     expect(launcher.mock.calls[1][0]).toBe(profile);
     expect(original.context.close).toHaveBeenCalledTimes(1);
@@ -59,7 +74,7 @@ describe('shared identity headed transition', () => {
     const old = await opener.getSession('personal');
     old.lastUsedPage = fakePage('https://example.test/private');
     old.tabGroups.set('old', new Map([['stale-tab', { page: old.lastUsedPage }]]));
-    const result = await opener.openWindow('personal');
+    const result = await opener.openWindow('personal', null, { allowRestart: true });
     expect(result).toEqual({ ok: true, userId: 'personal', focused: true, tabId: 'personal-new-tab', keepOpen: true, restarted: true });
     expect(old.context.cookies).toHaveBeenCalledTimes(1);
     expect(old.context.close).toHaveBeenCalledTimes(1);
@@ -72,7 +87,7 @@ describe('shared identity headed transition', () => {
   });
 
   test('already headed with a requested tab focuses and returns that tab', async () => {
-    await opener.openWindow('personal');
+    await opener.openWindow('personal', null, { allowRestart: true });
     const session = sessions.get('personal');
     const firstPage = contexts[0].context.pages()[0];
     const secondPage = fakePage('https://example.test/second');
@@ -89,7 +104,7 @@ describe('shared identity headed transition', () => {
   });
 
   test('already headed with an unknown requested tab opens a new tab', async () => {
-    await opener.openWindow('personal');
+    await opener.openWindow('personal', null, { allowRestart: true });
     const session = sessions.get('personal');
     const existingPage = contexts[0].context.pages()[0];
     session.tabGroups.set('task-a', new Map([['existing-tab', { page: existingPage }]]));
@@ -107,9 +122,9 @@ describe('shared identity headed transition', () => {
   });
 
   test('already headed without a requested tab keeps focusing the manager-selected page', async () => {
-    await opener.openWindow('personal');
+    await opener.openWindow('personal', null, { allowRestart: true });
     const focus = jest.spyOn(manager, 'focus');
-    const result = await opener.openWindow('personal');
+    const result = await opener.openWindow('personal', null, { allowRestart: true });
 
     expect(focus).toHaveBeenCalledWith('personal');
     expect(result).toMatchObject({ ok: true, userId: 'personal', focused: true, tabId: 'personal-new-tab', keepOpen: true });
@@ -127,7 +142,7 @@ describe('shared identity headed transition', () => {
     old.tabGroups.set('other-task', new Map([['other-tab', { page: old.lastUsedPage }]]));
     registerPage.mockReturnValueOnce('restored-caller-tab');
 
-    const result = await opener.openWindow('personal', 'caller-tab');
+    const result = await opener.openWindow('personal', 'caller-tab', { allowRestart: true });
 
     expect(result).toMatchObject({ ok: true, userId: 'personal', focused: true, tabId: 'restored-caller-tab', keepOpen: true, restarted: true });
     expect(sessions.get('personal').lastUsedPage.goto).toHaveBeenCalledWith('https://example.test/caller', { timeout: 10000 });
@@ -135,12 +150,12 @@ describe('shared identity headed transition', () => {
   });
 
   test('already headed relaunches when the headed window has been closed', async () => {
-    await opener.openWindow('personal');
+    await opener.openWindow('personal', null, { allowRestart: true });
     const oldSession = sessions.get('personal');
     const visible = await manager.focus('personal');
     visible.isClosed.mockReturnValue(true);
     const focus = jest.spyOn(manager, 'focus').mockResolvedValueOnce(null).mockResolvedValueOnce(await contexts[0].context.newPage());
-    const result = await opener.openWindow('personal');
+    const result = await opener.openWindow('personal', null, { allowRestart: true });
     expect(result).toMatchObject({ restarted: true, focused: true, tabId: 'personal-new-tab' });
     expect(opener.closeSession).toHaveBeenCalledWith('personal', oldSession, { reason: 'headed_transition' });
     expect(contexts).toHaveLength(2);
@@ -150,7 +165,7 @@ describe('shared identity headed transition', () => {
   test('unsupported URL schemes skip restore and report restoreFailed', async () => {
     const old = await opener.getSession('personal');
     old.lastUsedPage = fakePage('file:///tmp/private.html');
-    const result = await opener.openWindow('personal');
+    const result = await opener.openWindow('personal', null, { allowRestart: true });
     expect(result).toMatchObject({ restarted: true, restoreFailed: true });
     expect(contexts[1].context.newPage).not.toHaveBeenCalled();
   });
@@ -159,20 +174,20 @@ describe('shared identity headed transition', () => {
     const bounded = createSharedIdentityWindowOpener({ manager, sessions, getSession: opener.getSession,
       closeSession: opener.closeSession, registerPage, isBusy: () => true, drainTimeoutMs: 10 });
     const started = Date.now();
-    await expect(bounded.openWindow('personal')).resolves.toEqual({ busy: true });
+    await expect(bounded.openWindow('personal', null, { allowRestart: true })).resolves.toEqual({ busy: true });
     expect(Date.now() - started).toBeLessThan(500);
   });
 
 
   test('skips about:blank and does not relaunch when checkpoint close fails', async () => {
     const original = await opener.getSession('personal');
-    await opener.openWindow('personal');
+    await opener.openWindow('personal', null, { allowRestart: true });
     expect(contexts[1].context.newPage).not.toHaveBeenCalled();
     await opener.closeSession('personal', sessions.get('personal'));
     const next = await opener.getSession('personal');
     next.context.close.mockRejectedValueOnce(new Error('profile still open'));
-    await expect(opener.openWindow('personal')).rejects.toThrow('profile still open');
-    await expect(opener.openWindow('personal')).rejects.toThrow('profile ownership is unconfirmed');
+    await expect(opener.openWindow('personal', null, { allowRestart: true })).rejects.toThrow('profile still open');
+    await expect(opener.openWindow('personal', null, { allowRestart: true })).rejects.toThrow('profile ownership is unconfirmed');
     await expect(manager.open('personal', () => launcher('unused'))).rejects.toThrow('profile ownership is unconfirmed');
     expect(contexts).toHaveLength(3);
     expect(sessions.get('personal')).toBe(next);
@@ -198,7 +213,7 @@ describe('shared identity headed transition', () => {
         return originalGetSession(userId, options);
       },
       closeSession: opener.closeSession, registerPage, isBusy: () => false });
-    const result = await open.openWindow('personal');
+    const result = await open.openWindow('personal', null, { allowRestart: true });
     expect(result).toMatchObject({ restarted: true, restoreFailed: true, tabId: 'personal-new-tab' });
     expect(resultPage.goto).toHaveBeenCalledWith('https://example.test/fails', { timeout: 10000 });
     expect(headed.newPage).not.toHaveBeenCalled();
@@ -207,7 +222,7 @@ describe('shared identity headed transition', () => {
 
   test('concurrent opens coalesce, and other identities remain untouched', async () => {
     await opener.getSession('personal'); await opener.getSession('lpg');
-    const [a, b] = await Promise.all([opener.openWindow('personal'), opener.openWindow('personal')]);
+    const [a, b] = await Promise.all([opener.openWindow('personal', null, { allowRestart: true }), opener.openWindow('personal', null, { allowRestart: true })]);
     expect(a).toEqual(b);
     expect(contexts).toHaveLength(3);
     expect(contexts[0].context.close).toHaveBeenCalledTimes(1);

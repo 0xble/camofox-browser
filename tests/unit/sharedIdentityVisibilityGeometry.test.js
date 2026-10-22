@@ -52,7 +52,7 @@ describe('startup park geometry verification', () => {
     expect(browser.windows.update).toHaveBeenCalledTimes(2);
     expect(browser.windows.get).toHaveBeenCalledTimes(3);
     expect(browser.windows.get).toHaveBeenNthCalledWith(1, 1, { populate: true });
-    expect(emitted).toContainEqual({ parked: 1 });
+    expect(emitted).toContainEqual({ parked: 1, topologyVersion: 0 });
     expect(emitted.at(-1)).toEqual({ ready: true });
   });
   test('uncorrectable startup geometry rejects readiness rather than recording parked', async () => {
@@ -79,7 +79,7 @@ describe('startup park geometry verification', () => {
     browser.windows.update.mockImplementation(async () => Object.assign(w, { left: -1260, top: -910, width: 1280, height: 774 }));
     await start();
     expect(browser.windows.update).toHaveBeenCalledTimes(1);
-    expect(emitted).toContainEqual({ parked: 1 });
+    expect(emitted).toContainEqual({ parked: 1, topologyVersion: 0 });
   });
   test('main display overlap fails verification even with the center and most area parked', async () => {
     browser.windows.update.mockImplementation(async () => Object.assign(w, { left: -1260, top: -750, width: 1280, height: 774 }));
