@@ -76,3 +76,20 @@ regression passes against the same failure mode, then retire the local repair.
 - **Rollback:** set `CAMOFOX_HIDDEN_TAB_IDLE_MIN=0` to disable all idle-tab
   cleanup, or revert the repair commit.
 - **Retire when:** upstream closes idle tabs inside live sessions.
+
+#### Settling timed-out tab operations
+
+- **Behavior:** a route timeout is not browser cancellation. The existing tab
+  lock stays active until its route continuation and nested `withTimeout`
+  browser promises settle. Queued and new actions, including human handoff,
+  receive retryable `503 tab_busy` instead of overlapping abandoned work.
+  Snapshot work uses the same boundary because proxy recovery can navigate.
+  Sibling tabs remain independent. Explicit tab close remains available for
+  work that never settles. A successful liveness probe does not clear busy state.
+- **Surfaces:** `server.js` (`withTabLock`, `withTimeout`, snapshot),
+  `lib/browser-errors.js`, `tests/unit/tabOperationSettling.test.js`,
+  `tests/unit/timeoutContinuation.test.js`.
+- **Regression:** `NODE_OPTIONS=--experimental-vm-modules npx jest tests/unit/tabOperationSettling.test.js tests/unit/timeoutContinuation.test.js --runInBand`.
+- **Rollback:** revert the repair commit. No persisted state changes.
+- **Retire when:** upstream guarantees cancellation or equivalent per-tab
+  settling before allowing newer work or human handoff.
