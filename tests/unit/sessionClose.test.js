@@ -101,6 +101,24 @@ describe('closeSessionOnce', () => {
     expect(session._closing).toBe(false);
   });
 
+  test('cancelled preparation is coalesced in flight but retryable after it settles', async () => {
+    const session = { _closing: true };
+    let cancel;
+    const preparation = jest.fn(() => new Promise(resolve => { cancel = () => resolve(false); }));
+    const first = closeSessionOnce(session, preparation);
+    const concurrent = closeSessionOnce(session, preparation);
+    expect(concurrent).toBe(first);
+    await Promise.resolve();
+    cancel();
+    await expect(first).resolves.toBe(false);
+    expect(preparation).toHaveBeenCalledTimes(1);
+    expect(session._closing).toBe(false);
+    const close = jest.fn(async () => 'closed');
+    await expect(closeSessionOnce(session, close)).resolves.toBe('closed');
+    await expect(closeSessionOnce(session, close)).resolves.toBe('closed');
+    expect(close).toHaveBeenCalledTimes(1);
+  });
+
   test('a successful close keeps _closing set', async () => {
     const session = { _closing: true };
     await closeSessionOnce(session, async () => {});
