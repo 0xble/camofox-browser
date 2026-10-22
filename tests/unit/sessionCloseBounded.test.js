@@ -9,6 +9,8 @@
  * session always leaves the registry.
  */
 import { describe, test, expect, jest } from '@jest/globals';
+import { EventEmitter } from 'node:events';
+import { BrowserContext } from '../../node_modules/playwright-core/lib/client/browserContext.js';
 import { createPluginEvents } from '../../lib/plugins.js';
 import { closeContextBounded, closeSessionOnce, settleWithin, teardownEphemeralSession, abandonedContexts, reapAbandonedContexts } from '../../lib/session-close.js';
 
@@ -59,7 +61,7 @@ describe('bounded session close', () => {
     expect(hung.close).toHaveBeenCalledWith({ runBeforeUnload: false });
     expect(healthy.isClosed()).toBe(true);
     expect(destroyed).toHaveBeenCalledWith({ userId: 'hermes_1', reason: 'session_timeout' });
-    expect(log).toHaveBeenCalledWith('warn', 'session context close timed out; closed pages individually',
+    expect(log).toHaveBeenCalledWith('warn', 'session context close unconfirmed; closed pages individually',
       expect.objectContaining({ userId: 'hermes_1', reason: 'session_timeout' }));
   });
 
@@ -162,6 +164,72 @@ describe('bounded session close', () => {
 
   test('closeContextBounded reports success when the context closes in time', async () => {
     await expect(closeContextBounded(fakeContext([], { hangs: false }), { timeoutMs: 50 })).resolves.toBe(true);
+  });
+
+  test('pre-protocol Playwright rejection falls back and stays tracked until a confirmed retry', async () => {
+    const page = fakePage();
+    const context = Object.assign(new EventEmitter(), {
+      isClosed: () => false,
+      request: { dispose: jest.fn(async () => { throw new Error('disposal rejected'); }) },
+      _channel: { close: jest.fn(async () => {}) },
+      pages: () => [page],
+    });
+    context.close = jest.fn(() => BrowserContext.prototype.close.call(context));
+    const session = fakeSession(context, ['tab']);
+    const sessions = new Map([['rejected', session]]);
+    const log = jest.fn();
+    await teardownEphemeralSession({
+      userId: 'rejected', session, sessions, reason: 'session_timeout', events: createPluginEvents(), log,
+      timeoutMs: 20, pageTimeoutMs: 5,
+    });
+    expect(context.request.dispose).toHaveBeenCalledTimes(1);
+    expect(context._channel.close).not.toHaveBeenCalled();
+    expect(page.close).toHaveBeenCalledWith({ runBeforeUnload: false });
+    expect(sessions.has('rejected')).toBe(false);
+    expect(abandonedContexts.has(context)).toBe(true);
+    expect(log).toHaveBeenCalledWith('warn', 'session context close unconfirmed; closed pages individually',
+      expect.objectContaining({ userId: 'rejected' }));
+    expect(context.listenerCount('close')).toBe(0);
+    context.close.mockImplementationOnce(async () => { context.emit('close'); });
+    await reapAbandonedContexts({ timeoutMs: 20 });
+    expect(context.close).toHaveBeenCalledTimes(2);
+    expect(abandonedContexts.has(context)).toBe(false);
+    expect(context.listenerCount('close')).toBe(0);
+  });
+
+  test.each(['event', 'readback'])('confirmed closure followed by rejection needs no fallback (%s)', async confirmation => {
+    const page = fakePage();
+    let closed = false;
+    const context = Object.assign(new EventEmitter(), {
+      pages: () => [page],
+      isClosed: () => closed,
+      close: jest.fn(async () => {
+        if (confirmation === 'event') context.emit('close');
+        else closed = true;
+        throw new Error('already closed');
+      }),
+    });
+    const session = fakeSession(context, ['tab']);
+    const sessions = new Map([['confirmed', session]]);
+    await teardownEphemeralSession({
+      userId: 'confirmed', session, sessions, reason: 'session_timeout', events: createPluginEvents(),
+      timeoutMs: 20, pageTimeoutMs: 5,
+    });
+    expect(page.close).not.toHaveBeenCalled();
+    expect(abandonedContexts.has(context)).toBe(false);
+    expect(context.listenerCount('close')).toBe(0);
+  });
+
+  test('an unconfirmed retry rejection stays tracked', async () => {
+    const context = { pages: () => [], close: jest.fn(async () => { throw new Error('rejected'); }) };
+    const session = fakeSession(context, []);
+    await teardownEphemeralSession({
+      userId: 'retry', session, sessions: new Map([['retry', session]]), reason: 'session_timeout',
+      events: createPluginEvents(), timeoutMs: 20,
+    });
+    await reapAbandonedContexts({ timeoutMs: 20 });
+    expect(context.close).toHaveBeenCalledTimes(2);
+    expect(abandonedContexts.has(context)).toBe(true);
   });
 
   test('settleWithin never rejects', async () => {

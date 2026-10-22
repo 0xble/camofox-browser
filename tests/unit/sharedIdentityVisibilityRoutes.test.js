@@ -48,7 +48,7 @@ test.each([false, true])('last-URL restoration respects the parked page factory 
   const registerSharedIdentityPage = jest.fn();
   const getSession = serverFunction('getSession', {
     normalizeUserId: String, sessions: new Map(), sessionCreations: new Map(),
-    sharedIdentities: { failedClosures: new Set(), owns: () => true, open: async () => context },
+    sharedIdentities: { failedClosures: new Set(), closings: new Set(), owns: () => true, open: async () => context },
     coalesceInflight: (_map, _key, operation) => operation(), MAX_SESSIONS: 10, FLY_MACHINE_ID: '',
     proxyPool: null, browserLaunchProxy: null, CONFIG: {}, contextIdentityOptions: () => ({}),
     sharedIdentityLastUrls: urls, registerSharedIdentityPage, log: jest.fn(),
@@ -73,7 +73,7 @@ test('a parked createPage rejection during last-URL restore still yields a usabl
   const sessions = new Map(), log = jest.fn(), registerSharedIdentityPage = jest.fn();
   const getSession = serverFunction('getSession', {
     normalizeUserId: String, sessions, sessionCreations: new Map(),
-    sharedIdentities: { failedClosures: new Set(), owns: () => true, open: async () => context, contexts: new Map([['identity', context]]) },
+    sharedIdentities: { failedClosures: new Set(), closings: new Set(), owns: () => true, open: async () => context, contexts: new Map([['identity', context]]) },
     coalesceInflight: (_map, _key, operation) => operation(), MAX_SESSIONS: 10, FLY_MACHINE_ID: '',
     proxyPool: null, browserLaunchProxy: null, CONFIG: {}, contextIdentityOptions: () => ({}),
     sharedIdentityLastUrls: urls, registerSharedIdentityPage, log,

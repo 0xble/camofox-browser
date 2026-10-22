@@ -43,7 +43,10 @@ regression passes against the same failure mode, then retire the local repair.
   close in time, each page is closed with `runBeforeUnload: false` and its own
   2 s bound. The session and its tab groups are always removed from the
   registry, and timeouts log `session close step timed out` or
-  `session context close timed out; closed pages individually`.
+  `session context close unconfirmed; closed pages individually`. Rejection is
+  not proof of closure: only a fulfilled close, a public close event, or a
+  closed-state readback confirms disposal. Unconfirmed rejected closes use the
+  same bounded page fallback and abandoned-context retries as timed-out closes.
 - **Evidence:** on 2026-10-09 `hermes_51df174154` logged `session expired` at
   01:57:20Z with no `storage state persisted` after it, while its tab
   `78b10665` had a content process at 100% CPU. The `session_timeout`

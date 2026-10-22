@@ -448,6 +448,7 @@ function sendError(res, err, extraFields = {}) {
 }
 
 function validateUrl(url) {
+  if (typeof url !== 'string') return 'Invalid URL: expected a string';
   try {
     const parsed = new URL(url);
     if (!ALLOWED_URL_SCHEMES.includes(parsed.protocol)) {
@@ -1553,17 +1554,17 @@ async function closeSessionNow(userId, session, {
 } = {}) {
   const key = normalizeUserId(userId);
   const transition = (reason === 'headed_transition' || reason === 'headed_release') && session.sharedIdentity;
-  // A headed transition must be able to abort with the session untouched, so the
-  // only fallible pre-close step (the cookie snapshot) runs before any teardown.
-  const transitionCookies = transition ? await sharedIdentities.snapshotCookies(key) : undefined;
+  const idleExpiry = reason === 'hidden_idle' && session.sharedIdentity;
+  // Transitions and expiry must be able to abort before destructive teardown.
+  const transitionCookies = transition || idleExpiry ? await sharedIdentities.snapshotCookies(key) : undefined;
 
   // Drain locks BEFORE closing context — queued operations get clean "Tab destroyed"
   // (410) instead of messy "Target page closed" (500) errors.
-  if (clearLocks) {
+  if (clearLocks && !idleExpiry) {
     clearSessionLocks(session, { preserveTabIds: preserveLockTabIds });
   }
 
-  if (clearDownloads) {
+  if (clearDownloads && !idleExpiry) {
     await clearSessionDownloads(session).catch(() => {});
   }
 
@@ -1588,6 +1589,13 @@ async function closeSessionNow(userId, session, {
   }
 
   if (session.tracePath) await stopTracing();
+
+  if (idleExpiry) {
+    // Cookie/tracing preparation can yield to new agent work or a human open.
+    // Recheck before touching locks or invoking the context's close operation.
+    if (!sharedSessionExpiryEligible(key, session)) return false;
+    if (clearLocks) clearSessionLocks(session, { preserveTabIds: preserveLockTabIds });
+  }
 
   if (session.sharedIdentity) {
     session._intentionalClose = true;
@@ -1615,6 +1623,7 @@ async function closeSessionNow(userId, session, {
   if (sessions.get(key) === session) sessions.delete(key);
 
   refreshActiveTabsGauge();
+  if (idleExpiry && clearDownloads) await clearSessionDownloads(session).catch(() => {});
 }
 
 async function closeAllSessions(reason, { clearDownloads = true, clearLocks = true } = {}) {
@@ -1643,6 +1652,9 @@ async function getSession(userId, { trace = false, headed = false, parkedOpen = 
   const key = normalizeUserId(userId);
   if (sharedIdentities.failedClosures.has(key)) {
     throw Object.assign(new Error('shared identity close failed; profile ownership is unconfirmed'), { statusCode: 409 });
+  }
+  if (sharedIdentities.closings.has(key)) {
+    throw Object.assign(new Error('identity busy'), { statusCode: 409 });
   }
   let session = sessions.get(key);
   
@@ -3372,6 +3384,12 @@ async function releaseIdentity(userId, { headedOnly = false, all = false, tabId 
 }
 
 const sharedIdentityIdlePolicy = createSharedIdentityIdlePolicy({ readIdleSeconds: readHidIdleSeconds });
+function sharedSessionExpiryEligible(key, session) {
+  return CONFIG.hiddenSessionIdleMin && sessions.get(key) === session && !session.headed
+    && !session.visibility?.visible.size && !identityTransitions.has(key)
+    && sharedIdentityIdlePolicy.agentIdle(session.lastAccess, CONFIG.hiddenSessionIdleMin) && !identityBusy(key, session);
+}
+
 async function cleanIdleSharedSessions() {
   const tabThreshold = CONFIG.hiddenTabIdleMin * 60_000;
   // Native HID is required for releasing a visible window. Hidden contexts do
@@ -3399,9 +3417,9 @@ async function cleanIdleSharedSessions() {
         if (await closeSharedTab(original, tabId, tab, { userId: key, reason: 'shared_idle' })) tabsReapedTotal.inc();
       }
     }
-    if (CONFIG.hiddenSessionIdleMin && sessions.get(key) === original && !original.headed
-      && sharedIdentityIdlePolicy.agentIdle(original.lastAccess, CONFIG.hiddenSessionIdleMin) && !identityBusy(key, original)) {
-      await transitionIdentity(key, 'release', () => releaseIdentity(key, { all: true })).catch(err => {
+    if (sharedSessionExpiryEligible(key, original)) {
+      // Parking hides live windows. Expiry must checkpoint and close the context.
+      await closeSession(key, original, { reason: 'hidden_idle' }).catch(err => {
         log('warn', 'hidden idle session close failed', { userId: key, error: err.message });
       });
     }
@@ -3610,7 +3628,7 @@ app.post('/tabs/:tabId/handoff', async (req, res) => {
  *                   type: boolean
  *                   description: False when the optional initial document navigation returned HTTP 400 or higher.
  *       400:
- *         description: Missing required fields.
+ *         description: Missing required fields or invalid initial URL. Rejected before session or tab allocation and recycling.
  *         content:
  *           application/json:
  *             schema:
@@ -3641,6 +3659,11 @@ app.post('/tabs', async (req, res) => {
     const resolvedSessionKey = sessionKey || listItemId;
     if (!userId || !resolvedSessionKey) {
       return res.status(400).json({ error: 'userId and sessionKey required' });
+    }
+
+    if (url !== undefined && url !== null) {
+      const urlErr = validateUrl(url);
+      if (urlErr) throw Object.assign(new Error(urlErr), { statusCode: 400 });
     }
 
     // Session overflow redirect (Fly.io only) — if this machine is above its
@@ -3706,8 +3729,6 @@ app.post('/tabs', async (req, res) => {
       refreshActiveTabsGauge();
       
       if (url) {
-        const urlErr = validateUrl(url);
-        if (urlErr) throw Object.assign(new Error(urlErr), { statusCode: 400 });
         tabState.lastRequestedUrl = url;
         try {
           const navigationResponse = await withTabLock(
