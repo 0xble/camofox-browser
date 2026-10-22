@@ -763,13 +763,14 @@ async function withTabLock(tabId, operation, timeoutMs = HANDLER_TIMEOUT_MS, { a
           recovery: 'create_new_tab',
         });
       }
-      throw Object.assign(err, {
+      Object.assign(err, {
         code: 'operation_timeout',
         statusCode: 503,
         retryable: true,
         recovery: 'retry',
       });
     }
+    if (pending.size && err?.message) err.message += ' Work may still be running. This tab remains busy until it settles.';
     throw err;
   } finally {
     if (pending.size) {
