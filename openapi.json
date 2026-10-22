@@ -681,6 +681,9 @@
           },
           "409": {
             "description": "Tab is not a shared identity tab or is no longer available."
+          },
+          "503": {
+            "description": "Retryable tab_busy while a previous operation is still settling. No control transfer occurred."
           }
         }
       }
@@ -1067,7 +1070,7 @@
             }
           },
           "503": {
-            "description": "Retryable. code=refs_unavailable when the page could not be captured and the previous refs no longer resolve.",
+            "description": "Retryable. code=refs_unavailable when the page could not be captured and the previous refs no longer resolve. code=tab_busy while a previous operation is still settling.",
             "content": {
               "application/json": {
                 "schema": {

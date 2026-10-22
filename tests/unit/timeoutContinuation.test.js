@@ -1,4 +1,7 @@
-import { readFileSync } from 'fs';
+import { mkdtempSync, readFileSync, rmSync } from 'fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { createServer } from 'node:http';
 import { browserErrorCode, browserErrorRecovery, browserErrorStatus } from '../../lib/browser-errors.js';
 import { startServer, stopServer, getServerUrl } from '../helpers/startServer.js';
 import { createClient } from '../helpers/client.js';
@@ -9,17 +12,34 @@ const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
 describe('timed-out tab operations', () => {
   let serverUrl;
   let testSiteUrl;
+  let stateDir;
+  let gateServer, gateUrl, gateResponse;
 
   beforeAll(async () => {
-    await startServer(0, { HANDLER_TIMEOUT_MS: '5000' });
+    stateDir = mkdtempSync(join(tmpdir(), 'camofox-timeout-'));
+    await startServer(0, {
+      HANDLER_TIMEOUT_MS: '5000', CAMOFOX_SHARED_IDENTITIES: 'timeout-probe',
+      CAMOFOX_SHARED_IDENTITY_MAP: '', CAMOFOX_SHARED_IDENTITY_EXTENSIONS: '',
+      CAMOFOX_SHARED_PROFILE_DIR: join(stateDir, 'shared'), CAMOFOX_PROFILE_DIR: join(stateDir, 'profiles'),
+      CAMOFOX_COOKIES_DIR: join(stateDir, 'cookies'), CAMOFOX_UPLOADS_DIR: join(stateDir, 'uploads'),
+      CAMOFOX_TRACES_DIR: join(stateDir, 'traces'), CAMOFOX_CRASH_REPORT_ENABLED: 'false',
+    });
     serverUrl = getServerUrl();
     await startTestSite();
     testSiteUrl = getTestSiteUrl();
+    gateServer = createServer((req, res) => {
+      if (req.url === '/hold') gateResponse = res;
+      else res.end('<html><body>Timeout settling fixture</body></html>');
+    });
+    await new Promise(resolve => gateServer.listen(0, '127.0.0.1', resolve));
+    gateUrl = `http://127.0.0.1:${gateServer.address().port}`;
   }, 120000);
 
   afterAll(async () => {
     await stopTestSite();
     await stopServer();
+    if (gateServer) await new Promise(resolve => gateServer.close(resolve));
+    if (stateDir) rmSync(stateDir, { recursive: true, force: true });
   }, 30000);
 
   test('routes slow clicks through the shared recoverable timeout path', () => {
@@ -84,59 +104,65 @@ describe('timed-out tab operations', () => {
     }
   }, 30000);
 
-  test('returns tab_destroyed after 3 timed-out operations and a failed liveness probe', async () => {
+  test('never-settling work refuses new actions while sibling tabs and explicit close remain available', async () => {
     const client = createClient(serverUrl);
     const { tabId } = await client.createTab();
-
+    const { tabId: sibling } = await client.createTab();
     try {
-      for (let attempt = 1; attempt <= 2; attempt++) {
-        await expect(client.evaluate(tabId, 'new Promise(() => {})')).rejects.toMatchObject({
-          status: 503,
-          data: expect.objectContaining({ code: 'operation_timeout', recovery: 'retry' }),
-        });
-      }
-
-      // A never-settling promise leaves the page's main thread free, so the
-      // liveness probe would pass and correctly retain the tab. Only a page
-      // whose main thread is blocked past the handler and probe budgets
-      // (5s + 1s) is actually stuck. The loop is bounded so it cannot outlive
-      // the test.
-      await expect(client.evaluate(
-        tabId,
-        '(() => { const end = Date.now() + 9000; while (Date.now() < end) {} })()',
-      )).rejects.toMatchObject({
-        status: 410,
-        data: expect.objectContaining({ code: 'tab_destroyed', recovery: 'create_new_tab' }),
+      await expect(client.evaluate(tabId, 'new Promise(() => {})')).rejects.toMatchObject({
+        status: 503, data: expect.objectContaining({ code: 'operation_timeout', recovery: 'retry' }),
       });
-      const absence = await client.getStats(tabId).catch(error => error);
-      expect([404, 410]).toContain(absence.status);
-      if (absence.status === 410) {
-        expect(absence.data).toMatchObject({ code: 'browser_restarted' });
-      }
+      await expect(client.evaluate(tabId, 'window.newerMutation = true')).rejects.toMatchObject({
+        status: 503, data: expect.objectContaining({ code: 'tab_busy', recovery: 'retry', retryable: true }),
+      });
+      expect((await client.evaluate(sibling, '42')).result).toBe(42);
+      await client.request('DELETE', `/tabs/${tabId}?userId=${client.userId}`);
+      await expect(client.getStats(tabId)).rejects.toMatchObject({ status: 410 });
     } finally {
       await client.cleanup();
     }
-  }, 45000);
+  }, 30000);
 
-  test('retains a tab after 3 timed-out operations when the liveness probe passes', async () => {
+  test('delayed page mutation settles before newer actions or a completed human handoff', async () => {
     const client = createClient(serverUrl);
-    const { tabId } = await client.createTab();
-
+    client.userId = 'timeout-probe';
+    const { tabId } = await client.createTab(gateUrl);
     try {
-      for (let attempt = 1; attempt <= 3; attempt++) {
-        await expect(client.evaluate(tabId, 'new Promise(() => {})')).rejects.toMatchObject({
-          status: 503,
-          data: expect.objectContaining({ code: 'operation_timeout', recovery: 'retry' }),
-        });
+      await expect(client.evaluate(tabId,
+        'fetch("/hold").then(() => { window.actionOrder = ["old"]; })',
+      )).rejects.toMatchObject({ status: 503, data: expect.objectContaining({ code: 'operation_timeout' }) });
+      await expect(client.evaluate(tabId, 'window.actionOrder = ["new"]')).rejects.toMatchObject({
+        status: 503, data: expect.objectContaining({ code: 'tab_busy', recovery: 'retry' }),
+      });
+      const handoff = value => client.request('POST', `/tabs/${tabId}/handoff`, { userId: client.userId, handoff: value });
+      await expect(handoff('human')).rejects.toMatchObject({
+        status: 503, data: expect.objectContaining({ code: 'tab_busy', recovery: 'retry' }),
+      });
+      expect(gateResponse).toBeDefined();
+      gateResponse.end('settled');
+      // Poll only this operation's settling state, without replaying a mutation.
+      const deadline = Date.now() + 5000;
+      for (;;) {
+        try {
+          expect((await client.evaluate(tabId, 'window.actionOrder')).result).toEqual(['old']);
+          break;
+        } catch (error) {
+          if (error.data?.code !== 'tab_busy' || Date.now() >= deadline) throw error;
+          await wait(50);
+        }
       }
-
-      expect((await client.evaluate(tabId, '42')).result).toBe(42);
+      expect((await client.evaluate(tabId, 'window.actionOrder.push("new"); window.actionOrder')).result).toEqual(['old', 'new']);
+      await expect(handoff('human')).resolves.toMatchObject({ handoff: 'human', focused: true });
+      await expect(client.evaluate(tabId, 'window.actionOrder.push("stale")')).rejects.toMatchObject({ status: 409 });
+      await wait(100);
+      await handoff('agent');
+      expect((await client.evaluate(tabId, 'window.actionOrder')).result).toEqual(['old', 'new']);
     } finally {
       await client.cleanup();
     }
-  }, 45000);
+  }, 30000);
 
-  test('keeps the tab available for queued evaluate work after an evaluate timeout', async () => {
+  test('refuses queued evaluate work after an evaluate timeout until the old work settles', async () => {
     const client = createClient(serverUrl);
     const { tabId } = await client.createTab();
 
@@ -158,8 +184,8 @@ describe('timed-out tab operations', () => {
       expect(firstError.status).toBe(503);
       expect(firstError.data.code).toBe('operation_timeout');
       expect(firstError.data.recovery).toBe('retry');
-      expect(queuedError.status).toBeUndefined();
-      expect(queuedError.result).toBe(42);
+      expect(queuedError.status).toBe(503);
+      expect(queuedError.data).toMatchObject({ code: 'tab_busy', recovery: 'retry', retryable: true });
 
       const stats = await client.getStats(tabId);
       expect(stats.tabId).toBe(tabId);
