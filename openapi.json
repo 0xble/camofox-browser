@@ -844,6 +844,11 @@
                           },
                           "listItemId": {
                             "type": "string"
+                          },
+                          "openerTabId": {
+                            "type": "string",
+                            "nullable": true,
+                            "description": "Current tab ID of the observed popup opener in this session. Null for independent pages or a closed, removed, or replaced opener. Tracks folded IDs, not replacement pages."
                           }
                         }
                       }
