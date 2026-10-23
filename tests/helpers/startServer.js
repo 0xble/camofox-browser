@@ -3,6 +3,7 @@ import { fileURLToPath } from 'node:url';
 import { launchServer } from '../../lib/launcher.js';
 import { loadConfig } from '../../lib/config.js';
 import { DISPLAY, XAUTHORITY } from './test-env.js';
+import { randomFixturePort } from './fixturePort.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -25,7 +26,7 @@ async function waitForServer(port, maxRetries = 30, interval = 1000) {
 }
 
 async function startServer(port = 0, extraEnv = {}) {
-  const usePort = port || Math.floor(3100 + Math.random() * 900);
+  const usePort = port || randomFixturePort();
   const cfg = loadConfig();
   const pluginDir = path.join(__dirname, '../..');
 

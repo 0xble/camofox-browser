@@ -3,6 +3,7 @@ import { fileURLToPath } from 'url';
 import crypto from 'crypto';
 import { launchServer } from '../../lib/launcher.js';
 import { loadConfig } from '../../lib/config.js';
+import { randomFixturePort } from '../helpers/fixturePort.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -11,7 +12,7 @@ let serverProcess = null;
 let serverUrl = null;
 
 async function startServerWithApiKey(apiKey) {
-  const port = Math.floor(3100 + Math.random() * 900);
+  const port = randomFixturePort();
   const cfg = loadConfig();
   const pluginDir = path.join(__dirname, '../..');
 
@@ -36,7 +37,7 @@ async function startServerWithApiKey(apiKey) {
 }
 
 async function startServerWithoutApiKey() {
-  const port = Math.floor(3100 + Math.random() * 900);
+  const port = randomFixturePort();
   const cfg = loadConfig();
   const pluginDir = path.join(__dirname, '../..');
 

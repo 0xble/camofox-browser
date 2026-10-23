@@ -10,6 +10,7 @@ import { fileURLToPath } from 'node:url';
 import { launchServer } from '../../lib/launcher.js';
 import { loadConfig } from '../../lib/config.js';
 import { DISPLAY, XAUTHORITY } from '../helpers/test-env.js';
+import { randomFixturePort } from '../helpers/fixturePort.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -28,7 +29,7 @@ async function waitForServer(port, maxRetries = 30, interval = 1000) {
 
 export default async function globalSetup() {
   // --- Start camofox server ---
-  const serverPort = Math.floor(3100 + Math.random() * 900);
+  const serverPort = randomFixturePort();
   const cfg = loadConfig();
   const pluginDir = path.resolve(__dirname, '../..');
   const uploadsTempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'camofox-e2e-uploads-'));
