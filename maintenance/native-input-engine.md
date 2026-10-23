@@ -63,6 +63,30 @@ waits are separate and are not proven cancelled or universally bounded by this
 repair. The canary does not attribute every historical live timeout to this
 edge trigger.
 
+## Popup Input Boundary
+
+The official release's [popup-blocker parity patch](https://github.com/daijro/camoufox/blob/c9ed439d49948cc8e4335aee6bea1a7b23dc4d2d/browser/patches/popup-blocker-parity.patch)
+keeps stock Firefox popup blocking enabled. Explicit driver evaluation permits
+synchronous `window.open()` through the content-process `driverPopupsAllowed`
+flag without granting user activation. Anchor `target=_blank` retargeting occurs
+in the parent process, where that flag is unavailable. Evaluated anchor
+`.click()` is therefore blocked, while native Playwright input grants activation
+and remains supported. `/evaluate` does not promise synthetic user activation.
+
+`tests/unit/tabLifecycleContract.test.js` uses the public selector `/click` path
+for the trusted anchor contract and bounded polling for the actual managed target
+URL. It requires exactly 1 new popup with a stable usable tab ID, preserves parent
+and sibling identity, verifies API closeability, and checks that a trusted click
+with `preventDefault()` creates no managed tab. The separate `window.open()` case
+retains its driver-evaluation boundary.
+
+Commit `50b503185d3bd0326462cb231842a81e40f55f65` moved popup triggers to evaluation
+to isolate registration from `/click` post-action snapshot/ref rebuilding. That
+workaround is not equivalent for anchors on this engine because it removes the
+required activation. Selector input restores the original trusted precondition
+without assuming snapshot refs, changing browser preferences, or weakening popup
+management assertions.
+
 ## Distribution And Activation
 
 `scripts/ci-install-camoufox.sh` downloads the exact checksummed Linux asset
