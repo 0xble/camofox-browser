@@ -25,6 +25,20 @@ describe('timed-out tab operations', () => {
       CAMOFOX_TRACES_DIR: join(stateDir, 'traces'), CAMOFOX_CRASH_REPORT_ENABLED: 'false',
     });
     serverUrl = getServerUrl();
+    // HTTP liveness precedes browser prewarming. Do not spend the fixture's
+    // deliberately short handler budget on the browser cold start.
+    const readyStart = Date.now();
+    const readyClient = createClient(serverUrl);
+    let health = await readyClient.request('GET', '/health', null, { timeout: 1000 });
+    console.log('timeout fixture initial browser readiness', { browserConnected: health.browserConnected });
+    while (health.browserConnected !== true) {
+      if (Date.now() - readyStart >= 60000) {
+        throw new Error('Browser did not become connected before fixture setup');
+      }
+      await wait(100);
+      health = await readyClient.request('GET', '/health', null, { timeout: 1000 });
+    }
+    console.log('timeout fixture browser ready', { ms: Date.now() - readyStart });
     await startTestSite();
     testSiteUrl = getTestSiteUrl();
     gateServer = createServer((req, res) => {
