@@ -39,7 +39,7 @@ async function observe(page) {
     for (const type of ['mousemove', 'click']) {
       document.addEventListener(type, event => window.nativeEvents.push({
         type, trusted: event.isTrusted, target: event.target.id,
-        x: event.clientX, y: event.clientY,
+        x: event.clientX, y: event.clientY, screenX: event.screenX, screenY: event.screenY,
       }));
     }
   });
@@ -53,8 +53,30 @@ async function clickObserved(page, selector) {
     event.target === selector.slice(1)), `Missing trusted ${selector} click: ${JSON.stringify(events)}`);
 }
 
+async function geometry(page) {
+  return {
+    viewport: page.viewportSize(),
+    layout: await page.evaluate(() => ({
+      inner: [innerWidth, innerHeight], outer: [outerWidth, outerHeight],
+      screen: [screen.width, screen.height, screen.availWidth, screen.availHeight],
+      position: [screenX, screenY], dpr: devicePixelRatio,
+      client: [document.documentElement.clientWidth, document.documentElement.clientHeight],
+      document: document.documentElement.getBoundingClientRect().toJSON(),
+      body: document.body.getBoundingClientRect().toJSON(),
+      edge: document.querySelector('#edge').getBoundingClientRect().toJSON(),
+      scroll: [scrollX, scrollY],
+      visualViewport: visualViewport && {
+        width: visualViewport.width, height: visualViewport.height, scale: visualViewport.scale,
+        offsetLeft: visualViewport.offsetLeft, offsetTop: visualViewport.offsetTop,
+      },
+    })),
+  };
+}
+
+// Compare display modes using the same generated identity, not two random sizes.
+let sharedOptions;
 for (const headless of [true, false]) {
-  test(`native viewport edges preserve sibling input, headless=${headless}`, { timeout: 45000 }, async () => {
+  test(`native viewport edges preserve sibling input, headless=${headless}`, { timeout: 45000 }, async t => {
     // This must fail, rather than skip, if CI installed a stale or unrelated engine.
     assert.equal(installedVerStr(), '158.0-beta.40');
     const app = await fs.readFile(getPath('application.ini'), 'utf8');
@@ -62,8 +84,15 @@ for (const headless of [true, false]) {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'camofox-native-edge-'));
     let context;
     try {
-      const options = await launchOptions({ headless, humanize: false, os: 'macos', exclude_addons: ['UBO'] });
-      options.ignoreDefaultArgs = ['-foreground'];
+      sharedOptions ??= await launchOptions({ headless: true, humanize: false, os: 'macos', exclude_addons: ['UBO'] });
+      const options = { ...sharedOptions, headless, ignoreDefaultArgs: ['-foreground'] };
+      const config = JSON.parse(Object.entries(options.env)
+        .filter(([key]) => /^CAMOU_CONFIG_\d+$/.test(key))
+        .sort(([a], [b]) => Number(a.split('_').pop()) - Number(b.split('_').pop()))
+        .map(([, value]) => value).join(''));
+      t.diagnostic(JSON.stringify({ headless, executable: options.executablePath,
+        generatedGeometry: Object.fromEntries(Object.entries(config)
+          .filter(([key]) => /^(window\.(inner|outer)(Width|Height)|screen\.(width|height|availWidth|availHeight)|document\.body\.client(Width|Height))$/.test(key))) }));
       context = await firefox.launchPersistentContext(root, { ...options, viewport: { width: 1280, height: 720 } });
       const primary = context.pages()[0];
       const sibling = await context.newPage();
@@ -71,15 +100,21 @@ for (const headless of [true, false]) {
       await observe(sibling);
       await sibling.locator('input').fill('unsaved sibling state');
       await clickObserved(sibling, '#interior');
+      t.diagnostic(JSON.stringify({ headless, initialGeometry: await geometry(primary) }));
 
       for (const [x, y] of [[0, 0], [100, 0], [1279, 0], [1279, 100], [1279, 719], [100, 719], [0, 719], [0, 100], [1, 1]]) {
         await bounded(() => primary.mouse.move(150, 125));
+        const beforeGeometry = await geometry(primary);
         const before = await primary.evaluate(() => window.nativeEvents.length);
         await bounded(() => primary.mouse.move(x, y));
         const events = await primary.evaluate(start => window.nativeEvents.slice(start), before);
-        assert(events.some(event => event.type === 'mousemove' && event.trusted &&
-          Math.abs(event.x - x) <= 1 && Math.abs(event.y - y) <= 1),
-        `Missing trusted move (${x},${y}): ${JSON.stringify(events)}`);
+        const delivered = events.some(event => event.type === 'mousemove' && event.trusted &&
+          Math.abs(event.x - x) <= 1 && Math.abs(event.y - y) <= 1);
+        if (!delivered) {
+          t.diagnostic(JSON.stringify({ headless, requested: [x, y], events,
+            beforeGeometry, afterGeometry: await geometry(primary) }));
+        }
+        assert(delivered, `Missing trusted move (${x},${y}): ${JSON.stringify(events)}`);
       }
       for (const [x, y] of [[100, 100], [100, 100], [-1, -1], [1280, 100], [100, 720], [50, 50]]) {
         await bounded(() => primary.mouse.move(x, y));

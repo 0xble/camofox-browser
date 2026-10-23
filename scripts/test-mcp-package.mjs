@@ -5,7 +5,7 @@
 // that accidentally reach outside the published package.
 
 import { execFile as execFileCallback } from 'node:child_process';
-import { access, mkdtemp, mkdir, rm } from 'node:fs/promises';
+import { access, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -22,9 +22,11 @@ try {
   const [{ filename }] = JSON.parse(stdout);
   tarball = join(MCP_DIR, filename);
 
+  // An ancestor package must not capture the empty consumer's installation.
+  await writeFile(join(testDir, 'package.json'), JSON.stringify({ name: 'mcp-package-test', private: true }));
   const installDir = join(testDir, 'install');
   await mkdir(installDir);
-  await execFile('npm', ['install', '--ignore-scripts', '--no-audit', '--no-fund', tarball], {
+  await execFile('npm', ['install', '--prefix', installDir, '--ignore-scripts', '--no-audit', '--no-fund', tarball], {
     cwd: installDir,
   });
 
