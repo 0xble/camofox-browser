@@ -57,7 +57,7 @@ import { normalizeBrowserKey } from './lib/browser-key.js';
 import { createPageWithSessionRecovery } from './lib/new-page-recovery.js';
 import { resolveUploadPaths } from './lib/upload-paths.js';
 import { acquirePageLease, hasActivePageLeases, isPageLeased, releasePageLease, setLeasedPage } from './lib/page-lease.js';
-import { createPageRegistry, findTabByPage, tabIdsForPage } from './lib/page-registry.js';
+import { createPageRegistry, findTabByPage, getOpenerTabId, tabIdsForPage } from './lib/page-registry.js';
 import { createReporter, createTabHealthTracker, collectResourceSnapshot, classifyProxyError, browserProcessTreeRssMb, browserProcessNameRssMb } from './lib/reporter.js';
 import { mountDocs } from './lib/openapi.js';
 import { initSentry, captureException as sentryCaptureException, setupExpressErrorHandler as setupSentryErrorHandler, flush as sentryFlush } from './lib/sentry.js';
@@ -7001,6 +7001,10 @@ app.get('/', (req, res) => {
  *                         type: string
  *                       listItemId:
  *                         type: string
+ *                       openerTabId:
+ *                         type: string
+ *                         nullable: true
+ *                         description: Current tab ID of the observed popup opener in this session. Null for independent pages or a closed, removed, or replaced opener. Tracks folded IDs, not replacement pages.
  */
 app.get('/tabs', async (req, res) => {
   try {
@@ -7019,7 +7023,8 @@ app.get('/tabs', async (req, res) => {
           tabId,
           url: tabState.page.url(),
           title: await tabState.page.title().catch(() => ''),
-          listItemId
+          listItemId,
+          openerTabId: getOpenerTabId(session, tabState),
         });
       }
     }

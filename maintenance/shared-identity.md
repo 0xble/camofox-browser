@@ -47,6 +47,10 @@ Existing legacy contexts are never silently replaced when a display reconnects.
 restart-required legacy session count, and failed-window count separately from
 server liveness. A missing display alone does not fail liveness.
 
+### Popup Lineage
+
+`GET /tabs` exposes `openerTabId` from an observed Playwright popup event and resolves it against the same session's registry. Keep this local client-integration adaptation until upstream provides equivalent metadata, session affinity, and stale-ID handling. The registry regression suite and `tests/e2e/popupLineage.test.js` own the behavioral proof. The related upstream popup report [jo-inc/camofox-browser#7742](https://github.com/jo-inc/camofox-browser/issues/7742) concerns viewport sizing, not lineage, and is not an equivalent replacement. No upstream contribution is included in this delivery.
+
 ### Native park verification
 
 Camoufox spoofs `browser.windows.get` geometry, so park and create acknowledgments must be backed by native bounds (`listNativeWindows` in `lib/park-display-launcher.js`). Windows are selected by the browser's owner PID, resolved from this server's process tree and the profile path, plus layer 0 and on-screen state. Never select by `kCGWindowName`. macOS omits other processes' window titles unless the TCC-responsible process holds Screen Recording. Under launchd, the server's node binary is its own responsible process, and the managed node had no grant. A 2026-10-13 probe showed this: with responsibility disclaimed, the managed node saw 0 of 16 window titles and `CGPreflightScreenCaptureAccess` returned false. Owner PID and bounds remained available. Readback failures are retried inside the same bounded loop and then reported per window after startup, without relaunching an established context. On first launch, an exhausted native readback sends `readyError` and fails attachment, so the fallback can close and relaunch the newly attempted context before caller tabs exist. Ordinary startup window-classification failures remain isolated per window, and command polling starts.
