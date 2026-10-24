@@ -42,6 +42,30 @@ describe('SharedIdentityManager', () => {
     expect(JSON.parse(await fs.readFile(cookieCheckpointPath(root, 'opaque-hermes-user'), 'utf8'))).toEqual(expect.objectContaining({ cleanShutdown: false }));
   });
 
+  test('retries acquisition after a failed checkpoint preparation without duplicating the profile owner', async () => {
+    const identity = 'preparation-retry';
+    const manager = new SharedIdentityManager({ identities: [identity], profileDir: root, logger: { warn: jest.fn() } });
+    const profile = manager.profileFor(identity);
+    await fs.writeFile(profile, 'blocking file');
+    const live = context();
+    const create = jest.fn(async () => live);
+
+    await expect(manager.open(identity, create)).rejects.toMatchObject({ code: 'EEXIST' });
+    expect(create).not.toHaveBeenCalled();
+    await fs.unlink(profile);
+
+    const [first, second] = await Promise.all([
+      manager.open(identity, create),
+      manager.open(identity, create),
+    ]);
+    expect(first).toBe(live);
+    expect(second).toBe(live);
+    expect(create).toHaveBeenCalledTimes(1);
+    expect(create).toHaveBeenCalledWith(profile);
+    expect(JSON.parse(await fs.readFile(cookieCheckpointPath(root, identity), 'utf8')))
+      .toEqual(expect.objectContaining({ cleanShutdown: false }));
+  });
+
   test('a crash-invalidated checkpoint is never restored, but a clean close creates the fresh successor', async () => {
     const first = context([{ name: 'session', value: 'fresh', domain: 'example.test', path: '/', expires: -1 }]);
     const manager = new SharedIdentityManager({ identities: ['opaque-hermes-user'], profileDir: root });
