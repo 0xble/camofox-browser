@@ -118,6 +118,32 @@ describe('timed-out tab operations', () => {
     }
   }, 30000);
 
+  test('blocked main thread reaches bounded tab_destroyed recovery while siblings remain usable', async () => {
+    const client = createClient(serverUrl);
+    const { tabId } = await client.createTab();
+    const { tabId: sibling } = await client.createTab();
+    const start = Date.now();
+    try {
+      // Bounded busy loop, unlike a never-resolving promise this blocks liveness.
+      await expect(client.evaluate(tabId,
+        '(() => { const end = Date.now() + 20000; while (Date.now() < end) {} })()',
+      )).rejects.toMatchObject({ status: 503, data: expect.objectContaining({ code: 'operation_timeout' }) });
+      await expect(client.evaluate(tabId, 'window.mustNotRun = true')).rejects.toMatchObject({
+        status: 503, data: expect.objectContaining({ code: 'tab_busy', recovery: 'retry' }),
+      });
+      await expect(client.evaluate(tabId, 'window.mustNotRun = true')).rejects.toMatchObject({
+        status: 410, data: expect.objectContaining({ code: 'tab_destroyed', recovery: 'create_new_tab', retryable: true }),
+      });
+      expect(Date.now() - start).toBeLessThan(15000);
+      await expect(client.getStats(tabId)).rejects.toMatchObject({ status: 410 });
+      expect((await client.evaluate(sibling, '42')).result).toBe(42);
+      const replacement = await client.createTab();
+      expect((await client.evaluate(replacement.tabId, '43')).result).toBe(43);
+    } finally {
+      await client.cleanup();
+    }
+  }, 45000);
+
   test('never-settling work refuses new actions while sibling tabs and explicit close remain available', async () => {
     const client = createClient(serverUrl);
     const { tabId } = await client.createTab();
@@ -129,6 +155,12 @@ describe('timed-out tab operations', () => {
       await expect(client.evaluate(tabId, 'window.newerMutation = true')).rejects.toMatchObject({
         status: 503, data: expect.objectContaining({ code: 'tab_busy', recovery: 'retry', retryable: true }),
       });
+      // Free main thread passes liveness, but must never unlock pending work.
+      for (let retry = 0; retry < 4; retry++) {
+        await expect(client.evaluate(tabId, 'window.newerMutation = true')).rejects.toMatchObject({
+          status: 503, data: expect.objectContaining({ code: 'tab_busy', recovery: 'retry' }),
+        });
+      }
       expect((await client.evaluate(sibling, '42')).result).toBe(42);
       await client.request('DELETE', `/tabs/${tabId}?userId=${client.userId}`);
       await expect(client.getStats(tabId)).rejects.toMatchObject({ status: 410 });
@@ -168,6 +200,9 @@ describe('timed-out tab operations', () => {
       expect((await client.evaluate(tabId, 'window.actionOrder.push("new"); window.actionOrder')).result).toEqual(['old', 'new']);
       await expect(handoff('human')).resolves.toMatchObject({ handoff: 'human', focused: true });
       await expect(client.evaluate(tabId, 'window.actionOrder.push("stale")')).rejects.toMatchObject({ status: 409 });
+      await expect(client.getSnapshot(tabId)).rejects.toMatchObject({
+        status: 409, data: expect.objectContaining({ code: 'tab_handed_off' }),
+      });
       await wait(100);
       await handoff('agent');
       expect((await client.evaluate(tabId, 'window.actionOrder')).result).toEqual(['old', 'new']);

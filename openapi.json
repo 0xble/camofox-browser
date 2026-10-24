@@ -976,7 +976,7 @@
           "Content"
         ],
         "summary": "Accessibility snapshot",
-        "description": "Returns accessibility tree with element refs. Supports pagination via offset.",
+        "description": "Returns accessibility tree with element refs. Supports pagination via offset. Uses the tab operation lock because proxy recovery can navigate, so human handoff refuses capture and timeouts use the tab liveness policy.",
         "parameters": [
           {
             "name": "tabId",
@@ -1066,6 +1066,26 @@
           },
           "404": {
             "description": "Tab not found.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "code=tab_handed_off. Return control to the agent before capturing a fresh snapshot.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "code=tab_destroyed, recovery=create_new_tab after repeated timeouts and a failed liveness probe.",
             "content": {
               "application/json": {
                 "schema": {

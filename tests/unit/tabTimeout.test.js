@@ -98,6 +98,39 @@ describe('tab timeout handling', () => {
     expect(state.destroyed).toHaveLength(0);
   });
 
+
+  test('concurrent retries do not duplicate a failed liveness probe or tab retirement', async () => {
+    const state = setup({ responsive: false });
+    let finish;
+    let probes = 0;
+    state.probeLiveness = () => { probes++; return new Promise(resolve => { finish = resolve; }); };
+    await handleTabTimeout({ tabId: 'tab-1', userId: 'user-1', ...state });
+    await handleTabTimeout({ tabId: 'tab-1', userId: 'user-1', ...state });
+    const recovering = handleTabTimeout({ tabId: 'tab-1', userId: 'user-1', ...state });
+    const concurrent = await handleTabTimeout({ tabId: 'tab-1', userId: 'user-1', ...state });
+    finish(false);
+    expect(await recovering).toMatchObject({ destroyed: true });
+    expect(concurrent).toMatchObject({ destroyed: false, reason: 'recovery_in_flight' });
+    expect(probes).toBe(1);
+    expect(state.destroyed).toHaveLength(1);
+  });
+
+  test.each(['human', 'settled'])('%s during a failed liveness probe preserves the tab', async change => {
+    const state = setup({ responsive: false });
+    let human = false, current = true;
+    state.isHumanControlled = () => human;
+    state.isTimeoutCurrent = () => current;
+    state.probeLiveness = async () => {
+      human = change === 'human';
+      current = change !== 'settled';
+      return false;
+    };
+    await handleTabTimeout({ tabId: 'tab-1', userId: 'user-1', ...state });
+    await handleTabTimeout({ tabId: 'tab-1', userId: 'user-1', ...state });
+    expect(await handleTabTimeout({ tabId: 'tab-1', userId: 'user-1', ...state })).toMatchObject({ destroyed: false });
+    expect(state.destroyed).toHaveLength(0);
+  });
+
   test('human-controlled tabs are never destroyed', async () => {
     const state = setup({ responsive: false, human: true });
 

@@ -51,29 +51,11 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
-          node --input-type=module - \
+          node clawhub-source/packages/clawhub/bin/clawdhub.js package publish \
             "$GITHUB_REPOSITORY@$GITHUB_SHA" \
             --site https://clawhub.ai \
             --registry https://clawhub.ai \
-            --dry-run --json --tags latest --source-ref "$GITHUB_REF" <<'NODE'
-          const entry = './clawhub-source/packages/clawhub/bin/clawdhub.js';
-          const lookup = `https://api.github.com/repos/${process.env.GITHUB_REPOSITORY}/commits/${encodeURIComponent(process.env.GITHUB_SHA)}`;
-          const fetch = globalThis.fetch;
-          // Observe the CLI's actual lookup, without another request or body/auth logging.
-          globalThis.fetch = async (input, init) => {
-            const response = await fetch(input, init);
-            if ((input instanceof Request ? input.url : String(input)) === lookup) {
-              console.log('GitHub source lookup', JSON.stringify({
-                status: response.status,
-                ...Object.fromEntries(['x-ratelimit-remaining', 'x-ratelimit-reset', 'retry-after', 'x-github-request-id']
-                  .map(name => [name, response.headers.get(name)])),
-              }));
-            }
-            return response;
-          };
-          process.argv.splice(1, 1, entry, 'package', 'publish');
-          await import(entry);
-          NODE
+            --dry-run --json --tags latest --source-ref "$GITHUB_REF"
 
       - name: Upload plugin inspector reports
         if: always()

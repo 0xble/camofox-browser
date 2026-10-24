@@ -84,8 +84,16 @@ regression passes against the same failure mode, then retire the local repair.
   browser promises settle. Queued and new actions, including human handoff,
   receive retryable `503 tab_busy` instead of overlapping abandoned work.
   Snapshot work uses the same boundary because proxy recovery can navigate.
-  Sibling tabs remain independent. Explicit tab close remains available for
-  work that never settles. A successful liveness probe does not clear busy state.
+  Snapshot capture is refused with `409 tab_handed_off` until control returns
+  to the agent. Snapshot queue/handler timeouts use the same timeout policy.
+  Sibling tabs remain independent. Settling refusals feed the existing 3-timeout
+  streak: a failed bounded liveness probe retires only that exact tab and returns
+  `410 tab_destroyed`, `recovery=create_new_tab`. Concurrent retries do not
+  duplicate probes or cleanup. Healthy, navigating, human-controlled, settled
+  or replacement targets are preserved. A successful liveness probe does not
+  clear busy state, so responsive work that never settles still needs explicit
+  tab close. Deferred lock release is one-shot, even for detached continuations
+  or a replaced tab.
 - **Surfaces:** `server.js` (`withTabLock`, `withTimeout`, snapshot),
   `lib/browser-errors.js`, `tests/unit/tabOperationSettling.test.js`,
   `tests/unit/timeoutContinuation.test.js`.
