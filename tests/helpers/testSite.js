@@ -311,13 +311,28 @@ function createTestApp() {
   });
 
   // Page with a direct file input for upload endpoint tests
+  // Camoufox evaluates through an isolated world. Record page-side File reads
+  // in the shared DOM rather than depending on page-defined window globals.
+  const uploadRecorder = `<output id="uploaded-files" data-changes="0"></output><script>
+    document.addEventListener('change', async event => {
+      if (!event.target.matches('input[type="file"]')) return;
+      const output = document.getElementById('uploaded-files');
+      output.dataset.changes = String(Number(output.dataset.changes) + 1);
+      const files = await Promise.all([...event.target.files].map(async file => ({
+        name: file.name, type: file.type, bytes: [...new Uint8Array(await file.arrayBuffer())],
+      })));
+      output.textContent = JSON.stringify(files);
+      if (parent !== window) parent.postMessage({ files, changes: output.dataset.changes }, '*');
+    });
+  </script>`;
+
   app.get('/upload', (req, res) => {
     res.send(`
       <!DOCTYPE html>
       <html><head><title>Upload Test</title></head>
       <body>
         <h1>Upload Test Page</h1>
-        <input type="file" id="fileInput" />
+        <input type="file" id="fileInput" hidden multiple />
         <output id="selected">No file selected</output>
         <script>
           document.getElementById('fileInput').addEventListener('change', (event) => {
@@ -325,8 +340,36 @@ function createTestApp() {
             document.getElementById('selected').textContent = file ? file.name : 'No file selected';
           });
         </script>
+        ${uploadRecorder}
       </body></html>
     `);
+  });
+
+  app.get('/upload/panel', (_req, res) => {
+    res.send(`<!DOCTYPE html><button id="trigger" onclick="setTimeout(() => {
+      const input = document.createElement('input'); input.type = 'file'; input.multiple = true;
+      input.hidden = true; document.body.append(input);
+    }, 100)">Attach files</button>${uploadRecorder}`);
+  });
+
+  app.get('/upload/iframe', (req, res) => {
+    const frameUrl = new URL('/upload/frame', 'http://127.0.0.1');
+    // A different loopback hostname exercises cross-origin frame selection.
+    frameUrl.port = String(req.socket.localPort);
+    res.send(`<!DOCTYPE html><iframe src="${frameUrl}"></iframe>
+      <output id="uploaded-files" data-changes="0"></output><script>
+      window.addEventListener('message', event => {
+        if (event.source !== document.querySelector('iframe').contentWindow || event.origin !== '${frameUrl.origin}') return;
+        const output = document.getElementById('uploaded-files');
+        output.dataset.changes = event.data.changes;
+        output.textContent = JSON.stringify(event.data.files);
+      });
+    </script>`);
+  });
+
+  app.get('/upload/frame', (_req, res) => {
+    res.send(`<!DOCTYPE html><button id="trigger" onclick="document.querySelector('input').click()">Attach files</button>
+      <input type="file" hidden multiple>${uploadRecorder}`);
   });
 
   app.get('/large-page', (req, res) => {
@@ -408,7 +451,7 @@ async function startTestSite(preferredPort = 0) {
   const app = createTestApp();
   
   return new Promise((resolve, reject) => {
-    server = app.listen(preferredPort, () => {
+    server = app.listen(preferredPort, '127.0.0.1', () => {
       port = server.address().port;
       console.log(`Test site running on port ${port}`);
       resolve(port);

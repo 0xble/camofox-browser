@@ -18,7 +18,7 @@ async function startServerWithApiKey(apiKey) {
   serverProcess = launchServer({
     pluginDir,
     port,
-    env: { ...cfg.serverEnv, CAMOFOX_API_KEY: apiKey, DEBUG_RESPONSES: 'false' },
+    env: { ...cfg.serverEnv, TMPDIR: process.env.TMPDIR, CAMOFOX_CRASH_REPORT_ENABLED: 'false', CAMOFOX_API_KEY: apiKey, DEBUG_RESPONSES: 'false' },
     log: { info: () => {}, error: (msg) => console.error(msg) },
   });
 
@@ -40,7 +40,7 @@ async function startServerWithoutApiKey() {
   const cfg = loadConfig();
   const pluginDir = path.join(__dirname, '../..');
 
-  const env = { ...cfg.serverEnv, DEBUG_RESPONSES: 'false' };
+  const env = { ...cfg.serverEnv, TMPDIR: process.env.TMPDIR, CAMOFOX_CRASH_REPORT_ENABLED: 'false', DEBUG_RESPONSES: 'false' };
   delete env.CAMOFOX_API_KEY;
 
   serverProcess = launchServer({

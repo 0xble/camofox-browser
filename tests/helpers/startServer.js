@@ -43,7 +43,7 @@ async function startServer(port = 0, extraEnv = {}) {
     // launch on Linux (xvfb-run in CI) only works after the browser pre-warm
     // has started its own Xvfb and mutated the server's process.env, which is
     // a startup race; DISPLAY alone fails X authorization.
-    env: { ...cfg.serverEnv, DEBUG_RESPONSES: 'false', ...(DISPLAY ? { DISPLAY } : {}), ...(XAUTHORITY ? { XAUTHORITY } : {}), ...extraEnv },
+    env: { ...cfg.serverEnv, TMPDIR: process.env.TMPDIR, CAMOFOX_CRASH_REPORT_ENABLED: 'false', DEBUG_RESPONSES: 'false', ...(DISPLAY ? { DISPLAY } : {}), ...(XAUTHORITY ? { XAUTHORITY } : {}), ...extraEnv },
     log,
   });
 
