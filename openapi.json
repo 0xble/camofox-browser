@@ -1260,8 +1260,8 @@
         "tags": [
           "Interaction"
         ],
-        "summary": "Attach a file to an upload control",
-        "description": "Attaches files from the configured upload directory without going through the native OS file dialog. Set CAMOFOX_UPLOADS_DIR to a directory that contains the files (default: ~/.camofox/uploads). Two strategies are tried in order: (1) if an <input type=\"file\"> is already present, call Playwright setInputFiles on it directly (works for hidden inputs); (2) otherwise arm a filechooser listener, activate the trigger element (ref or selector) via keyboard (focus + Enter) then a forced click as fallback, and call setFiles on the resulting chooser. Each path must be an absolute path that resolves inside the configured upload directory.\n",
+        "summary": "Attach files to an upload control",
+        "description": "Supply exactly one of path (server-local files within CAMOFOX_UPLOADS_DIR, default ~/.camofox/uploads) or files (inline bytes). Inline files use canonical base64, allow empty content and Unicode basenames, and have a 20MiB aggregate decoded limit. The upload JSON body limit is 28MiB. Inline responses return filenames and upload events/logs contain only name, size and mimeType metadata, never contents or fabricated paths. Legacy path uploads retain their path responses/events and have no new decoded-byte limit. Attachment strategies: (1) if an <input type=\"file\"> is already present, call Playwright setInputFiles on it directly (works for hidden inputs); (2) otherwise arm a filechooser listener, activate the trigger element (ref or selector) via keyboard (focus + Enter) then a forced click as fallback, and prefer a newly mounted panel input, otherwise setFiles on the chooser. For inline files a named trigger is refused if a top-level file input already exists. An inline attachment failure is not retried through another strategy because the first attachment may have taken effect.\n",
         "parameters": [
           {
             "name": "tabId",
@@ -1279,8 +1279,29 @@
               "schema": {
                 "type": "object",
                 "required": [
-                  "userId",
-                  "path"
+                  "userId"
+                ],
+                "oneOf": [
+                  {
+                    "required": [
+                      "path"
+                    ],
+                    "not": {
+                      "required": [
+                        "files"
+                      ]
+                    }
+                  },
+                  {
+                    "required": [
+                      "files"
+                    ],
+                    "not": {
+                      "required": [
+                        "path"
+                      ]
+                    }
+                  }
                 ],
                 "properties": {
                   "userId": {
@@ -1299,6 +1320,33 @@
                         }
                       }
                     ]
+                  },
+                  "files": {
+                    "type": "array",
+                    "minItems": 1,
+                    "description": "Inline files, at most 20MiB decoded in aggregate. Names cannot be dot, dotdot, or contain separators or control characters.",
+                    "items": {
+                      "type": "object",
+                      "required": [
+                        "name",
+                        "mimeType",
+                        "dataBase64"
+                      ],
+                      "properties": {
+                        "name": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "mimeType": {
+                          "type": "string"
+                        },
+                        "dataBase64": {
+                          "type": "string",
+                          "format": "byte",
+                          "description": "Canonical padded base64. Empty string represents an empty file."
+                        }
+                      }
+                    }
                   },
                   "ref": {
                     "type": "string",
@@ -1320,13 +1368,16 @@
         },
         "responses": {
           "200": {
-            "description": "File(s) attached."
+            "description": "File(s) attached. attached contains canonical paths for path mode or supplied filenames for inline mode."
           },
           "400": {
-            "description": "Bad request (missing path/userId; non-regular file; or a path that is missing or outside the configured upload directory)."
+            "description": "Invalid path/files request, malformed base64 or filename, or inline trigger conflicts with a top-level input."
           },
           "404": {
             "description": "Tab not found."
+          },
+          "413": {
+            "description": "Inline decoded files exceed 20MiB, or JSON exceeds 28MiB."
           }
         }
       }

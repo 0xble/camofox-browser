@@ -56,6 +56,7 @@ import { visibleSelectorCandidate } from './lib/visible-selector.js';
 import { normalizeBrowserKey } from './lib/browser-key.js';
 import { createPageWithSessionRecovery } from './lib/new-page-recovery.js';
 import { resolveUploadPaths } from './lib/upload-paths.js';
+import { normalizeUploadFiles } from './lib/upload-files.js';
 import { acquirePageLease, hasActivePageLeases, isPageLeased, releasePageLease, setLeasedPage } from './lib/page-lease.js';
 import { createPageRegistry, findTabByPage, getOpenerTabId, tabIdsForPage } from './lib/page-registry.js';
 import { createReporter, createTabHealthTracker, collectResourceSnapshot, classifyProxyError, browserProcessTreeRssMb, browserProcessNameRssMb } from './lib/reporter.js';
@@ -181,7 +182,7 @@ if (CONFIG.sharedIdentityNames.length && !await refreshSharedParkDisplay())
 const app = express();
 const globalJsonParser = express.json({ limit: '100kb' });
 app.use((req, res, next) => {
-  if (req.method === 'POST' && /^\/tabs\/[^/]+\/evaluate$/.test(req.path)) {
+  if (req.method === 'POST' && (/^\/tabs\/[^/]+\/evaluate$/.test(req.path) || /^\/tabs\/[^/]+\/upload\/?$/.test(req.path))) {
     return next();
   }
   return globalJsonParser(req, res, next);
@@ -4776,24 +4777,43 @@ const UPLOAD_PANEL_POLL_MS = 500; // interval between panel-input polls
 const UPLOAD_REFS_TIMEOUT_MS = 4000; // refreshTabRefs() before/after the upload
 const UPLOAD_SETTLE_MS = 1500; // let the page process the upload / render a preview
 
+// Authentication and shared-identity tracking run before this larger parser.
+const uploadJsonParser = express.json({ limit: '28mb' });
+function parseUploadBody(req, res, next) {
+  uploadJsonParser(req, res, error => {
+    if (!error) return next();
+    // JSON parser errors can quote request contents. Do not pass them to
+    // Express's default error logger or expose inline bytes in the response.
+    res.status(error.status || 400).json({
+      error: error.type === 'entity.too.large' ? 'Upload JSON exceeds the 28MiB limit' : 'Invalid upload JSON',
+    });
+  });
+}
+
 // Upload (file attach via filechooser / setInputFiles)
 /**
  * @openapi
  * /tabs/{tabId}/upload:
  *   post:
  *     tags: [Interaction]
- *     summary: Attach a file to an upload control
+ *     summary: Attach files to an upload control
  *     description: >
- *       Attaches files from the configured upload directory without going through
- *       the native OS file dialog. Set CAMOFOX_UPLOADS_DIR to a directory that
- *       contains the files (default: ~/.camofox/uploads). Two strategies are
- *       tried in order: (1) if an
+ *       Supply exactly one of path (server-local files within CAMOFOX_UPLOADS_DIR,
+ *       default ~/.camofox/uploads) or files (inline bytes). Inline files use
+ *       canonical base64, allow empty content and Unicode basenames, and have a
+ *       20MiB aggregate decoded limit. The upload JSON body limit is 28MiB.
+ *       Inline responses return filenames and upload events/logs contain only
+ *       name, size and mimeType metadata, never contents or fabricated paths.
+ *       Legacy path uploads retain their path responses/events and have no new
+ *       decoded-byte limit. Attachment strategies: (1) if an
  *       <input type="file"> is already present, call Playwright setInputFiles
  *       on it directly (works for hidden inputs); (2) otherwise arm a
  *       filechooser listener, activate the trigger element (ref or selector)
- *       via keyboard (focus + Enter) then a forced click as fallback, and call
- *       setFiles on the resulting chooser. Each path must be an absolute path
- *       that resolves inside the configured upload directory.
+ *       via keyboard (focus + Enter) then a forced click as fallback, and
+ *       prefer a newly mounted panel input, otherwise setFiles on the chooser.
+ *       For inline files a named trigger is refused if a top-level file input
+ *       already exists. An inline attachment failure is not retried through
+ *       another strategy because the first attachment may have taken effect.
  *     parameters:
  *       - name: tabId
  *         in: path
@@ -4805,7 +4825,12 @@ const UPLOAD_SETTLE_MS = 1500; // let the page process the upload / render a pre
  *         application/json:
  *           schema:
  *             type: object
- *             required: [userId, path]
+ *             required: [userId]
+ *             oneOf:
+ *               - required: [path]
+ *                 not: { required: [files] }
+ *               - required: [files]
+ *                 not: { required: [path] }
  *             properties:
  *               userId:
  *                 type: string
@@ -4816,6 +4841,20 @@ const UPLOAD_SETTLE_MS = 1500; // let the page process the upload / render a pre
  *                   - type: array
  *                     items:
  *                       type: string
+ *               files:
+ *                 type: array
+ *                 minItems: 1
+ *                 description: "Inline files, at most 20MiB decoded in aggregate. Names cannot be dot, dotdot, or contain separators or control characters."
+ *                 items:
+ *                   type: object
+ *                   required: [name, mimeType, dataBase64]
+ *                   properties:
+ *                     name: { type: string, minLength: 1 }
+ *                     mimeType: { type: string }
+ *                     dataBase64:
+ *                       type: string
+ *                       format: byte
+ *                       description: "Canonical padded base64. Empty string represents an empty file."
  *               ref:
  *                 type: string
  *                 description: "Trigger element ref (e.g. e36). Optional when an input[type=file] already exists."
@@ -4828,43 +4867,60 @@ const UPLOAD_SETTLE_MS = 1500; // let the page process the upload / render a pre
  *                 description: "Overall budget in ms to wait for an upload UI (in-app panel input or native file chooser) to appear after the trigger is activated. Ignored values (non-numeric or <= 0) fall back to the default."
  *     responses:
  *       200:
- *         description: "File(s) attached."
+ *         description: "File(s) attached. attached contains canonical paths for path mode or supplied filenames for inline mode."
  *       400:
- *         description: "Bad request (missing path/userId; non-regular file; or a path that is missing or outside the configured upload directory)."
+ *         description: "Invalid path/files request, malformed base64 or filename, or inline trigger conflicts with a top-level input."
+ *       413:
+ *         description: "Inline decoded files exceed 20MiB, or JSON exceeds 28MiB."
  *       404:
  *         description: "Tab not found."
  */
-app.post('/tabs/:tabId/upload', async (req, res) => {
+app.post('/tabs/:tabId/upload', parseUploadBody, async (req, res) => {
   const tabId = req.params.tabId;
   try {
     const { userId, ref, selector } = req.body;
-    const { path: filePath } = req.body;
+    const { path: filePath, files } = req.body;
+    const inline = Object.hasOwn(req.body, 'files');
     const uploadTimeout = Number.isFinite(req.body.timeout) && req.body.timeout > 0
       ? req.body.timeout
       : UPLOAD_UI_TIMEOUT_MS;
     if (!userId) return res.status(400).json({ error: 'userId required' });
-    if (!filePath) return res.status(400).json({ error: 'path required (container-side file path)' });
-
-    const paths = await resolveUploadPaths({ uploadsDir: CONFIG.uploadsDir, filePaths: Array.isArray(filePath) ? filePath : [filePath] });
+    if (inline === Object.hasOwn(req.body, 'path')) {
+      return res.status(400).json({ error: 'Provide exactly one of path or files' });
+    }
+    if (!inline && !filePath) return res.status(400).json({ error: 'path required (container-side file path)' });
 
     const session = sessions.get(normalizeUserId(userId));
     const found = session && findTab(session, tabId);
     if (!found) return tabNotFoundResponse(res, req.params.tabId || req.body?.tabId);
     session.lastAccess = Date.now();
     const { tabState } = found;
+    const payload = inline
+      ? normalizeUploadFiles(files)
+      : await resolveUploadPaths({ uploadsDir: CONFIG.uploadsDir, filePaths: Array.isArray(filePath) ? filePath : [filePath] });
+    const attached = inline ? payload.map(file => file.name) : payload;
+    const uploadDetails = inline
+      ? { files: payload.map(({ name, mimeType, buffer }) => ({ name, size: buffer.length, mimeType })) }
+      : { paths: payload };
     tabState.toolCalls++; tabState.consecutiveFailures = 0;
 
     const result = await withUserLimit(userId, () => withTabLock(tabId, async () => {
       const directInput = tabState.page.locator('input[type="file"]').first();
       let attachedVia = null;
+      if (inline && (ref || selector) && await directInput.count() > 0) {
+        throw Object.assign(new Error('A top-level input[type=file] would take this upload. Omit the trigger to use it.'), { statusCode: 400 });
+      }
 
       const trySetExistingInput = async () => {
         try {
           if (await directInput.count() > 0) {
-            await directInput.setInputFiles(paths, { timeout: UPLOAD_INPUT_TIMEOUT_MS });
+            await directInput.setInputFiles(payload, { timeout: UPLOAD_INPUT_TIMEOUT_MS });
             return true;
           }
         } catch (e) {
+          // Attachment may have taken effect before Playwright timed out.
+          // Never replay inline bytes through another strategy.
+          if (inline) throw e;
           log('info', 'upload: setInputFiles on existing input failed', { error: e.message });
         }
         return false;
@@ -4882,8 +4938,8 @@ app.post('/tabs/:tabId/upload', async (req, res) => {
       //   (b) the trigger opens an in-app upload panel that mounts a hidden
       //       <input type=file> a beat later          -> setInputFiles on it.
       // LinkedIn A/B-tests both behaviors for the same "Photo" control, so we
-      // arm the filechooser listener BEFORE clicking and then race it against
-      // polling for a freshly-mounted input. Whichever resolves first wins.
+      // arm the filechooser listener BEFORE clicking, prefer a freshly mounted
+      // top-level panel input, then fall back to the chooser if no panel appears.
       if (!attachedVia) {
         let locator;
         if (ref) {
@@ -4937,9 +4993,10 @@ app.post('/tabs/:tabId/upload', async (req, res) => {
           const fc = await fcPromise;
           if (fc) {
             try {
-              await fc.setFiles(paths);
+              await fc.setFiles(payload);
               attachedVia = 'filechooser';
             } catch (e) {
+              if (inline) throw e;
               log('info', 'upload: setFiles on filechooser failed', { error: e.message });
             }
           }
@@ -4967,11 +5024,11 @@ app.post('/tabs/:tabId/upload', async (req, res) => {
         tabState.refs = await refreshTabRefs(tabState, { reason: 'post_upload', timeoutMs: UPLOAD_REFS_TIMEOUT_MS });
       } catch (e) { tabState.refs = new Map(); }
 
-      return { ok: true, attached: paths, via: attachedVia, refsAvailable: tabState.refs.size > 0 };
+      return { ok: true, attached, via: attachedVia, refsAvailable: tabState.refs.size > 0 };
     }));
 
-    log('info', 'uploaded', { reqId: req.reqId, tabId, attached: paths, via: result.via });
-    pluginEvents.emit('tab:upload', { userId, tabId, paths });
+    log('info', 'uploaded', { reqId: req.reqId, tabId, ...(inline ? uploadDetails : { attached }), via: result.via });
+    pluginEvents.emit('tab:upload', { userId, tabId, ...uploadDetails });
     res.json(result);
   } catch (err) {
     log('error', 'upload failed', { reqId: req.reqId, tabId, error: err.message });

@@ -35,6 +35,7 @@ together. Preserve these invariants when applying the shared adoption rules belo
 | CAMOFOX-004 | Working macOS native input and cancellation-safe creation without cross-task tab loss. | [Page creation recovery](maintenance/page-creation-recovery.md) |
 | CAMOFOX-005 | Pinned, checksummed per-identity extensions installed into persistent profiles; human-installed extensions untouched. | [Profile extensions](maintenance/profile-extensions.md) |
 | CAMOFOX-006 | One bounded teardown per session close, so persistence checkpoints before the context closes and a hung page cannot keep a session registered; idle tabs close in live sessions. | [Runtime reliability](maintenance/runtime-reliability.md) |
+| CAMOFOX-007 | Inline bytes share the existing upload route without changing legacy paths, global parser limits, or replaying ambiguous attachments. | [Inline upload compatibility](maintenance/inline-uploads.md) |
 
 ## Update
 

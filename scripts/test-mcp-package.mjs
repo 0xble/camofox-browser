@@ -5,7 +5,7 @@
 // that accidentally reach outside the published package.
 
 import { execFile as execFileCallback } from 'node:child_process';
-import { access, mkdtemp, mkdir, rm } from 'node:fs/promises';
+import { access, mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -24,7 +24,8 @@ try {
 
   const installDir = join(testDir, 'install');
   await mkdir(installDir);
-  // cwd alone allows npm to select an ancestor project as its install prefix.
+  // Keep the package boundary and npm prefix inside this temporary fixture.
+  await writeFile(join(installDir, 'package.json'), JSON.stringify({ private: true }));
   await execFile('npm', ['install', '--prefix', installDir, '--ignore-scripts', '--no-audit', '--no-fund', tarball], {
     cwd: installDir,
   });

@@ -47,7 +47,23 @@ export default async function globalSetup() {
   const serverProcess = launchServer({
     pluginDir,
     port: serverPort,
-    env: { ...cfg.serverEnv, CAMOFOX_UPLOADS_DIR: uploadsDir, DEBUG_RESPONSES: 'false', DISPLAY, ...(XAUTHORITY ? { XAUTHORITY } : {}) },
+    // Do not inherit authenticated identities, profile roots, proxies or keys.
+    // Only the installed browser binary/cache is reused from the host.
+    env: {
+      PATH: cfg.serverEnv.PATH,
+      HOME: uploadsTempDir,
+      TMPDIR: uploadsTempDir,
+      CAMOUFOX_INSTALL_DIR: process.env.CAMOUFOX_INSTALL_DIR || cfg.camoufoxCacheDir,
+      ...(cfg.camoufoxExecutablePath ? { CAMOUFOX_EXECUTABLE_PATH: cfg.camoufoxExecutablePath } : {}),
+      CAMOFOX_PROFILE_DIR: path.join(uploadsTempDir, 'profiles'),
+      CAMOFOX_SHARED_PROFILE_DIR: path.join(uploadsTempDir, 'shared-profiles'),
+      CAMOFOX_COOKIES_DIR: path.join(uploadsTempDir, 'cookies'),
+      CAMOFOX_TRACES_DIR: path.join(uploadsTempDir, 'traces'),
+      CAMOFOX_BIND_HOST: '127.0.0.1',
+      CAMOFOX_CRASH_REPORT_ENABLED: 'false',
+      CAMOFOX_UPLOADS_DIR: uploadsDir,
+      DEBUG_RESPONSES: 'false', DISPLAY, ...(XAUTHORITY ? { XAUTHORITY } : {}),
+    },
     log,
   });
 
