@@ -11,6 +11,22 @@ afterEach(() => {
 });
 
 describe('loadConfig', () => {
+  test.each(['TMPDIR', 'CAMOUFOX_INSTALL_DIR'])('forwards the configured %s to server subprocesses', (key) => {
+    process.env[key] = path.join(os.tmpdir(), `camofox-config-${key.toLowerCase()}`);
+
+    expect(loadConfig().serverEnv[key]).toBe(process.env[key]);
+  });
+
+  test('leaves subprocess runtime directories unset when none are configured', () => {
+    delete process.env.TMPDIR;
+    delete process.env.CAMOUFOX_INSTALL_DIR;
+
+    const { serverEnv } = loadConfig();
+
+    expect(serverEnv.TMPDIR).toBeUndefined();
+    expect(serverEnv.CAMOUFOX_INSTALL_DIR).toBeUndefined();
+  });
+
   test('reads the optional API bind host and forwards it to server subprocesses', () => {
     process.env.CAMOFOX_BIND_HOST = '127.0.0.1';
 
