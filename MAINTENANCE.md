@@ -72,8 +72,11 @@ Installation, deployment, and runtime activation require separate authorization.
 
 ## Verify
 
-Inspect the fork-only diff and retain the verification evidence above. Immediately
-before `Updated` or `Already current`, fetch upstream again and require
+Inspect the fork-only diff and retain the verification evidence above. MCP
+packaging verification must install the actual tarball under an explicit temporary
+npm prefix, preserving the installed-bin and protocol assertions without changing
+an ancestor project. Immediately before `Updated` or `Already current`, fetch
+upstream again and require
 `git rev-list --left-right --count upstream/<live-default>...master` to report zero
 on the left (upstream-only), with the exact fetched upstream SHA recorded. If it
 moved, reconcile and reverify or report `Blocked`. Require published `origin/master`

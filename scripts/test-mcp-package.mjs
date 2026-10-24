@@ -24,7 +24,8 @@ try {
 
   const installDir = join(testDir, 'install');
   await mkdir(installDir);
-  await execFile('npm', ['install', '--ignore-scripts', '--no-audit', '--no-fund', tarball], {
+  // cwd alone allows npm to select an ancestor project as its install prefix.
+  await execFile('npm', ['install', '--prefix', installDir, '--ignore-scripts', '--no-audit', '--no-fund', tarball], {
     cwd: installDir,
   });
 
