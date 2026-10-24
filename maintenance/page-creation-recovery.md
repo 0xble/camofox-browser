@@ -17,7 +17,10 @@ Compare both native launch paths and shared page-creation recovery with upstream
   retain humanization. Shared page-creation failures never destroy other tasks'
   identity tabs. Request deadlines fence late continuations and close late pages.
 - **Surfaces:** `server.js`, `lib/new-page-recovery.js`, `lib/request-deadline.js`,
-  `lib/browser-errors.js`, `openapi.json`.
+  `lib/browser-errors.js`, `openapi.json`. The separate
+  [official engine pin and native-edge regression](native-input-engine.md)
+  covers process-wide renderer-ack stalls. Keep macOS humanization disabled
+  until that behavior has its own acceptance evidence.
 - **Upstream issue/PR:** None after bounded searches for new-page and mouse
   timeouts on 2026-09-15. Upstream master `79d425be2674` still has the same
   destructive new-page recovery helper. This is an urgent scoped repair, not an
