@@ -681,6 +681,9 @@
           },
           "409": {
             "description": "Tab is not a shared identity tab or is no longer available."
+          },
+          "503": {
+            "description": "Retryable tab_busy while a previous operation is still settling. No control transfer occurred."
           }
         }
       }
@@ -973,7 +976,7 @@
           "Content"
         ],
         "summary": "Accessibility snapshot",
-        "description": "Returns accessibility tree with element refs. Supports pagination via offset.",
+        "description": "Returns accessibility tree with element refs. Supports pagination via offset. Uses the tab operation lock because proxy recovery can navigate, so human handoff refuses capture and timeouts use the tab liveness policy.",
         "parameters": [
           {
             "name": "tabId",
@@ -1071,8 +1074,28 @@
               }
             }
           },
+          "409": {
+            "description": "code=tab_handed_off. Return control to the agent before capturing a fresh snapshot.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "code=tab_destroyed, recovery=create_new_tab after repeated timeouts and a failed liveness probe.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
           "503": {
-            "description": "Retryable. code=refs_unavailable when the page could not be captured and the previous refs no longer resolve.",
+            "description": "Retryable. code=refs_unavailable when the page could not be captured and the previous refs no longer resolve. code=tab_busy while a previous operation is still settling.",
             "content": {
               "application/json": {
                 "schema": {

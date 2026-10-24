@@ -48,6 +48,8 @@ jobs:
           node clawhub-source/packages/clawhub/bin/clawdhub.js package validate . --out "$RUNNER_TEMP/plugin-inspector"
 
       - name: Dry-run package publish with Node.js
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           node clawhub-source/packages/clawhub/bin/clawdhub.js package publish \
             "$GITHUB_REPOSITORY@$GITHUB_SHA" \
@@ -112,6 +114,8 @@ jobs:
           echo "CLAWHUB_CONFIG_PATH=$RUNNER_TEMP/clawhub-config.json" >> "$GITHUB_ENV"
 
       - name: Publish package with Node.js
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           node clawhub-source/packages/clawhub/bin/clawdhub.js package publish \
             "$GITHUB_REPOSITORY@$GITHUB_SHA" \

@@ -5,6 +5,7 @@ import express from 'express';
 import crypto from 'crypto';
 import fs from 'fs';
 import os from 'os';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { expandMacro } from './lib/macros.js';
 import { getSearchFallbacks } from './lib/search-fallbacks.js';
 import { hasGoogleOrganicResults } from './lib/google-serp.js';
@@ -656,9 +657,13 @@ class TabLock {
   constructor() {
     this.queue = [];
     this.active = false;
+    this.settling = false;
+    this.retired = false;
   }
 
   acquire(timeoutMs) {
+    if (this.retired) return Promise.reject(tabDestroyedError(new Error('Tab destroyed')));
+    if (this.settling) return Promise.reject(tabBusyError());
     return new Promise((resolve, reject) => {
       const entry = { resolve, reject, timer: null };
       entry.timer = setTimeout(() => {
@@ -690,10 +695,15 @@ class TabLock {
   }
 
   drain() {
+    this.retired = true;
     this.active = true;
+    this.rejectQueued(tabDestroyedError(new Error('Tab destroyed')));
+  }
+
+  rejectQueued(error) {
     for (const entry of this.queue) {
       clearTimeout(entry.timer);
-      entry.reject(new Error('Tab destroyed'));
+      entry.reject(error);
     }
     this.queue = [];
     refreshTabLockQueueDepth();
@@ -703,6 +713,17 @@ class TabLock {
 // Per-tab locks to serialize operations on the same tab
 const tabLocks = new Map(); // tabId -> TabLock
 const humanControlledTabs = new Set();
+const tabOperationContext = new AsyncLocalStorage();
+
+function tabBusyError() {
+  return Object.assign(new Error('Tab is busy settling a previous operation. Retry after it settles, or close this tab.'), {
+    code: 'tab_busy', statusCode: 503, retryable: true, recovery: 'retry',
+  });
+}
+
+function tabDestroyedError(error) {
+  return Object.assign(error, { code: 'tab_destroyed', statusCode: 410, retryable: true, recovery: 'create_new_tab' });
+}
 
 function getTabLock(tabId) {
   if (!tabLocks.has(tabId)) tabLocks.set(tabId, new TabLock());
@@ -711,65 +732,102 @@ function getTabLock(tabId) {
 
 // Timeout is INSIDE the lock so each operation gets its full budget
 // regardless of how long it waited in the queue. A timed-out operation is a
-// recoverable failure: the tab is retained unless repeated timeouts and a
-// failed liveness probe prove that the page is actually stuck.
+// recoverable failure, not cancellation. Keep the tab unavailable until both
+// the route continuation and any nested timed-out browser calls have settled.
 // Timeouts observed while a navigation holds the lock never count toward the
 // unresponsive streak or trigger the liveness probe.
 async function withTabLock(tabId, operation, timeoutMs = HANDLER_TIMEOUT_MS, { allowHumanControl = false, navigation = false } = {}) {
   const lock = getTabLock(tabId);
+  const timeoutOwner = findTabOwner(tabId);
   try {
     await lock.acquire(TAB_LOCK_TIMEOUT_MS);
   } catch (err) {
-    if (isTabLockQueueTimeout(err)) await handleTimedOutTab(tabId);
+    // Refusing abandoned work must not bypass the existing stuck-tab policy.
+    if (isTabLockQueueTimeout(err) || err?.code === 'tab_busy') {
+      const result = await handleTimedOutTab(tabId, timeoutOwner, err?.code === 'tab_busy' ? lock : null);
+      if (result?.destroyed || result?.reason === 'tab_missing') throw tabDestroyedError(err);
+    }
     throw err;
   }
 
   lock.navigating = navigation;
+  const pending = new Set();
   try {
+    const currentOwner = findTabOwner(tabId);
+    if (lock.retired || tabLocks.get(tabId) !== lock ||
+        currentOwner?.tabState !== timeoutOwner?.tabState || currentOwner?.session !== timeoutOwner?.session) {
+      throw tabDestroyedError(new Error('Tab destroyed or replaced'));
+    }
     if (humanControlledTabs.has(tabId) && !allowHumanControl) {
       throw Object.assign(new Error('Tab is handed off to a human'), { statusCode: 409, code: 'tab_handed_off' });
     }
-    const result = await withTimeout(operation(), timeoutMs, 'action', 'tab_lock_timeout');
+    const result = await tabOperationContext.run(pending, () =>
+      withTimeout(Promise.resolve().then(operation), timeoutMs, 'action', 'tab_lock_timeout'));
     const owner = findTabOwner(tabId);
-    if (owner) owner.tabState.consecutiveTimeouts = 0;
+    if (owner && owner.tabState === timeoutOwner?.tabState && owner.session === timeoutOwner?.session) owner.tabState.consecutiveTimeouts = 0;
     return result;
   } catch (err) {
     // The timed-out operation no longer counts as in-flight navigation, so a
     // navigation that itself exceeds its budget still feeds the streak.
     lock.navigating = false;
     if (err?.code === 'tab_lock_timeout') {
-      const timeoutResult = await handleTimedOutTab(tabId);
+      const timeoutResult = await handleTimedOutTab(tabId, timeoutOwner);
       // tab_missing means a concurrent timeout or close already removed the
       // tab while this operation held the lock, so it is gone either way.
       if (timeoutResult?.destroyed || timeoutResult?.reason === 'tab_missing') {
-        throw Object.assign(err, {
-          code: 'tab_destroyed',
-          statusCode: 410,
-          retryable: true,
-          recovery: 'create_new_tab',
-        });
+        throw tabDestroyedError(err);
       }
-      throw Object.assign(err, {
+      Object.assign(err, {
         code: 'operation_timeout',
         statusCode: 503,
         retryable: true,
         recovery: 'retry',
       });
     }
+    if (pending.size && err?.message) err.message += ' Work may still be running. This tab remains busy until it settles.';
     throw err;
   } finally {
-    lock.navigating = false;
-    lock.release();
+    if (pending.size) {
+      lock.settling = true;
+      lock.rejectQueued(tabBusyError());
+      pending.release = () => {
+        if (lock.retired || tabLocks.get(tabId) !== lock) return;
+        lock.settling = false;
+        lock.navigating = false;
+        lock.release();
+      };
+    } else {
+      lock.navigating = false;
+      if (!lock.retired && tabLocks.get(tabId) === lock) lock.release();
+    }
   }
 }
 
-function withTimeout(promise, ms, label, timeoutCode = null) {
-  return Promise.race([
-    promise,
-    new Promise((_, reject) =>
-      setTimeout(() => reject(Object.assign(new Error(`${label} timed out after ${ms}ms`), timeoutCode ? { code: timeoutCode } : {})), ms)
-    )
-  ]);
+async function withTimeout(promise, ms, label, timeoutCode = null) {
+  const pending = tabOperationContext.getStore();
+  const work = Promise.resolve(promise);
+  if (pending) {
+    pending.add(work);
+    const settled = () => {
+      if (pending.delete(work) && !pending.size) {
+        const release = pending.release;
+        pending.release = null;
+        release?.();
+      }
+    };
+    work.then(settled, settled);
+  }
+  let timer;
+  try {
+    return await Promise.race([
+      work,
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(Object.assign(new Error(`${label} timed out after ${ms}ms`), timeoutCode ? { code: timeoutCode } : {})), ms);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 function findTabOwner(tabId) {
@@ -780,9 +838,16 @@ function findTabOwner(tabId) {
   return null;
 }
 
-async function handleTimedOutTab(tabId) {
+async function handleTimedOutTab(tabId, expectedOwner = findTabOwner(tabId), settlingLock = null) {
   const owner = findTabOwner(tabId);
   if (!owner) return { handled: false, destroyed: false, reason: 'tab_missing' };
+  if (owner.tabState !== expectedOwner?.tabState || owner.session !== expectedOwner?.session) {
+    return { handled: false, destroyed: false, reason: 'tab_changed' };
+  }
+  // A refusal can resume after the abandoned operation has already settled.
+  // Recover only against the refused lock while it is still settling.
+  const lock = settlingLock || tabLocks.get(tabId);
+  const settling = Boolean(settlingLock || lock?.settling);
   return handleTabTimeout({
     tabId,
     userId: owner.userId,
@@ -792,6 +857,7 @@ async function handleTimedOutTab(tabId) {
     },
     isHumanControlled: currentTabId => humanControlledTabs.has(currentTabId),
     isNavigationInFlight: currentTabId => Boolean(tabLocks.get(currentTabId)?.navigating),
+    isTimeoutCurrent: () => !settling || (tabLocks.get(tabId) === lock && !lock.retired && lock.settling),
     probeLiveness: page => withTimeout(page.evaluate(() => 1), TAB_LIVENESS_TIMEOUT_MS, 'tab liveness').then(() => true),
     destroyTab: destroyUnresponsiveTab,
     maxConsecutiveTimeouts: MAX_CONSECUTIVE_TIMEOUTS,
@@ -1972,6 +2038,11 @@ async function destroyUnresponsiveTab(session, tabId, reason, userId) {
   const found = session && findTab(session, tabId);
   if (!found) return false;
   const { tabState, group, listItemId } = found;
+  const lock = tabLocks.get(tabId);
+  // Closing the page may settle old work before cleanup finishes. Never let
+  // that continuation reopen this retiring lock to a newer action or handoff.
+  lock?.drain();
+  let removed = false;
   log('warn', 'destroying unresponsive tab', { tabId, listItemId, toolCalls: tabState.toolCalls, reason });
   try {
     await safePageClose(tabState.page);
@@ -1979,20 +2050,22 @@ async function destroyUnresponsiveTab(session, tabId, reason, userId) {
   } catch (err) {
     log('warn', 'unresponsive tab cleanup failed', { tabId, error: err.message });
   } finally {
-    humanControlledTabs.delete(tabId);
-    group.delete(tabId);
-    if (group.size === 0) session.tabGroups.delete(listItemId);
-    const lock = tabLocks.get(tabId);
-    if (lock) {
-      lock.drain();
+    const current = findTabOwner(tabId);
+    if (current?.session === session && current?.tabState === tabState && group.get(tabId) === tabState) {
+      humanControlledTabs.delete(tabId);
+      group.delete(tabId);
+      if (group.size === 0 && session.tabGroups.get(listItemId) === group) session.tabGroups.delete(listItemId);
+      removed = true;
+      refreshActiveTabsGauge();
+      tabsDestroyedTotal.labels(reason).inc();
+      pluginEvents.emit('tab:destroyed', { userId: userId || null, tabId, reason });
+    }
+    if (lock && tabLocks.get(tabId) === lock) {
       tabLocks.delete(tabId);
       refreshTabLockQueueDepth();
     }
-    refreshActiveTabsGauge();
-    tabsDestroyedTotal.labels(reason).inc();
-    pluginEvents.emit('tab:destroyed', { userId: userId || null, tabId, reason });
   }
-  return true;
+  return removed;
 }
 
 /**
@@ -3509,6 +3582,7 @@ app.post('/browser/identities/:userId/focus', async (req, res) => {
  *       400: { description: Invalid handoff payload. }
  *       404: { description: Tab not found. }
  *       409: { description: Tab is not a shared identity tab or is no longer available. }
+ *       503: { description: "Retryable tab_busy while a previous operation is still settling. No control transfer occurred." }
  */
 app.post('/tabs/:tabId/handoff', async (req, res) => {
   const requestedUserId = req.body?.userId;
@@ -4228,7 +4302,7 @@ app.post('/tabs/:tabId/navigate', async (req, res) => {
  *   get:
  *     tags: [Content]
  *     summary: Accessibility snapshot
- *     description: Returns accessibility tree with element refs. Supports pagination via offset.
+ *     description: Returns accessibility tree with element refs. Supports pagination via offset. Uses the tab operation lock because proxy recovery can navigate, so human handoff refuses capture and timeouts use the tab liveness policy.
  *     parameters:
  *       - name: tabId
  *         in: path
@@ -4287,8 +4361,20 @@ app.post('/tabs/:tabId/navigate', async (req, res) => {
  *           application/json:
  *             schema:
  *               $ref: '#/components/schemas/Error'
+ *       409:
+ *         description: code=tab_handed_off. Return control to the agent before capturing a fresh snapshot.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ *       410:
+ *         description: code=tab_destroyed, recovery=create_new_tab after repeated timeouts and a failed liveness probe.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
  *       503:
- *         description: Retryable. code=refs_unavailable when the page could not be captured and the previous refs no longer resolve.
+ *         description: Retryable. code=refs_unavailable when the page could not be captured and the previous refs no longer resolve. code=tab_busy while a previous operation is still settling.
  *         content:
  *           application/json:
  *             schema:
@@ -4320,7 +4406,7 @@ app.get('/tabs/:tabId/snapshot', async (req, res) => {
       return res.json(response);
     }
 
-    const result = await withUserLimit(userId, () => withTimeout((async () => {
+    const result = await withUserLimit(userId, () => withTabLock(req.params.tabId, async () => {
       if (proxyPool?.canRotateSessions && isGoogleSearchUrl(tabState.lastRequestedUrl || '')) {
         const blocked = await isGoogleSearchBlocked(tabState.page);
         const unavailable = !blocked && await isGoogleUnavailable(tabState.page);
@@ -4416,7 +4502,7 @@ app.get('/tabs/:tabId/snapshot', async (req, res) => {
       }
 
       return response;
-    })(), requestTimeoutMs(), 'snapshot'));
+    }, requestTimeoutMs()));
 
     pluginEvents.emit('tab:snapshot', { userId: req.query.userId, tabId: req.params.tabId, snapshot: result.snapshot });
     log('info', 'snapshot', { reqId: req.reqId, tabId: req.params.tabId, url: result.url, snapshotLen: result.snapshot?.length, refsCount: result.refsCount, hasScreenshot: !!result.screenshot, truncated: result.truncated });
