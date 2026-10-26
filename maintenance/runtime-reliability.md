@@ -77,6 +77,30 @@ regression passes against the same failure mode, then retire the local repair.
   cleanup, or revert the repair commit.
 - **Retire when:** upstream closes idle tabs inside live sessions.
 
+#### Idle Reclamation During Context Acquisition
+
+- **Behavior:** both idle-shutdown admission checks and the idle memory-pressure
+  sweep treat the existing `sessionCreations` map as active work. An ordinary or
+  shared context can be acquiring before it appears in `sessions`, so an armed
+  idle timer must recheck that map before closing the browser. Failed acquisition
+  releases its marker and permits normal idle reclamation again. This adds no
+  identity lock or queue. Explicit administrative stop, disconnect and process
+  shutdown retain their existing close authority.
+- **Surfaces:** `server.js` (`scheduleBrowserIdleShutdown`, idle memory-pressure
+  interval), `tests/unit/idleShutdown.test.js`.
+- **Regression:** `NODE_OPTIONS=--experimental-vm-modules npx jest --runInBand --forceExit --runTestsByPath tests/unit/idleShutdown.test.js tests/unit/memoryPressure.test.js`.
+  The lifecycle tests evaluate the actual server functions with deferred ordinary
+  and shared acquisition. They cover old timers, both pressure thresholds,
+  successful and rejected acquisition, true-idle reclamation, explicit close
+  authority and passive health. The same tests also support Node's focused runner.
+- **Upstream checked:** `jo-inc/camofox-browser` master
+  `39c82094013480b373df6600d44c7f036f58356e` (2026-10-26) still checks only
+  published sessions in both idle paths. No released equivalent was found in the
+  related lifecycle work checked during preflight.
+- **Rollback:** revert this repair. No persisted state or configuration changes.
+- **Retire when:** upstream excludes in-flight acquisition from both idle browser
+  reclamation paths and the same regressions pass.
+
 #### Settling timed-out tab operations
 
 - **Behavior:** a route timeout is not browser cancellation. The existing tab
