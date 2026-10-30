@@ -59,7 +59,7 @@ import { createPageWithSessionRecovery } from './lib/new-page-recovery.js';
 import { resolveUploadPaths } from './lib/upload-paths.js';
 import { normalizeUploadFiles } from './lib/upload-files.js';
 import { acquirePageLease, hasActivePageLeases, isPageLeased, releasePageLease, setLeasedPage } from './lib/page-lease.js';
-import { createPageRegistry, findTabByPage, getOpenerTabId, tabIdsForPage } from './lib/page-registry.js';
+import { createPageRegistry, findTabByPage, getOpenerTabId, quarantinePage, tabIdsForPage } from './lib/page-registry.js';
 import { createReporter, createTabHealthTracker, collectResourceSnapshot, classifyProxyError, browserProcessTreeRssMb, browserProcessNameRssMb } from './lib/reporter.js';
 import { mountDocs } from './lib/openapi.js';
 import { initSentry, captureException as sentryCaptureException, setupExpressErrorHandler as setupSentryErrorHandler, flush as sentryFlush } from './lib/sentry.js';
@@ -648,6 +648,9 @@ const TAB_LIVENESS_TIMEOUT_MS = 1000;
 // Bounds queue waits only. Navigation may hold the lock longer than this, which
 // is why queue timeouts during navigation do not count toward reaping the tab.
 const TAB_LOCK_TIMEOUT_MS = CONFIG.tabLockTimeoutMs;
+// A responsive page does not prove its abandoned action settled. This budget
+// starts when the action returns with pending work, independently of probes.
+const ABANDONED_TAB_TIMEOUT_MS = 30000;
 
 
 
@@ -680,6 +683,8 @@ class TabLock {
   }
 
   release() {
+    clearTimeout(this.settlingTimer);
+    this.settlingTimer = null;
     this.active = false;
     this._tryNext();
     refreshTabLockQueueDepth();
@@ -695,6 +700,8 @@ class TabLock {
   }
 
   drain() {
+    clearTimeout(this.settlingTimer);
+    this.settlingTimer = null;
     this.retired = true;
     this.active = true;
     this.rejectQueued(tabDestroyedError(new Error('Tab destroyed')));
@@ -716,7 +723,7 @@ const humanControlledTabs = new Set();
 const tabOperationContext = new AsyncLocalStorage();
 
 function tabBusyError() {
-  return Object.assign(new Error('Tab is busy settling a previous operation. Retry after it settles, or close this tab.'), {
+  return Object.assign(new Error('Tab is busy settling a previous operation. Retry after it settles, or close this tab. Abandoned work is closed automatically after 30 seconds.'), {
     code: 'tab_busy', statusCode: 503, retryable: true, recovery: 'retry',
   });
 }
@@ -784,12 +791,23 @@ async function withTabLock(tabId, operation, timeoutMs = HANDLER_TIMEOUT_MS, { a
         recovery: 'retry',
       });
     }
-    if (pending.size && err?.message) err.message += ' Work may still be running. This tab remains busy until it settles.';
+    if (pending.size && err?.message) err.message += ' Work may still be running. This tab remains busy until it settles or automatic recovery closes it.';
     throw err;
   } finally {
-    if (pending.size) {
+    if (pending.size && !lock.retired && tabLocks.get(tabId) === lock) {
       lock.settling = true;
       lock.rejectQueued(tabBusyError());
+      lock.settlingTimer = setTimeout(() => {
+        lock.settlingTimer = null;
+        const current = findTabOwner(tabId);
+        if (!lock.settling || lock.retired || tabLocks.get(tabId) !== lock ||
+            current?.session !== timeoutOwner?.session || current?.tabState !== timeoutOwner?.tabState) return;
+        // Retire and close the exact old page, never unlock it for overlapping
+        // work. Cleanup is page-close bounded and leaves sibling tabs alone.
+        void destroyUnresponsiveTab(current.session, tabId, 'abandoned_operation', current.userId)
+          .catch(error => log('error', 'abandoned tab recovery failed', { tabId, error: error.message }));
+      }, ABANDONED_TAB_TIMEOUT_MS);
+      lock.settlingTimer.unref?.();
       pending.release = () => {
         if (lock.retired || tabLocks.get(tabId) !== lock) return;
         lock.settling = false;
@@ -2039,6 +2057,8 @@ async function destroyUnresponsiveTab(session, tabId, reason, userId) {
   const found = session && findTab(session, tabId);
   if (!found) return false;
   const { tabState, group, listItemId } = found;
+  // Unconfirmed closure must not make the old page adoptable under a fresh ID.
+  quarantinePage(tabState.page);
   const lock = tabLocks.get(tabId);
   // Closing the page may settle old work before cleanup finishes. Never let
   // that continuation reopen this retiring lock to a newer action or handoff.
@@ -2047,7 +2067,6 @@ async function destroyUnresponsiveTab(session, tabId, reason, userId) {
   log('warn', 'destroying unresponsive tab', { tabId, listItemId, toolCalls: tabState.toolCalls, reason });
   try {
     await safePageClose(tabState.page);
-    await clearTabDownloads(tabState);
   } catch (err) {
     log('warn', 'unresponsive tab cleanup failed', { tabId, error: err.message });
   } finally {
@@ -2066,6 +2085,8 @@ async function destroyUnresponsiveTab(session, tabId, reason, userId) {
       refreshTabLockQueueDepth();
     }
   }
+  // File cleanup must not extend the tab lock or identity-busy lifetime.
+  void clearTabDownloads(tabState).catch(error => log('warn', 'retired tab download cleanup failed', { tabId, error: error.message }));
   return removed;
 }
 
