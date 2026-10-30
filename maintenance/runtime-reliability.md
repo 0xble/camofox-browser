@@ -120,7 +120,9 @@ regression passes against the same failure mode, then retire the local repair.
   extend it. At the ceiling the exact old lock is retired before bounded page
   closure, then the tab is removed and callers must create a new tab. The old
   page is quarantined from all registration paths even when closure cannot be
-  confirmed, so it cannot acquire a fresh tab ID and overlap abandoned work. Download
+  confirmed, so it cannot acquire a fresh tab ID and overlap abandoned work.
+  Both parked and legacy handoff selection exclude it before opening or focusing
+  a page, including requested-tab, last-used and context-page fallbacks. Download
   file cleanup cannot retain the lock or keep its identity busy. Normal settlement
   and explicit close cancel the timer. Deferred lock release is one-shot, even
   for detached continuations or a replaced tab.

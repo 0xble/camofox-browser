@@ -164,3 +164,28 @@ it('retirement fences late continuations while bounded page close is pending', a
   manager.contexts.set('identity', { pages: () => [page, healthy] });
   assert.equal(await manager.focus('identity'), healthy);
 });
+
+for (const selection of ['last-used', 'context', 'requested']) {
+  it(`parked handoff skips a quarantined ${selection} page before visibility opens`, async () => {
+    const abandoned = { isClosed: () => false };
+    const healthy = { isClosed: () => false };
+    quarantinePage(abandoned);
+    const opened = [];
+    const session = {
+      visibility: { visible: new Set(), async open(page) { opened.push(page); this.visible.add(page); } },
+      tabGroups: new Map([['task', new Map([['old', { page: abandoned }]])]]),
+      lastUsedPage: selection === 'last-used' ? abandoned : null,
+      context: { pages: () => [abandoned, healthy] },
+      createPage: async () => healthy,
+    };
+    const opener = createSharedIdentityWindowOpener({
+      manager: {}, sessions: new Map([['identity', session]]),
+      getSession: async () => session,
+      registerPage: (_session, _user, page) => page === healthy ? 'healthy' : 'old',
+      isBusy: () => false,
+    });
+    const result = await opener.openWindow('identity', selection === 'requested' ? 'old' : null);
+    assert.deepEqual(opened, [healthy], 'quarantine must be checked before opening the visible page');
+    assert.equal(result.tabId, 'healthy');
+  });
+}
