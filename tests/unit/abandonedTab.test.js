@@ -6,6 +6,7 @@ import vm from 'node:vm';
 import { handleTabTimeout } from '../../lib/tab-timeout.js';
 import { createPageRegistry, quarantinePage } from '../../lib/page-registry.js';
 import { createSharedIdentityWindowOpener } from '../../lib/shared-identity-window.js';
+import { SharedIdentityManager } from '../../lib/shared-identity.js';
 
 const it = globalThis.it ?? nodeIt;
 const source = readFileSync(new URL('../../server.js', import.meta.url), 'utf8');
@@ -157,4 +158,9 @@ it('retirement fences late continuations while bounded page close is pending', a
   f.session.sharedIdentity = 'identity';
   assert.equal(registry.registerSharedIdentityPage(f.session, 'identity', page), null,
     'an unconfirmed close cannot reintroduce the quarantined page under a new ID');
+  const healthy = f.group.get('B').page;
+  page.bringToFront = () => assert.fail('handoff must never focus the abandoned page');
+  const manager = new SharedIdentityManager({ identities: ['identity'] });
+  manager.contexts.set('identity', { pages: () => [page, healthy] });
+  assert.equal(await manager.focus('identity'), healthy);
 });
