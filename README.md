@@ -644,7 +644,7 @@ Browser behavior can be tuned in `camofox.config.json`:
 | `CAMOUFOX_EXECUTABLE_PATH` | Compatibility alias for `CAMOUFOX_EXECUTABLE` | - |
 | `CAMOFOX_EXECUTABLE_PATH` | Compatibility alias for `CAMOUFOX_EXECUTABLE` | - |
 | `CAMOFOX_DISABLE_DEFAULT_ADDONS` | Set to `1`/`true` to skip downloading and launching the default uBlock Origin (UBO) addon. Useful for deployments where the addons.mozilla.org download is unreliable or unwanted (a failed download otherwise leaves a broken addon cache that blocks startup). | `0` |
-| `CAMOFOX_PARK_DISPLAY` | macOS NSScreen name used to park shared-identity windows (for example `DeskPad Display`). Unset selects only a virtual display named DeskPad, Virtual, or a BetterDisplay dummy, never an arbitrary physical monitor. `off`, a missing virtual display, or a non-macOS host uses the legacy headless/relaunch behavior and logs one warning. | first matching virtual display |
+| `CAMOFOX_PARK_DISPLAY` | macOS NSScreen name used to park shared-identity windows (for example `DeskPad Display`). Unset selects only a virtual display named DeskPad, Virtual, or a BetterDisplay dummy, never an arbitrary physical monitor. `off` or a missing virtual display uses a hidden headed application on macOS, preserving live tabs during handoff. Non-macOS hosts retain the legacy headless/relaunch behavior. | first matching virtual display |
 | `CAMOFOX_SHARED_IDENTITY_EXTENSIONS` | JSON map of shared identity (alias or userId) to `[{"id","path","sha256"}]`. Each signed `.xpi` whose SHA-256 matches is installed into that identity's persistent profile before launch. Previously managed extensions no longer listed are removed. Human-installed extensions are untouched. | unset (none) |
 | `CAMOFOX_IDENTITY_COLORS` | JSON map of shared-identity alias to a `#rrggbb` brand color for the headed window chrome. The toolbar keeps that hue and darkens only until white text meets WCAG AA (4.5:1); the frame is a darker shade of the same hue. Unmapped aliases and invalid entries keep the sorted-alias palette. | unset (palette) |
 | `CAMOFOX_COOKIES_DIR` | Directory for cookie files | `~/.camofox/cookies` |
@@ -751,7 +751,7 @@ then the latest app title is restored. The tab's current window is resolved on
 every subsequent command. Commands expire and are acknowledged; late creates
 are closed, and late shows are re-parked. Commands for one window are serialized.
 An extension initialization or attach failure closes the attempted parked context
-and logs one warning before launching that context with the legacy path.
+and logs one warning before launching a hidden application on macOS (the legacy path on other hosts).
 
 Camoufox spoofs the geometry the WebExtension `windows` API reports, so every
 park is verified against native window bounds before it is acknowledged. The
@@ -768,8 +768,8 @@ failure. A readback failure, such as a slow osascript or a list captured
 mid-update, is retried inside the same bounded loop. A failure that persists
 is logged as `native window readback failed` and reported as a parking failure
 for that window only after startup. A first-launch native-readback failure that
-reaches the add-on's `readyError` instead fails attachment and invokes the legacy
-launch fallback described above. It can close and relaunch the newly attempted
+reaches the add-on's `readyError` instead fails attachment and invokes the
+initial-launch fallback described above. It can close and relaunch the newly attempted
 context before any caller's tabs exist. A normal window parking failure at startup
 is reported without stopping command handling for the other windows.
 
@@ -779,8 +779,18 @@ in the same context. They are not guaranteed hidden. Show and release return 409
 the context. Reconnecting an eligible secondary display re-enables parking with
 fresh geometry in that same context, preserving sibling tabs and in-memory state.
 
-Contexts initially launched without parking (including `CAMOFOX_PARK_DISPLAY=off`)
-cannot turn a headless process into a headed one in place. Show refuses with 409
+On macOS, contexts initially launched without parking (including
+`CAMOFOX_PARK_DISPLAY=off`) start headed and immediately hide their own application
+through AppKit. Open unhides that same application and focuses the requested page.
+Release hides it again, without closing the context, replacing pages, or losing
+form input and popup state. Native hidden-state readback must confirm the change.
+The PID is resolved from this server's descendants and the exact profile on every
+operation, with no title matching, Accessibility, or Screen Recording grant.
+Unlike parking, hiding is identity-wide: all its windows hide together, and a
+release leaves the application visible while another tab is human-controlled.
+A failed hide/show reports an error without destroying established tabs.
+
+Legacy contexts on non-macOS hosts cannot turn a headless process into a headed one in place. Show refuses with 409
 `context_restart_required` while live tabs exist. Only `/open` with
 `{ "allowRestart": true }` explicitly accepts discarding all live tab state and
 restoring at most 1 URL. No-park release likewise refuses to close live tabs with
@@ -790,9 +800,9 @@ combine `all` and `tabId`. Existing legacy contexts remain legacy until an
 explicitly accepted restart or close. New contexts discover the reconnected display normally.
 
 `/health` keeps liveness separate from `visibility`: `mode` reports `parking`,
-`unavailable`, `disabled`, `unsupported`, or `unconfigured`; `parking` reports
+`app-hidden`, `unavailable`, `disabled`, `unsupported`, or `unconfigured`; `parking` reports
 display eligibility. `sameContextSessions`, `restartRequiredSessions`, and
-`failedWindows` distinguish active parking controllers, legacy headless contexts,
+`failedWindows` distinguish same-context controllers, legacy headless contexts,
 and window verification failures. A missing display alone does not make liveness fail.
 
 
