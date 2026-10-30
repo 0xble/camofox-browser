@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs';
 import { it as nodeIt } from 'node:test';
 import vm from 'node:vm';
 import { handleTabTimeout } from '../../lib/tab-timeout.js';
+import { createPageRegistry, quarantinePage } from '../../lib/page-registry.js';
 import { createSharedIdentityWindowOpener } from '../../lib/shared-identity-window.js';
 
 const it = globalThis.it ?? nodeIt;
@@ -43,7 +44,7 @@ function fixture() {
     findTabOwner(id) { const tabState = group.get(id); return tabState ? { tabState, session, userId: 'identity' } : null; },
     findTab(_session, id) { const tabState = group.get(id); return tabState ? { tabState, group, listItemId: 'task' } : null; },
     isTabLockQueueTimeout: () => false, handleTabTimeout,
-    clearTabDownloads: async () => {}, log() {},
+    quarantinePage, clearTabDownloads: async () => {}, log() {},
     tabsDestroyedTotal: { labels: reason => ({ inc: () => destroyed.push(reason) }) }, pluginEvents: { emit() {} },
     sharedIdentityRequests: new Map(), sessionCreations: new Map(),
     sharedIdentities: { closings: new Set() }, userConcurrency: new Map(), hasActivePageLeases: () => false,
@@ -151,4 +152,9 @@ it('retirement fences late continuations while bounded page close is pending', a
   assert.equal(f.group.has('A'), false);
   assert.equal(f.locks.has('A'), false);
   assert.equal(f.identityBusy('identity', f.session), false);
+  const registry = createPageRegistry({ sessions: f.sessions });
+  assert.throws(() => registry.registerPage(f.session, 'identity', page, 'task'), { code: 'tab_destroyed' });
+  f.session.sharedIdentity = 'identity';
+  assert.equal(registry.registerSharedIdentityPage(f.session, 'identity', page), null,
+    'an unconfirmed close cannot reintroduce the quarantined page under a new ID');
 });

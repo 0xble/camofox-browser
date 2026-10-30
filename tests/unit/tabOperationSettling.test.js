@@ -246,7 +246,7 @@ test('retiring cleanup refuses new work and preserves a replacement during page 
   oldOwner.session = session;
   Object.assign(f, {
     findTab: () => ({ tabState: group.get('A'), group, listItemId: 'group' }),
-    safePageClose: () => close.promise, clearTabDownloads: async () => {}, log() {},
+    safePageClose: () => close.promise, clearTabDownloads: async () => {}, log() {}, quarantinePage() {},
     refreshActiveTabsGauge() {}, tabsDestroyedTotal: { labels: () => ({ inc() {} }) },
     pluginEvents: { emit() {} },
   });

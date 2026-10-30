@@ -118,7 +118,9 @@ regression passes against the same failure mode, then retire the local repair.
   lock has a separate 30 s settling ceiling, measured from the route returning
   with pending browser work. No retry is required, and liveness probes cannot
   extend it. At the ceiling the exact old lock is retired before bounded page
-  closure, then the tab is removed and callers must create a new tab. Download
+  closure, then the tab is removed and callers must create a new tab. The old
+  page is quarantined from all registration paths even when closure cannot be
+  confirmed, so it cannot acquire a fresh tab ID and overlap abandoned work. Download
   file cleanup cannot retain the lock or keep its identity busy. Normal settlement
   and explicit close cancel the timer. Deferred lock release is one-shot, even
   for detached continuations or a replaced tab.

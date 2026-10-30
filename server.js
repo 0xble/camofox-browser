@@ -59,7 +59,7 @@ import { createPageWithSessionRecovery } from './lib/new-page-recovery.js';
 import { resolveUploadPaths } from './lib/upload-paths.js';
 import { normalizeUploadFiles } from './lib/upload-files.js';
 import { acquirePageLease, hasActivePageLeases, isPageLeased, releasePageLease, setLeasedPage } from './lib/page-lease.js';
-import { createPageRegistry, findTabByPage, getOpenerTabId, tabIdsForPage } from './lib/page-registry.js';
+import { createPageRegistry, findTabByPage, getOpenerTabId, quarantinePage, tabIdsForPage } from './lib/page-registry.js';
 import { createReporter, createTabHealthTracker, collectResourceSnapshot, classifyProxyError, browserProcessTreeRssMb, browserProcessNameRssMb } from './lib/reporter.js';
 import { mountDocs } from './lib/openapi.js';
 import { initSentry, captureException as sentryCaptureException, setupExpressErrorHandler as setupSentryErrorHandler, flush as sentryFlush } from './lib/sentry.js';
@@ -2057,6 +2057,8 @@ async function destroyUnresponsiveTab(session, tabId, reason, userId) {
   const found = session && findTab(session, tabId);
   if (!found) return false;
   const { tabState, group, listItemId } = found;
+  // Unconfirmed closure must not make the old page adoptable under a fresh ID.
+  quarantinePage(tabState.page);
   const lock = tabLocks.get(tabId);
   // Closing the page may settle old work before cleanup finishes. Never let
   // that continuation reopen this retiring lock to a newer action or handoff.
