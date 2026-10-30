@@ -17,7 +17,7 @@ function fixture() {
   const box = {
     AsyncLocalStorage, setTimeout, clearTimeout,
     tabLockTimeoutsTotal: { inc() {} }, refreshTabLockQueueDepth() {},
-    TAB_LOCK_TIMEOUT_MS: 1000, HANDLER_TIMEOUT_MS: 10,
+    TAB_LOCK_TIMEOUT_MS: 1000, HANDLER_TIMEOUT_MS: 10, ABANDONED_TAB_TIMEOUT_MS: 1000,
     findTabOwner: id => owners.get(id), isTabLockQueueTimeout: () => false,
     handleTimedOutTab: jest.fn(async () => ({ destroyed: false })),
   };

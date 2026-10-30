@@ -114,14 +114,26 @@ regression passes against the same failure mode, then retire the local repair.
   streak: a failed bounded liveness probe retires only that exact tab and returns
   `410 tab_destroyed`, `recovery=create_new_tab`. Concurrent retries do not
   duplicate probes or cleanup. Healthy, navigating, human-controlled, settled
-  or replacement targets are preserved. A successful liveness probe does not
-  clear busy state, so responsive work that never settles still needs explicit
-  tab close. Deferred lock release is one-shot, even for detached continuations
-  or a replaced tab.
+  or replacement targets are preserved during the grace period. Every abandoned
+  lock has a separate 30 s settling ceiling, measured from the route returning
+  with pending browser work. No retry is required, and liveness probes cannot
+  extend it. At the ceiling the exact old lock is retired before bounded page
+  closure, then the tab is removed and callers must create a new tab. Download
+  file cleanup cannot retain the lock or keep its identity busy. Normal settlement
+  and explicit close cancel the timer. Deferred lock release is one-shot, even
+  for detached continuations or a replaced tab.
+- **Upstream checked:** `jo-inc/camofox-browser` master
+  `39c82094013480b373df6600d44c7f036f58356e`. PR #14623 proposes skipping the
+  lock for long evaluates, not cancellation or a bounded abandoned-work lifetime.
+  Preserve serialization rather than adopting overlapping page actions.
 - **Surfaces:** `server.js` (`withTabLock`, `withTimeout`, snapshot),
   `lib/browser-errors.js`, `tests/unit/tabOperationSettling.test.js`,
   `tests/unit/timeoutContinuation.test.js`.
-- **Regression:** `NODE_OPTIONS=--experimental-vm-modules npx jest tests/unit/tabOperationSettling.test.js tests/unit/timeoutContinuation.test.js --runInBand`.
+- **Regression:** `node --test tests/unit/abandonedTab.test.js` runs the
+  deterministic-clock ceiling, nested timeout, stale timer, late continuation,
+  bounded page-close and identity-handoff cases without a browser or dependencies.
+  The Jest unit lane also runs these tests alongside
+  `tests/unit/tabOperationSettling.test.js` and `tests/unit/timeoutContinuation.test.js`.
 - **Rollback:** revert the repair commit. No persisted state changes.
 - **Retire when:** upstream guarantees cancellation or equivalent per-tab
   settling before allowing newer work or human handoff.
