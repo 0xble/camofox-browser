@@ -23,6 +23,7 @@ function expectOk({ response, data }) {
 describe('shared persistent identity lifecycle over HTTP', () => {
   const userId = 'shared-lifecycle-e2e';
   const group = 'agent-work';
+  const hidesApplication = process.platform === 'darwin';
   let profileDir;
   let testSiteUrl;
 
@@ -101,7 +102,7 @@ describe('shared persistent identity lifecycle over HTTP', () => {
     expect(checkpoint).toEqual(expect.objectContaining({ cleanShutdown: false }));
   }, 90000);
 
-  test('release rejects human control, then checkpoints and discards headed tab IDs', async () => {
+  test('release preserves human control and uses the platform visibility lifecycle', async () => {
     const absent = await request('POST', '/browser/identities/unconfigured/release');
     expect(absent.response.status).toBe(404);
     const empty = await request('POST', `/browser/identities/${userId}/release`);
@@ -113,8 +114,8 @@ describe('shared persistent identity lifecycle over HTTP', () => {
     const human = await request('POST', `/tabs/${opened.data.tabId}/handoff`, { userId, handoff: 'human' });
     expect(human.response.status).toBe(200);
     const busy = await request('POST', `/browser/identities/${userId}/release`);
-    expect(busy.response.status).toBe(409);
-    expect(busy.data).toEqual({ error: 'identity busy' });
+    expect(busy.response.status).toBe(hidesApplication ? 200 : 409);
+    expect(busy.data).toEqual(hidesApplication ? { ok: true, released: false } : { error: 'identity busy' });
     const stillOpen = await request('GET', `/tabs?userId=${userId}`);
     expect(stillOpen.data.tabs.some(tab => tab.tabId === opened.data.tabId)).toBe(true);
 
@@ -124,7 +125,13 @@ describe('shared persistent identity lifecycle over HTTP', () => {
     expect(navigated.response.status).toBe(200);
     const released = await request('POST', `/browser/identities/${userId}/release`, { all: true });
     expect(released.response.status).toBe(200);
-    expect(released.data).toEqual({ ok: true, released: true });
+    expect(released.data).toEqual({ ok: true, released: !hidesApplication });
+    if (hidesApplication) {
+      const retained = await request('GET', `/tabs?userId=${userId}`);
+      expect(retained.data.tabs.some(tab => tab.tabId === opened.data.tabId)).toBe(true);
+      await request('DELETE', `/sessions/${userId}`);
+      return;
+    }
     const checkpoint = JSON.parse(await fs.readFile(cookieCheckpointPath(profileDir, userId), 'utf8'));
     expect(checkpoint.cleanShutdown).toBe(true);
     const listed = await request('GET', `/tabs?userId=${userId}`);
@@ -139,7 +146,7 @@ describe('shared persistent identity lifecycle over HTTP', () => {
     await request('DELETE', `/sessions/${userId}`);
   }, 90000);
 
-  test('release followed by open serializes opposite actions and starts a fresh headed session', async () => {
+  test('release followed by open uses the same context when background visibility is available', async () => {
     const first = await request('POST', `/browser/identities/${userId}/open`);
     expectOk(first);
     const release = request('POST', `/browser/identities/${userId}/release`, { all: true });
@@ -148,19 +155,24 @@ describe('shared persistent identity lifecycle over HTTP', () => {
     expect(released.response.status).toBe(200);
     expect(released.data).toEqual({ ok: true, released: true });
     expect(opened.response.status).toBe(200);
-    expect(opened.data.tabId).not.toBe(first.data.tabId);
+    if (hidesApplication) {
+      expect(opened.data.tabId).toBe(first.data.tabId);
+      expect(opened.data.restarted).toBe(false);
+    } else expect(opened.data.tabId).not.toBe(first.data.tabId);
     await request('DELETE', `/sessions/${userId}`);
   }, 90000);
 
-  test('explicit release closes a headless session and is idempotent', async () => {
+  test('release is idempotent and does not close a hidden macOS context', async () => {
     const tab = await request('POST', '/tabs', { userId, sessionKey: 'headless-release', url: `${testSiteUrl}/pageA` });
     expect(tab.response.status).toBe(200);
     const released = await request('POST', `/browser/identities/${userId}/release`, { all: true });
-    expect(released.data).toEqual({ ok: true, released: true });
+    expect(released.data).toEqual({ ok: true, released: !hidesApplication });
     const gone = await request('GET', `/tabs?userId=${userId}`);
-    expect(gone.data.tabs).toEqual([]);
+    if (hidesApplication) expect(gone.data.tabs.some(item => item.tabId === tab.data.tabId)).toBe(true);
+    else expect(gone.data.tabs).toEqual([]);
     const again = await request('POST', `/browser/identities/${userId}/release`);
     expect(again.data).toEqual({ ok: true, released: false });
+    await request('DELETE', `/sessions/${userId}`);
   }, 90000);
 
   test('release refuses a request still in flight without destroying its tab', async () => {
@@ -171,8 +183,8 @@ describe('shared persistent identity lifecycle over HTTP', () => {
     });
     await new Promise(resolve => setTimeout(resolve, 250));
     const blocked = await request('POST', `/browser/identities/${userId}/release`);
-    expect(blocked.response.status).toBe(409);
-    expect(blocked.data).toEqual({ error: 'identity busy' });
+    expect(blocked.response.status).toBe(hidesApplication ? 200 : 409);
+    expect(blocked.data).toEqual(hidesApplication ? { ok: true, released: false } : { error: 'identity busy' });
     expect((await pending).response.status).toBe(200);
     const listed = await request('GET', `/tabs?userId=${userId}`);
     expect(listed.data.tabs.some(tab => tab.tabId === created.data.tabId)).toBe(true);
@@ -220,7 +232,7 @@ describe('shared persistent identity lifecycle over HTTP', () => {
     }
   }, 90000);
 
-  test('no-park create works, while release/show refuse to discard idle siblings and unsaved input', async () => {
+  test('no-park release/show preserve idle siblings and unsaved input', async () => {
     const a = await request('POST', '/tabs', { userId, sessionKey: 'no-park-a', url: `${testSiteUrl}/form` });
     const b = await request('POST', '/tabs', { userId, sessionKey: 'no-park-b', url: `${testSiteUrl}/form` });
     expectOk(a); expectOk(b);
@@ -229,11 +241,19 @@ describe('shared persistent identity lifecycle over HTTP', () => {
     }
     const before = await request('GET', `/tabs?userId=${userId}`);
     const released = await request('POST', `/browser/identities/${userId}/release`, { tabId: a.data.tabId });
-    expect(released.response.status).toBe(409);
-    expect(released.data.code).toBe('context_close_required');
+    expect(released.response.status).toBe(hidesApplication ? 200 : 409);
+    if (!hidesApplication) expect(released.data.code).toBe('context_close_required');
     const shown = await request('POST', `/browser/identities/${userId}/open`, { tabId: a.data.tabId });
-    expect(shown.response.status).toBe(409);
-    expect(shown.data.code).toBe('context_restart_required');
+    expect(shown.response.status).toBe(hidesApplication ? 200 : 409);
+    if (hidesApplication) {
+      expect(shown.data).toMatchObject({ tabId: a.data.tabId, restarted: false });
+      for (let index = 0; index < 2; index++) {
+        const hidden = await request('POST', `/browser/identities/${userId}/release`, { all: true });
+        expect(hidden.data).toEqual({ ok: true, released: true });
+        const reopened = await request('POST', `/browser/identities/${userId}/open`, { tabId: a.data.tabId });
+        expect(reopened.data).toMatchObject({ tabId: a.data.tabId, restarted: false });
+      }
+    } else expect(shown.data.code).toBe('context_restart_required');
     const after = await request('GET', `/tabs?userId=${userId}`);
     expect(after.data.tabs.map(tab => tab.tabId).sort()).toEqual(before.data.tabs.map(tab => tab.tabId).sort());
     for (const [tab, text] of [[a, 'unsaved A'], [b, 'unsaved B']]) {
@@ -242,16 +262,17 @@ describe('shared persistent identity lifecycle over HTTP', () => {
     }
     const health = await request('GET', '/health');
     expectOk(health);
-    expect(health.data).toMatchObject({ ok: true, visibility: { mode: 'disabled', parking: false, restartRequiredSessions: 1 } });
+    expect(health.data).toMatchObject({ ok: true, visibility: { mode: hidesApplication ? 'app-hidden' : 'disabled', parking: false, restartRequiredSessions: hidesApplication ? 0 : 1 } });
     await request('DELETE', `/sessions/${userId}`);
   }, 90000);
 
-  test('normal use launches headless, and /focus refuses a headless identity', async () => {
+  test('normal use starts in the background and /focus preserves native context identity', async () => {
     const created = await request('POST', '/tabs', { userId, sessionKey: 'headless-focus', url: `${testSiteUrl}/pageA` });
     expect(created.response.status).toBe(200);
     const focus = await request('POST', `/browser/identities/${userId}/focus`);
-    expect(focus.response.status).toBe(409);
-    expect(focus.data).toEqual({ error: 'identity is headless; use open' });
+    expect(focus.response.status).toBe(hidesApplication ? 200 : 409);
+    if (hidesApplication) expect(focus.data).toMatchObject({ tabId: created.data.tabId, restarted: false });
+    else expect(focus.data).toEqual({ error: 'identity is headless; use open' });
     await request('DELETE', `/sessions/${userId}`);
   }, 90000);
 });
