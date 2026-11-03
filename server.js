@@ -1670,7 +1670,7 @@ async function createSharedIdentityContext(userId, profilePath, { headed = false
     launch: ({ headed, visibility }) => launchSharedIdentityContext(profilePath, {
       headed, visibility, extensions: extensionsForIdentity(CONFIG.sharedIdentityExtensions, userId),
       indicator: identityIndicator(CONFIG.sharedIdentityAliases, userId, CONFIG.identityColors),
-      launchOptions, firefox, os, getHostOS, config: CONFIG, events: pluginEvents, log,
+      launchOptions, firefox, os, getHostOS, config: CONFIG, hasProxy: !!proxyPool, events: pluginEvents, log,
     }),
   });
 }

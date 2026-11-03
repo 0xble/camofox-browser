@@ -387,7 +387,7 @@ When a proxy is configured:
 - Camoufox's GeoIP automatically sets `locale`, `timezone`, and `geolocation` to match the proxy's exit IP
 - Browser fingerprint (language, timezone, coordinates) is consistent with the proxy location
 
-Without a proxy, Camofox does not claim a geolocation or infer one from the host IP. To use a fixed direct-session identity, set both `CAMOFOX_LOCALE` and `CAMOFOX_TIMEZONE`; otherwise Camoufox keeps its own identity defaults.
+Without a proxy, Camofox does not claim a geolocation or infer one from the host IP. To use a fixed direct-session identity, set both `CAMOFOX_LOCALE` and `CAMOFOX_TIMEZONE`; otherwise Camoufox keeps its own identity defaults. Shared persistent browsers use that same identity: the fingerprint locale goes to Camoufox, and Playwright receives `locale` and `timezoneId`. Both are skipped when a proxy is set, and no geolocation coordinate is set.
 
 ### Telemetry
 
