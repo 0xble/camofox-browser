@@ -34,7 +34,7 @@ for (const all of [false, true]) {
       createSharedIdentityVisibility: () => { throw Error('No secondary display exists'); },
       launchWithVisibilityFallback,
       launchSharedIdentityContext: async (_profile, options) => { launched = options; return context; },
-      extensionsForIdentity: () => [], identityIndicator: () => null, launchOptions() {}, firefox: {}, getHostOS() {}, pluginEvents: {}, log() {},
+      extensionsForIdentity: () => [], identityIndicator: () => null, launchOptions() {}, firefox: {}, getHostOS() {}, pluginEvents: {}, log() {}, proxyPool: null,
     });
     await create('identity', '/unused/profile', { headed: all });
     const session = { context, sharedIdentity: true, headed: true, visibility: context.sharedIdentityVisibility,
