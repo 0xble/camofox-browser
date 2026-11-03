@@ -1431,9 +1431,8 @@ async function launchBrowserInstance() {
         executable_path: externalCamoufox?.executablePath,
         headless: useVirtualDisplay ? false : !useDesktopWindow,
         os: hostOS,
-        // Camoufox native mouse humanization hangs on macOS (even on a
-        // fresh local button fixture). Preserve the supported default elsewhere.
-        humanize: os.platform() !== 'darwin',
+        // The pinned beta.41 engine fixes the native mouse ack deadlock.
+        humanize: true,
         enable_cache: true,
         proxy: launchProxy,
         geoip: !!launchProxy,

@@ -44,7 +44,8 @@ leaves human-installed extensions alone.
   unpacked temporary add-ons. Temporary add-ons can get a fresh internal UUID
   each launch, which orphans their extension storage. A signed `<id>.xpi` in
   the profile keeps a stable identity. The pinned Camoufox engine
-  (152.0.4-beta.30) sets `extensions.autoDisableScopes=0` and
+  (historically verified on 152.0.4-beta.30; current pin is in
+  [the root contract](../MAINTENANCE.md)) sets `extensions.autoDisableScopes=0` and
   `extensions.enabledScopes=5`, which auto-enables profile-scope installs.
   A 2026-09-26 spike confirmed Mozilla-signed 1Password, I Still Don't Care
   About Cookies, and uBlock Origin XPIs installed with `active=true`,

@@ -1,5 +1,5 @@
-VERSION  ?= 135.0.1
-RELEASE  ?= beta.24
+VERSION  ?= 158.0.1
+RELEASE  ?= beta.41
 
 # Auto-detect host architecture; map arm64 (macOS) → aarch64
 UNAME_ARCH := $(shell uname -m)
