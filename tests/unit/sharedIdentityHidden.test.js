@@ -178,3 +178,19 @@ nativeTest('native AppKit readback confirms repeated hide/show of an owned dispo
     }
   }
 });
+
+test('the app-hidden controller implements the page-registration interface server.js calls', async () => {
+  // server.js calls isManagedPage for every existing page at session creation
+  // and shouldRegisterUIPage for every context 'page' event, on any controller.
+  const visibility = createDarwinIdentityVisibility('/test/profile', { rootPid: 10, snapshot: () => [], setHidden: async () => ({ hidden: true }) });
+  const page = { isClosed: () => false, url: () => 'https://accounts.test/oauth' };
+  assert.equal(typeof visibility.isManagedPage, 'function');
+  assert.equal(typeof visibility.shouldRegisterUIPage, 'function');
+  // App hiding creates no helper pages, so every real page is a user or agent tab.
+  assert.equal(visibility.isManagedPage(page), false);
+  assert.equal(await visibility.shouldRegisterUIPage(page), true);
+  assert.equal(await visibility.shouldRegisterUIPage({ ...page, isClosed: () => true }), false);
+  for (const name of ['isManagedPage', 'shouldRegisterUIPage']) {
+    assert.ok(source.includes(`visibility.${name}(`) || source.includes(`visibility?.${name}(`), `server.js no longer calls ${name}`);
+  }
+});
