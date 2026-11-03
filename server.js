@@ -298,6 +298,7 @@ app.use(createSharedIdentityRequestTracker({
   getSessions: () => sessions, manager: sharedIdentities, normalizeUserId, findTab,
   transitioning: key => identityTransitions.has(key) || sharedIdentityWindow?.transitioning(key), requests: sharedIdentityRequests,
   parkedVisibility: sharedIdentityParked,
+  unavailable: key => sharedIdentityWindow?.unavailable?.(key) || null,
 }));
 // Agent requests, not browser focus or passive page events, determine hidden-tab
 // recency. Record before the handler so long-running actions count as active.
@@ -1585,6 +1586,10 @@ function clearSessionLocks(session, { preserveTabIds = new Set() } = {}) {
 }
 
 function closeSession(userId, session, options = {}) {
+  const key = normalizeUserId(userId);
+  const blocked = typeof sharedIdentityWindow !== 'undefined' ? sharedIdentityWindow?.unavailable?.(key) : null;
+  if (blocked) return Promise.reject(blocked);
+  options.transitionCheck?.();
   // Expiry, the tab reaper and other cleanup paths can select the same session
   // in one tick. They share the first teardown, so the persistence checkpoint
   // runs once while the context is alive instead of once more after close.
@@ -1596,16 +1601,20 @@ async function closeSessionNow(userId, session, {
   clearDownloads = true,
   clearLocks = true,
   preserveLockTabIds = new Set(),
+  transitionCheck = () => {},
 } = {}) {
   const key = normalizeUserId(userId);
+  transitionCheck();
   const transition = (reason === 'headed_transition' || reason === 'headed_release') && session.sharedIdentity;
   const idleExpiry = reason === 'hidden_idle' && session.sharedIdentity;
   // Transitions and expiry must be able to abort before destructive teardown.
   const transitionCookies = transition || idleExpiry ? await sharedIdentities.snapshotCookies(key) : undefined;
+  transitionCheck();
 
   // Drain locks BEFORE closing context — queued operations get clean "Tab destroyed"
   // (410) instead of messy "Target page closed" (500) errors.
   if (clearLocks && !idleExpiry) {
+    transitionCheck();
     clearSessionLocks(session, { preserveTabIds: preserveLockTabIds });
   }
 
@@ -1643,6 +1652,7 @@ async function closeSessionNow(userId, session, {
   }
 
   if (session.sharedIdentity) {
+    transitionCheck();
     session._intentionalClose = true;
     const close = sharedIdentities.close(key, { checkpoint: reason !== 'storage_reset', reason, cookies: transitionCookies });
     if (transition) {
@@ -1678,23 +1688,32 @@ async function closeAllSessions(reason, { clearDownloads = true, clearLocks = tr
   }
 }
 
-async function createSharedIdentityContext(userId, profilePath, { headed = false, parkedOpen = false } = {}) {
+async function createSharedIdentityContext(userId, profilePath, { headed = false, parkedOpen = false, transitionCheck = () => {} } = {}) {
+  transitionCheck();
   // A legacy headed transition after a parking failure must stay legacy.
   // The normal parked opener creates contexts through the default headed=false path;
   // if parking then fails, an /open launches headed directly instead of twice.
   const display = headed ? null : await refreshSharedParkDisplay();
+  transitionCheck();
   return launchWithVisibilityFallback({ display, profilePath, headed, fallbackHeaded: headed || parkedOpen, log,
     createVisibility: (current, options) => createSharedIdentityVisibility(current, { ...options, discoverDisplay: refreshSharedParkDisplay }),
-    launch: ({ headed, visibility }) => launchSharedIdentityContext(profilePath, {
-      headed, visibility, extensions: extensionsForIdentity(CONFIG.sharedIdentityExtensions, userId),
-      indicator: identityIndicator(CONFIG.sharedIdentityAliases, userId, CONFIG.identityColors),
-      launchOptions, firefox, os, getHostOS, config: CONFIG, events: pluginEvents, log,
-    }),
+    launch: ({ headed, visibility }) => {
+      transitionCheck();
+      return launchSharedIdentityContext(profilePath, {
+        headed, visibility, extensions: extensionsForIdentity(CONFIG.sharedIdentityExtensions, userId),
+        indicator: identityIndicator(CONFIG.sharedIdentityAliases, userId, CONFIG.identityColors),
+        launchOptions, os, getHostOS, config: CONFIG, events: pluginEvents, log,
+        firefox: { launchPersistentContext: (...args) => { transitionCheck(); return firefox.launchPersistentContext(...args); } },
+      });
+    },
   });
 }
 
-async function getSession(userId, { trace = false, headed = false, parkedOpen = false } = {}) {
+async function getSession(userId, { trace = false, headed = false, parkedOpen = false, transitionCheck = () => {} } = {}) {
   const key = normalizeUserId(userId);
+  const blocked = typeof sharedIdentityWindow !== 'undefined' ? sharedIdentityWindow?.unavailable?.(key) : null;
+  if (blocked) throw blocked;
+  transitionCheck();
   if (sharedIdentities.failedClosures.has(key)) {
     throw Object.assign(new Error('shared identity close failed; profile ownership is unconfirmed'), { statusCode: 409 });
   }
@@ -1774,8 +1793,9 @@ async function getSession(userId, { trace = false, headed = false, parkedOpen = 
       // The legacy persistence plugin uses storageState and therefore applies
       // only to ephemeral contexts. Shared profiles restore cookies explicitly.
       if (!sharedIdentity) await pluginEvents.emitAsync('session:creating', { userId: key, contextOptions });
+      transitionCheck();
       const context = sharedIdentity
-        ? await sharedIdentities.open(key, profilePath => createSharedIdentityContext(key, profilePath, { headed, parkedOpen }))
+        ? await sharedIdentities.open(key, profilePath => createSharedIdentityContext(key, profilePath, { headed, parkedOpen, transitionCheck }))
         : await b.newContext(contextOptions);
 
       let tracePath = null;
@@ -1819,14 +1839,17 @@ async function getSession(userId, { trace = false, headed = false, parkedOpen = 
         for (const page of context.pages()) {
           if (!created.visibility?.isManagedPage(page)) registerSharedIdentityPage(created, key, page);
         }
+        transitionCheck();
         if (!created.headed && sharedIdentityLastUrls.has(key)) {
           const url = sharedIdentityLastUrls.get(key);
           // The session is already published; a page-creation failure (e.g. a
           // parking bridge timeout) must only skip restoration, not fail creation.
           try {
+            transitionCheck();
             const page = created.createPage ? await created.createPage()
               : context.pages().find(candidate => !candidate.isClosed?.() && candidate.url?.() === 'about:blank')
                 || await context.newPage();
+            transitionCheck();
             if (created.visibility) registerSharedIdentityPage(created, key, page);
             await page.goto(url, { timeout: 10_000 });
             created.lastUsedPage = page;
@@ -1846,6 +1869,7 @@ async function getSession(userId, { trace = false, headed = false, parkedOpen = 
       return created;
     });
   }
+  transitionCheck();
   session.lastAccess = Date.now();
   return session;
 }
@@ -1908,7 +1932,7 @@ function handleRouteError(err, req, res, extraFields = {}) {
   failuresTotal.labels(failureType, action).inc();
   // These paths already contained the failure. Do not reinterpret their
   // original timeout/closed-context text as permission to destroy a session.
-  if (err.code === 'shared_page_unavailable' || err.code === 'request_timeout') {
+  if (err.code === 'shared_page_unavailable' || err.code === 'request_timeout' || err.code === 'identity_transition_timeout') {
     return sendError(res, err, extraFields);
   }
 
@@ -3369,11 +3393,16 @@ function sharedIdentityParked(userId) {
 }
 
 function transitionIdentity(userId, action, operation, { coalesceKey = null } = {}) {
+  const blocked = typeof sharedIdentityWindow !== 'undefined' ? sharedIdentityWindow?.unavailable?.(userId) : null;
+  if (blocked) return Promise.reject(blocked);
   if (sharedIdentityParked(userId)) return operation();
   const previous = identityTransitions.get(userId);
   if (previous?.action === action && Object.is(previous.coalesceKey, coalesceKey)) return previous.promise;
   const promise = (async () => {
+    if (action === 'open') return operation(previous?.action === 'open' ? undefined : previous?.promise);
     if (previous) await previous.promise.catch(() => {});
+    const pendingError = typeof sharedIdentityWindow !== 'undefined' ? sharedIdentityWindow?.unavailable?.(userId) : null;
+    if (pendingError) throw pendingError;
     return operation();
   })();
   const entry = { action, coalesceKey, promise };
@@ -3385,6 +3414,7 @@ function transitionIdentity(userId, action, operation, { coalesceKey = null } = 
 }
 
 function identityBusy(userId, session) {
+  if (typeof sharedIdentityWindow !== 'undefined' && sharedIdentityWindow?.unavailable?.(userId)) return true;
   return Boolean(
     sharedIdentityRequests.get(userId) || sessionCreations.has(userId) || sharedIdentities.closings.has(userId)
     || userConcurrency.get(userId)?.active || userConcurrency.get(userId)?.queue.length
@@ -3461,12 +3491,14 @@ async function cleanIdleSharedSessions() {
     }
   }
   for (const [key, original] of [...sessions]) {
-    if (sessions.get(key) !== original || !original.sharedIdentity || original.headed || identityTransitions.has(key)) continue;
+    if (sessions.get(key) !== original || !original.sharedIdentity || original.headed || identityTransitions.has(key)
+      || (typeof sharedIdentityWindow !== 'undefined' && sharedIdentityWindow?.unavailable?.(key))) continue;
     if (tabThreshold) {
       const latestTabId = latestSharedTabId(original);
       const tabs = [...original.tabGroups.values()].flatMap(group => [...group.entries()]);
       for (const [tabId, tab] of tabs) {
-        if (sessions.get(key) !== original || original.headed || identityTransitions.has(key)) break;
+        if (sessions.get(key) !== original || original.headed || identityTransitions.has(key)
+          || (typeof sharedIdentityWindow !== 'undefined' && sharedIdentityWindow?.unavailable?.(key))) break;
         if (!sharedIdentityIdlePolicy.agentIdle(tab.lastAgentActivityAt, CONFIG.hiddenTabIdleMin)
           || sharedIdentityRequests.get(key) || !sharedTabClosable(original, tabId, tab, latestTabId)) continue;
         if (await closeSharedTab(original, tabId, tab, { userId: key, reason: 'shared_idle' })) tabsReapedTotal.inc();
@@ -3489,6 +3521,7 @@ sharedIdentityWindow = createSharedIdentityWindowOpener({
   registerPage: registerSharedIdentityPage,
   isBusy: identityBusy,
   parkingEnabled: async () => Boolean(await refreshSharedParkDisplay()),
+  transitionTimeoutMs: CONFIG.sharedIdentityOpenTimeoutMs,
 });
 
 /**
@@ -3519,7 +3552,8 @@ sharedIdentityWindow = createSharedIdentityWindowOpener({
  *     responses:
  *       200: { description: "Shared identity is visible; restarted is true after a headless transition; restoreFailed is true if bounded URL restoration failed." }
  *       404: { description: Identity is not configured for shared mode. }
- *       409: { description: Identity is busy, or context_restart_required because a legacy headless context still has live tabs. }
+ *       409: { description: "Identity is busy, or context_restart_required because a legacy headless context still has live tabs." }
+ *       503: { description: "identity_transition_timeout. The open did not settle within its deadline. The identity stays unavailable until that browser operation settles; it is not silently retried." }
  */
 app.post('/browser/identities/:userId/open', async (req, res) => {
   const userId = normalizeUserId(req.params.userId);
@@ -3527,7 +3561,7 @@ app.post('/browser/identities/:userId/open', async (req, res) => {
   try {
     const requestedTabId = req.body?.tabId ?? null;
     const allowRestart = req.body?.allowRestart === true;
-    const result = await transitionIdentity(userId, 'open', () => sharedIdentityWindow.openWindow(userId, requestedTabId, { allowRestart }), { coalesceKey: JSON.stringify([requestedTabId, allowRestart]) });
+    const result = await transitionIdentity(userId, 'open', waitFor => sharedIdentityWindow.openWindow(userId, requestedTabId, { allowRestart, waitFor }), { coalesceKey: JSON.stringify([requestedTabId, allowRestart]) });
     if (result.busy) return res.status(409).json({ error: 'identity busy' });
     return res.json(result);
   } catch (err) {

@@ -126,7 +126,7 @@ describe('shared identity headed transition', () => {
     const focus = jest.spyOn(manager, 'focus');
     const result = await opener.openWindow('personal', null, { allowRestart: true });
 
-    expect(focus).toHaveBeenCalledWith('personal');
+    expect(focus).toHaveBeenCalledWith('personal', expect.objectContaining({ transitionCheck: expect.any(Function) }));
     expect(result).toMatchObject({ ok: true, userId: 'personal', focused: true, tabId: 'personal-new-tab', keepOpen: true });
     focus.mockRestore();
     await opener.closeSession('personal', sessions.get('personal'));
@@ -157,7 +157,7 @@ describe('shared identity headed transition', () => {
     const focus = jest.spyOn(manager, 'focus').mockResolvedValueOnce(null).mockResolvedValueOnce(await contexts[0].context.newPage());
     const result = await opener.openWindow('personal', null, { allowRestart: true });
     expect(result).toMatchObject({ restarted: true, focused: true, tabId: 'personal-new-tab' });
-    expect(opener.closeSession).toHaveBeenCalledWith('personal', oldSession, { reason: 'headed_transition' });
+    expect(opener.closeSession).toHaveBeenCalledWith('personal', oldSession, expect.objectContaining({ reason: 'headed_transition', transitionCheck: expect.any(Function) }));
     expect(contexts).toHaveLength(2);
     focus.mockRestore();
   });

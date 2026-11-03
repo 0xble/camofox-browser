@@ -144,7 +144,7 @@ describe('parking initialization failures', () => {
     const opener = createSharedIdentityWindowOpener({ parkingEnabled: true, sessions, manager: { failedClosures: new Map(), focus },
       getSession, closeSession, registerPage: () => 'T', isBusy: () => false });
     expect(await opener.openWindow('identity')).toMatchObject({ focused: true, tabId: 'T' });
-    expect(getSession).toHaveBeenCalledTimes(1); expect(getSession).toHaveBeenCalledWith('identity', { parkedOpen: true });
+    expect(getSession).toHaveBeenCalledTimes(1); expect(getSession).toHaveBeenCalledWith('identity', expect.objectContaining({ parkedOpen: true }));
     expect(closeSession).not.toHaveBeenCalled(); expect(focus).toHaveBeenCalledTimes(1);
   });
   test('a fallback context still opens its requested tab through the legacy path', async () => {
