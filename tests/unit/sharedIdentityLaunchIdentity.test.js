@@ -69,6 +69,9 @@ describe('shared identity persistent launch identity', () => {
     expect(contexts[0].timezoneId).toBeUndefined();
     expect(fingerprint[0]).not.toHaveProperty('geolocation');
     expect(contexts[0]).not.toHaveProperty('geolocation');
+    // Shared persistent contexts are never proxied or GeoIP-spoofed, so the
+    // ephemeral proxy path's geolocation grant must not leak onto them.
+    expect(contexts[0]).not.toHaveProperty('permissions');
   });
 
   test('warm-up and headed launches receive the same configured identity', async () => {
