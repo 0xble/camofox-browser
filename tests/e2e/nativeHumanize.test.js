@@ -77,5 +77,5 @@ describe('native humanized first click', () => {
         await page.close();
       }
     }
-  });
+  }, COLD_PAGES * (CLICK_BOUND_MS + 5_000));
 });
