@@ -57,12 +57,17 @@ release/reopen, sibling form input, native refusal, and protected human siblings
 - AppKit `hidden=false`/`active=true` proves application state, not physical
   placement of the requested window. Prepare the existing visibility addon
   before persistent launch in show-only mode; never park/create/close windows.
+  Display discovery and addon readiness are optional for agent acquisition: their
+  failure leaves AppKit hiding and tab creation working, but handoff fails closed
+  before unhide with no visible/focused success or ownership transfer.
 - Resolve the exact tab/window with the temporary title marker, then bind its
   native CG number using an unused horizontal main-display position signature. beta.41
   fingerprint-controlled native sizes do not reliably follow resize requests,
   and macOS clamps vertical position for tall fingerprint-sized windows.
   Reserve positions absent from current native windows and other bindings;
   never accept a main-display sibling or empty window list as target proof.
+  Revalidate the position reservation against a fresh native list immediately
+  before each bind update; readbacks before this reservation cannot bind a number.
 - Discover NSScreen main geometry afresh, move only the resolved window with
   `browser.windows.update`, and require bound-number native main-placement proof
   before ownership transfer. Focus requires that exact window frontmost within

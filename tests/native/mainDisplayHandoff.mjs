@@ -31,7 +31,7 @@ for (const offMain of [false, true]) test(`app-hidden handoff preserves inputs a
           const control = await createSharedIdentityVisibility(await discoverDisplay(), { profilePath: profile, showOnly: true,
             discoverDisplay, nativeReadback: async () => { const windows = await read(); firstNative ??= windows; return windows; } });
           const open = control.open.bind(control);
-          control.open = async page => (nativeProof = await open(page));
+          control.open = async (page, options) => (nativeProof = await open(page, options));
           return control;
         },
       })),

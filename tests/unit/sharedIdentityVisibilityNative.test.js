@@ -213,6 +213,29 @@ describe('native readback in the add-on (Camoufox-spoofed windows.get)', () => {
     expect(browser.windows.remove).not.toHaveBeenCalled();
     expect(nativelyParked(windows.get(1).native, display)).toBe(true);
   });
+  test('a sibling omitted from the first read cannot steal a cached show-only x signature', async () => {
+    await setup({ showOnly: true });
+    windows.set(1, { id: 1, tabs: [{ id: 1, windowId: 1 }], native: { ...windowBounds(display.park) } });
+    windows.set(2, { id: 2, tabs: [{ id: 2, windowId: 2 }], native: { ...onMain, left: display.main.left } });
+    const real = readback.getMockImplementation();
+    readback.mockImplementationOnce(async () => (await real()).filter(w => w.number !== 1002));
+    browser.windows.update.mockImplementation(async () => ({}));
+    const document = { title: 'original' };
+    browser.tabs.query = async ({ title }) => title === document.title ? [{ id: 1, windowId: 1 }] : [];
+    const page = { evaluate: async (fn, args) => vm.runInNewContext(`(${fn})(args)`, { document, args }) };
+    await expect(visibility.open(page)).rejects.toThrow(/native window identity/);
+    expect(visibility.visible.size).toBe(0);
+    expect(windows.get(1).native).toEqual(windowBounds(display.park));
+    expect(windows.get(2).native).toEqual({ ...onMain, left: display.main.left });
+    // A failed attempt's cached signature must not bind a sibling on the next command.
+    const reservedLeft = browser.windows.update.mock.calls.at(-1)[1].left;
+    windows.get(2).native.left = reservedLeft;
+    await expect(visibility.open(page)).rejects.toThrow(/native window identity/);
+    expect(visibility.visible.size).toBe(0);
+    expect(windows.get(1).native).toEqual(windowBounds(display.park));
+    expect(windows.get(2).native.left).toBe(reservedLeft);
+    expect(browser.windows.remove).not.toHaveBeenCalled();
+  });
   test('aborted show-only native work cannot move the target after a later release', async () => {
     await setup({ showOnly: true });
     windows.set(1, { id: 1, tabs: [{ id: 1, windowId: 1 }], native: { ...windowBounds(display.park) } });

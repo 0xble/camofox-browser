@@ -184,6 +184,44 @@ test('app-hidden window addon is prepared before launch and cleaned up on launch
   assert.equal(closed, true);
 });
 
+for (const failure of ['display query failed', 'display query timed out', 'addon ready ack failed', 'addon ready ack timed out']) {
+  test(`${failure} degrades only handoff, preserving launch and agent pages`, async () => {
+    let closes = 0, shows = 0;
+    const unavailable = Error(failure);
+    const { visibility } = controller(async (_pid, hidden) => {
+      if (!hidden) shows++;
+      return { hidden, active: !hidden };
+    }, { timeoutMs: 30, createWindowControl: async () => {
+      if (!failure.startsWith('addon')) await findMainDisplay({ platform: 'darwin', execute: async () => {
+        if (failure.includes('timed out')) throw unavailable;
+        return { stdout: '[]' };
+      } });
+      return { addon: 'native-addon', attach: async () => {
+        if (failure.includes('timed out')) await new Promise(() => {});
+        throw unavailable;
+      },
+        open: async () => assert.fail('an unattached addon cannot prove handoff'), close: async () => {} };
+    } });
+    const page = { isClosed: () => false, bringToFront: async () => {}, input: 'unsaved' };
+    const context = { close: async () => { closes++; }, pages: () => [page], newPage: async () => page };
+    const acquired = await launchWithVisibilityFallback({ display: null, profilePath: '/test/profile',
+      createBackgroundVisibility: () => visibility, launch: async () => context });
+    assert.equal(acquired, context);
+    assert.equal(await visibility.newPage(context), page);
+    assert.equal(page.input, 'unsaved');
+    assert.equal(visibility.visible.size, 0);
+    assert.equal(visibility.capability().sameContextHandoff, false);
+    const session = { visibility, tabGroups: new Map() }, humans = new Set(), tabState = { page };
+    await assert.rejects(applySharedTabHandoff({ tabId: 'A', handoff: 'human', tabState, session,
+      humanControlledTabs: humans }), /native window handoff unavailable/);
+    assert.equal(humans.size, 0);
+    assert.equal(tabState.handoff, undefined);
+    assert.equal(shows, 0, 'unavailable handoff must not unhide the application');
+    assert.equal(closes, 0);
+    await visibility.close();
+  });
+}
+
 test('native unhide refusal errors and does not transfer human control', async () => {
   const { visibility } = controller(async () => ({ hidden: true, active: false, activated: true }));
   await visibility.attach();
@@ -422,7 +460,8 @@ nativeTest('native AppKit readback confirms repeated hide/show of an owned dispo
     win.title='Disposable Visibility Test';win.orderFrontRegardless;
     console.log('fixture-ready');app.run;`;
   const child = spawn('/usr/bin/osascript', ['-l', 'JavaScript', '-e', code], {
-    stdio: ['ignore', 'pipe', 'pipe'], timeout: 10000, env: { PATH: '/usr/bin:/bin', HOME: os.homedir() },
+    // Keep the fixture alive across the bounded native calls under full-suite load.
+    stdio: ['ignore', 'pipe', 'pipe'], timeout: 30000, env: { PATH: '/usr/bin:/bin', HOME: os.homedir() },
   });
   try {
     await new Promise((resolve, reject) => {
