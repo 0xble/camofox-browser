@@ -4,17 +4,18 @@
 # camoufox-js's `fetch` installs whatever daijro/camoufox marks latest. When
 # v156.0.1-beta.34 shipped (2026-10-04) every browser test failed with
 # "Unknown property navigator.product in config", because camoufox-js 0.11.5
-# targets the 152 engine. CI must test the engine that is actually deployed
-# (MAINTENANCE.md: Camoufox 152.0.4-beta.30), so install exactly that build.
+# is incompatible with that engine's property set. v158.0.1-beta.41 works with
+# 0.11.5 and fixes native mouse acknowledgement deadlocks (#751/#752). Keep CI,
+# Docker and the separately managed deployment pin aligned (MAINTENANCE.md).
 #
 # Requires: gh (authenticated via GH_TOKEN), unzip, sha256sum.
 set -euo pipefail
 
-VERSION=152.0.4
-RELEASE=beta.30
-MIRROR_TAG=camoufox-backup-380139564
+VERSION=158.0.1
+RELEASE=beta.41
+MIRROR_TAG=camoufox-backup-428447379
 ASSET="camoufox-${VERSION}-${RELEASE}-lin.x86_64.zip"
-SHA256=5720d45b894ce1770543de024c6f10d514b38be560fa2dc3226b3d8586caf672
+SHA256=3f2eb1d0451fa58e45e43e55f5e6181565069791ae60c0574f0ceb1f01341c33
 INSTALL_DIR="${CAMOUFOX_INSTALL_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/camoufox}"
 # The mirror lives in this fork. Do not derive it from GITHUB_REPOSITORY:
 # forks of the fork would look for a release they do not have.
