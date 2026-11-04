@@ -5,6 +5,7 @@ import { EventEmitter, once } from 'node:events';
 import { spawn } from 'node:child_process';
 import fs from 'node:fs/promises';
 import vm from 'node:vm';
+import os from 'node:os';
 import { launchWithVisibilityFallback } from '../../lib/shared-identity-visibility.js';
 import { createDarwinIdentityVisibility, setDarwinAppHidden } from '../../lib/darwin-identity-visibility.js';
 import { createSharedIdentityWindowOpener } from '../../lib/shared-identity-window.js';
@@ -53,9 +54,9 @@ for (const all of [false, true]) {
   });
 }
 
-function controller(setHidden = async (_pid, hidden) => ({ hidden, active: !hidden, activated: !hidden })) {
+function controller(setHidden = async (_pid, hidden) => ({ hidden, active: !hidden, activated: !hidden }), options = {}) {
   let processes = [{ pid: 12, ppid: 10, args: '/engine/camoufox -profile /test/profile -juggler-pipe' }];
-  const visibility = createDarwinIdentityVisibility('/test/profile', { rootPid: 10, snapshot: () => processes, setHidden });
+  const visibility = createDarwinIdentityVisibility('/test/profile', { rootPid: 10, snapshot: () => processes, setHidden, ...options });
   return { visibility, forgetProcess: () => { processes = []; } };
 }
 
@@ -111,18 +112,24 @@ test('hide refusal reports failure and retains visible state without closing any
   assert.equal(visibility.visible.size, 1);
 });
 
-test('inactive native show is rejected by open and human handoff without claiming focus', async () => {
+test('inactive native show succeeds without claiming focus and transfers human control', async () => {
   const { visibility } = controller(async (_pid, hidden) => ({ hidden, active: false, activated: false }));
   await visibility.attach();
   const page = { isClosed: () => false, bringToFront: async () => {} };
   const session = { visibility, context: { pages: () => [page] }, tabGroups: new Map() };
   const opener = createSharedIdentityWindowOpener({ sessions: new Map([['identity', session]]), manager: {},
     getSession: async () => session, registerPage: () => 'tab-A', isBusy: () => false });
-  await assert.rejects(opener.openWindow('identity'), /activation was not confirmed/);
+  const opened = await opener.openWindow('identity');
+  assert.equal(opened.visible, true);
+  assert.equal(opened.focused, false);
   assert.equal(session.headed, true, 'visible but inactive must remain protected from expiry');
   const humans = new Set();
-  await assert.rejects(applySharedTabHandoff({ tabId: 'A', handoff: 'human', tabState: { page }, session, humanControlledTabs: humans }), /activation was not confirmed/);
-  assert.equal(humans.size, 0);
+  const tabState = { page };
+  const handedOff = await applySharedTabHandoff({ tabId: 'A', handoff: 'human', tabState, session, humanControlledTabs: humans });
+  assert.equal(handedOff.visible, true);
+  assert.equal(handedOff.focused, false);
+  assert.equal(tabState.handoff, 'human');
+  assert.equal(humans.has('A'), true);
   const native = await setDarwinAppHidden(12, false, { execute: async (_file, args) => {
     const app = { isNil: () => false, terminated: false, hidden: true, active: false,
       get unhide() { this.hidden = false; }, activateWithOptions: () => false };
@@ -133,6 +140,70 @@ test('inactive native show is rejected by open and human handoff without claimin
   assert.equal(native.hidden, false);
   assert.equal(native.active, false, 'read back native activation instead of equating unhide with focus');
   assert.equal(native.activated, false);
+});
+
+test('native unhide refusal errors and does not transfer human control', async () => {
+  const { visibility } = controller(async () => ({ hidden: true, active: false, activated: true }));
+  await visibility.attach();
+  const page = { isClosed: () => false, bringToFront: async () => {} };
+  await assert.rejects(visibility.open(page), /visibility change was not confirmed/);
+  const session = { visibility, tabGroups: new Map() }, humans = new Set();
+  const tabState = { page };
+  await assert.rejects(applySharedTabHandoff({ tabId: 'A', handoff: 'human', tabState, session, humanControlledTabs: humans }), /visibility change was not confirmed/);
+  assert.equal(humans.size, 0);
+  assert.equal(tabState.handoff, undefined);
+});
+
+for (const operation of ['open', 'newPage']) {
+  test(`hung ${operation} times out, releases the identity queue and fences late continuations`, async () => {
+    const calls = [];
+    const { visibility } = controller(async (_pid, hidden) => {
+      calls.push(hidden); return { hidden, active: !hidden, activated: !hidden };
+    }, { timeoutMs: 30 });
+    await visibility.attach();
+    let finish;
+    const hung = new Promise(resolve => { finish = resolve; });
+    const page = { bringToFront: () => hung };
+    const operationPromise = operation === 'open' ? visibility.open(page) : visibility.newPage({ newPage: () => hung });
+    // The outer guard fails the regression promptly on an unbounded implementation.
+    let guard;
+    try {
+      const outcome = await Promise.race([
+        operationPromise.then(() => null, error => error),
+        new Promise(resolve => { guard = setTimeout(() => resolve(null), 250); }),
+      ]);
+      assert.match(outcome?.message || '', /visibility.*timed out/);
+      assert.equal(outcome.code, 'request_timeout');
+      assert.deepEqual(calls, [true], 'timeout itself must not hide or close anything');
+      assert.equal(visibility.visible.size, 1, 'unconfirmed browser work must remain protected');
+      assert.equal(await visibility.release(), true, 'later work must not wait for the hung browser call');
+      await visibility.open({ bringToFront: async () => {} });
+      assert.deepEqual(calls, [true, true, false]);
+      finish({});
+      await new Promise(resolve => setImmediate(resolve));
+      assert.deepEqual(calls, [true, true, false], 'late work must not show or hide after a newer operation');
+      assert.equal(visibility.visible.size, 1);
+    } finally {
+      clearTimeout(guard); finish({});
+      await operationPromise.catch(() => {});
+    }
+  });
+}
+
+test('timed-out native readback cannot overwrite a later visibility change', async () => {
+  let delayed = false, finish;
+  const { visibility } = controller(async (_pid, hidden) => {
+    if (delayed) { delayed = false; return new Promise(resolve => { finish = resolve; }); }
+    return { hidden, active: !hidden, activated: true };
+  }, { timeoutMs: 30 });
+  await visibility.open({ bringToFront: async () => {} });
+  delayed = true;
+  await assert.rejects(visibility.release(), /visibility.*timed out/);
+  assert.equal(visibility.visible.size, 1);
+  await visibility.open({ bringToFront: async () => {} });
+  finish({ hidden: true, active: false, activated: false });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(visibility.visible.size, 1, 'stale native readback must not clear newer visible state');
 });
 
 test('an unconfirmed show remains visible to expiry checks', async () => {
@@ -179,32 +250,88 @@ test('failed first hide closes only the new empty context, with no fallback rela
   assert.equal(closes, 1);
 });
 
-test('legacy headed acquisitions cannot bypass an app-hidden controller focus failure', async () => {
+test('legacy headed acquisitions cannot bypass an app-hidden controller visibility failure', async () => {
   for (const mode of ['first', 'headless', 'ended']) {
     const page = { isClosed: () => false, bringToFront: async () => {}, url: () => 'about:blank' };
     const context = { pages: () => [page], newPage: async () => page };
     const replacement = { context, headed: false, tabGroups: new Map(), visibility: {
-      visible: new Map([[0, {}]]), open: async () => { throw Error('native focus refused'); } } };
+      visible: new Map([[0, {}]]), open: async () => { throw Error('native unhide refused'); } } };
     const sessions = new Map(mode === 'first' ? [] : [['identity', { context, headed: mode === 'ended', tabGroups: new Map() }]]);
     let focuses = 0;
     const opener = createSharedIdentityWindowOpener({ sessions,
       manager: { failedClosures: new Set(), focus: async () => mode === 'ended' && focuses++ === 0 ? null : page },
       getSession: async () => { sessions.set('identity', replacement); return replacement; },
       closeSession: async () => {}, registerPage: () => 'A', isBusy: () => false });
-    await assert.rejects(opener.openWindow('identity', mode === 'first' ? 'stale' : null, { allowRestart: true }), /native focus refused/, mode);
+    await assert.rejects(opener.openWindow('identity', mode === 'first' ? 'stale' : null, { allowRestart: true }), /native unhide refused/, mode);
     assert.equal(replacement.headed, true);
   }
 });
 
-test('explicit headed acquisition shows the app-hidden context and propagates focus failure', async () => {
-  let shown = 0, closes = 0;
-  const page = { isClosed: () => false };
-  const visibility = { attach: async () => {}, open: async target => { assert.equal(target, page); shown++; throw Error('activation was not confirmed'); } };
-  await assert.rejects(launchWithVisibilityFallback({ display: null, headed: true, profilePath: '/test/profile',
-    createBackgroundVisibility: () => visibility,
-    launch: async () => ({ pages: () => [page], close: async () => { closes++; } }) }), /activation was not confirmed/);
-  assert.equal(shown, 1);
-  assert.equal(closes, 1);
+test('all legacy acquisition paths preserve inactive success and native focus readback', async () => {
+  for (const mode of ['first', 'headless', 'ended']) {
+    for (const active of [false, true]) {
+      const { visibility } = controller(async (_pid, hidden) => ({ hidden, active: !hidden && active, activated: false }));
+      const page = { isClosed: () => false, bringToFront: async () => {}, url: () => 'about:blank' };
+      const context = { pages: () => [page], newPage: async () => page };
+      const replacement = { context, headed: false, tabGroups: new Map(), visibility };
+      const sessions = new Map(mode === 'first' ? [] : [['identity', { context, headed: mode === 'ended', tabGroups: new Map() }]]);
+      let focuses = 0;
+      const opener = createSharedIdentityWindowOpener({ sessions,
+        manager: { failedClosures: new Set(), focus: async () => mode === 'ended' && focuses++ === 0 ? null : page },
+        getSession: async () => { sessions.set('identity', replacement); return replacement; },
+        closeSession: async () => {}, registerPage: () => 'A', isBusy: () => false });
+      const result = await opener.openWindow('identity', mode === 'first' ? 'stale' : null, { allowRestart: true });
+      assert.equal(result.visible, true, mode);
+      assert.equal(result.focused, active, mode);
+      assert.equal(replacement.headed, true, mode);
+    }
+  }
+});
+
+test('creating a task tab makes untargeted app-hidden focus select it rather than the initial blank', async () => {
+  const blank = { isClosed: () => false, bringToFront: async () => {}, url: () => 'about:blank' };
+  const page = { isClosed: () => false, bringToFront: async () => {}, url: () => 'about:blank#task' };
+  const { visibility } = controller(async (_pid, hidden) => ({ hidden, active: false, activated: true }));
+  const session = { sharedIdentity: true, context: { pages: () => [blank, page] }, visibility,
+    lastUsedPage: blank, tabGroups: new Map([['initial', new Map([['blank', { page: blank }]])]]) };
+  const sessions = new Map([['identity', session]]);
+  let createTab;
+  const start = source.indexOf("app.post('/tabs',");
+  const end = source.indexOf('\n});', start) + 5;
+  const registerPage = (_session, _userId, target, group) => {
+    const tabId = target === page ? 'task' : 'blank', tabState = { page: target, lastNavigationHttpStatus: null };
+    if (group) session.tabGroups.set(group, new Map([[tabId, tabState]]));
+    return { tabId, tabState };
+  };
+  vm.runInNewContext(source.slice(start, end), {
+    app: { post: (_path, handler) => { createTab = handler; } }, sessions,
+    normalizeUserId: String, FLY_MACHINE_ID: '', MAX_TABS_PER_SESSION: 10, MAX_TABS_GLOBAL: 10,
+    withRequestDeadline: operation => operation(new AbortController().signal), getSession: async () => session,
+    getTotalTabCount: () => 2, createPageWithRecoveryForUser: async () => ({ session, page, lease: {} }),
+    registerPage, releasePageLease() {}, refreshActiveTabsGauge() {}, pluginEvents: { emit() {} }, log() {}, requestTimeoutMs: () => 1000,
+  });
+  let created;
+  await createTab({ body: { userId: 'identity', sessionKey: 'task-group' } }, { json: data => { created = data; } });
+  assert.equal(created.tabId, 'task');
+  const opener = createSharedIdentityWindowOpener({ sessions, getSession: async () => session,
+    registerPage: (...args) => registerPage(...args).tabId, manager: {}, isBusy: () => false });
+  const focused = await opener.openWindow('identity');
+  assert.equal(focused.tabId, 'task');
+  assert.equal(focused.focused, false);
+  assert.equal(focused.visible, true);
+});
+
+test('headed acquisition keeps a shown but inactive app-hidden context', async () => {
+  let closes = 0;
+  const page = { isClosed: () => false, bringToFront: async () => {} };
+  const { visibility } = controller(async (_pid, hidden) => ({ hidden, active: false, activated: true }));
+  const context = { pages: () => [page], close: async () => { closes++; } };
+  const acquired = await launchWithVisibilityFallback({ display: null, headed: true, profilePath: '/test/profile',
+    createBackgroundVisibility: () => visibility, launch: async () => context });
+  assert.equal(acquired, context);
+  assert.equal(acquired.sharedIdentityVisibility, visibility);
+  assert.equal(visibility.visible.size, 1);
+  assert.equal(closes, 0);
 });
 
 test('failed initial hide preserves its error and records an unconfirmed close', async () => {
@@ -242,7 +369,7 @@ nativeTest('native AppKit readback confirms repeated hide/show of an owned dispo
     win.title='Disposable Visibility Test';win.orderFrontRegardless;
     console.log('fixture-ready');app.run;`;
   const child = spawn('/usr/bin/osascript', ['-l', 'JavaScript', '-e', code], {
-    stdio: ['ignore', 'pipe', 'pipe'], timeout: 10000,
+    stdio: ['ignore', 'pipe', 'pipe'], timeout: 10000, env: { PATH: '/usr/bin:/bin', HOME: os.homedir() },
   });
   try {
     await new Promise((resolve, reject) => {
@@ -257,14 +384,12 @@ nativeTest('native AppKit readback confirms repeated hide/show of an owned dispo
     await visibility.attach();
     assert.equal(visibility.visible.size, 0);
     for (let index = 0; index < 3; index++) {
-      let error;
-      try { await visibility.open({ bringToFront: async () => {} }); }
-      catch (failure) { error = failure; }
+      const shown = await visibility.open({ bringToFront: async () => {} });
       assert.equal(readback.hidden, false, 'the disposable application must unhide');
       assert.equal(typeof readback.active, 'boolean');
       assert.equal(typeof readback.activated, 'boolean');
-      if (readback.active && readback.activated) assert.equal(error, undefined);
-      else assert.match(error?.message || '', /activation was not confirmed/);
+      assert.equal(shown.visible, true);
+      assert.equal(shown.focused, readback.active, 'reported focus must equal native active state, whichever it is');
       assert.equal(visibility.visible.size, 1);
       await visibility.release();
       assert.equal(visibility.visible.size, 0);

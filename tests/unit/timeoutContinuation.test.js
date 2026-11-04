@@ -19,6 +19,8 @@ describe('timed-out tab operations', () => {
     stateDir = mkdtempSync(join(tmpdir(), 'camofox-timeout-'));
     await startServer(0, {
       HANDLER_TIMEOUT_MS: '5000', CAMOFOX_SHARED_IDENTITIES: 'timeout-probe',
+      // This fixture budgets tab actions, not host-specific parking discovery.
+      CAMOFOX_PARK_DISPLAY: '__camofox_timeout_fixture_no_display__',
       CAMOFOX_SHARED_IDENTITY_MAP: '', CAMOFOX_SHARED_IDENTITY_EXTENSIONS: '',
       CAMOFOX_SHARED_PROFILE_DIR: join(stateDir, 'shared'), CAMOFOX_PROFILE_DIR: join(stateDir, 'profiles'),
       CAMOFOX_COOKIES_DIR: join(stateDir, 'cookies'), CAMOFOX_UPLOADS_DIR: join(stateDir, 'uploads'),
@@ -39,6 +41,12 @@ describe('timed-out tab operations', () => {
       health = await readyClient.request('GET', '/health', null, { timeout: 1000 });
     }
     console.log('timeout fixture browser ready', { ms: Date.now() - readyStart });
+    // Global prewarming does not launch a persistent identity's native app.
+    // Keep that cold start outside the deliberately short action deadline.
+    if (process.platform === 'darwin') {
+      await readyClient.request('POST', '/browser/identities/timeout-probe/open', {});
+      await readyClient.request('POST', '/browser/identities/timeout-probe/release', {});
+    }
     await startTestSite();
     testSiteUrl = getTestSiteUrl();
     gateServer = createServer((req, res) => {
@@ -198,7 +206,7 @@ describe('timed-out tab operations', () => {
         }
       }
       expect((await client.evaluate(tabId, 'window.actionOrder.push("new"); window.actionOrder')).result).toEqual(['old', 'new']);
-      await expect(handoff('human')).resolves.toMatchObject({ handoff: 'human', focused: true });
+      await expect(handoff('human')).resolves.toMatchObject({ handoff: 'human', focused: process.platform === 'darwin' ? expect.any(Boolean) : true });
       await expect(client.evaluate(tabId, 'window.actionOrder.push("stale")')).rejects.toMatchObject({ status: 409 });
       await expect(client.getSnapshot(tabId)).rejects.toMatchObject({
         status: 409, data: expect.objectContaining({ code: 'tab_handed_off' }),
