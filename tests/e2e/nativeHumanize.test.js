@@ -21,10 +21,11 @@ describe('native humanized first click', () => {
           <button id="edge" style="position:absolute;left:480px;top:0;width:180px;height:64px">Top edge</button>
           <button id="middle" style="position:absolute;left:480px;top:320px;width:180px;height:64px">Mid page</button>
           <script>
-            window.clicked = null;
             for (const button of document.querySelectorAll('button')) {
               button.addEventListener('click', event => {
-                if (event.isTrusted) window.clicked = button.id;
+                // Playwright evaluates in Camoufox's isolated world. The DOM
+                // is shared with the page; window globals are not.
+                if (event.isTrusted) document.documentElement.dataset.trustedClick = button.id;
               });
             }
           </script>
@@ -66,7 +67,7 @@ describe('native humanized first click', () => {
         await Promise.race([
           (async () => {
             await page.locator(`#${target}`).click({ timeout: CLICK_BOUND_MS });
-            await page.waitForFunction(id => window.clicked === id, target, { timeout: CLICK_BOUND_MS });
+            await page.waitForFunction(id => document.documentElement.dataset.trustedClick === id, target, { timeout: CLICK_BOUND_MS });
           })(),
           new Promise((_, reject) => {
             timer = setTimeout(() => reject(new Error(`${target} cold page ${trial}: trusted click handler did not finish within ${CLICK_BOUND_MS} ms`)), CLICK_BOUND_MS);
