@@ -434,14 +434,20 @@ function createTestApp() {
   });
 
   app.get('/popup-target', (req, res) => {
-    res.send(`
+    const delayMs = Number(req.query.delayMs) || 0;
+    const send = () => res.send(`
       <!DOCTYPE html>
       <html><head><title>Popup Target</title></head>
       <body>
         <h1>Popup Target Page</h1>
         <p>This page was opened as a popup.</p>
+        <script>
+          addEventListener('load', () => window.opener?.postMessage('popup-target-ready', location.origin), { once: true });
+        </script>
       </body></html>
     `);
+    if (delayMs > 0) setTimeout(send, delayMs);
+    else send();
   });
   
   return app;
