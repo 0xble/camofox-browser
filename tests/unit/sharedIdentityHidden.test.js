@@ -451,6 +451,60 @@ test('AppKit operation has finite bounds and does not pass the host environment'
   await assert.rejects(setDarwinAppHidden(-1, true), /invalid/);
 });
 
+async function appKitReadback(app, { hidden = true, readOnly = false, lookup = () => app, tick = () => {} } = {}) {
+  return setDarwinAppHidden(12, hidden, { readOnly, execute: async (_file, args) => {
+    const $ = { NSRunningApplication: { runningApplicationWithProcessIdentifier: lookup },
+      NSRunLoop: { currentRunLoop: { runUntilDate: tick } }, NSDate: { dateWithTimeIntervalSinceNow() {} } };
+    return { stdout: vm.runInNewContext(`${args[3]};run(${JSON.stringify(args.slice(-2))})`, { ObjC: { import() {} }, $, Boolean, JSON, Number, Error }) };
+  } });
+}
+
+test('AppKit reissues an unconfirmed hide after servicing its run loop', async () => {
+  let hides = 0, ticks = 0;
+  const app = { isNil: () => false, terminated: false, hidden: false, active: false,
+    get hide() { hides++; if (ticks > 0) this.hidden = true; return false; } };
+  const result = await appKitReadback(app, { tick: () => { ticks++; } });
+  assert.equal(result.hidden, true, 'a rejected early request needs another hide, not just more readback');
+  assert.equal(hides, 2);
+  assert.ok(ticks > 0);
+});
+
+test('AppKit waits a bounded run-loop turn for a newly launched PID to register', async () => {
+  let ticks = 0;
+  const app = { isNil: () => false, terminated: false, hidden: false, active: false,
+    get hide() { this.hidden = true; } };
+  const result = await appKitReadback(app, { lookup: () => ticks ? app : null, tick: () => { ticks++; } });
+  assert.equal(result.hidden, true);
+  assert.equal(ticks, 2, 'one registration turn and one hide readback turn');
+});
+
+test('AppKit hide confirmation tolerates startup taking longer than the old ten turns', async () => {
+  let ticks = 0;
+  const app = { isNil: () => false, terminated: false, hidden: false, active: false,
+    get hide() { if (ticks >= 12) this.hidden = true; } };
+  assert.equal((await appKitReadback(app, { tick: () => { ticks++; } })).hidden, true);
+  assert.equal(ticks, 13);
+});
+
+test('AppKit hide refusal stays bounded and cannot claim hidden state', async () => {
+  let hides = 0, ticks = 0;
+  const app = { isNil: () => false, terminated: false, hidden: false, active: false,
+    get hide() { hides++; return false; } };
+  assert.equal((await appKitReadback(app, { tick: () => { ticks++; } })).hidden, false);
+  assert.equal(hides, 30);
+  assert.equal(ticks, 30);
+  ticks = 0;
+  await assert.rejects(appKitReadback(null, { tick: () => { ticks++; } }), /not running/);
+  assert.equal(ticks, 10);
+});
+
+test('AppKit read-only lookup never hides, unhides or activates an application', async () => {
+  const app = { isNil: () => false, terminated: false, hidden: true, active: false,
+    get hide() { assert.fail('read must not hide'); }, get unhide() { assert.fail('read must not unhide'); },
+    activateWithOptions() { assert.fail('read must not activate'); } };
+  assert.equal((await appKitReadback(app, { hidden: false, readOnly: true })).hidden, true);
+});
+
 // Exercise the real AppKit bridge without touching a live browser or account.
 const nativeTest = process.platform === 'darwin' ? test : test.skip;
 nativeTest('native AppKit readback confirms repeated hide/show of an owned disposable application', async () => {
