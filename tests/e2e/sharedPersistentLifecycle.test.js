@@ -211,18 +211,33 @@ describe('shared persistent identity lifecycle over HTTP', () => {
     }
   }, 90000);
 
-  test('a popup in a shared identity registers under one tab ID in its opener group', async () => {
+  test.each([0, 2000])('a popup in a shared identity registers under one tab ID in its opener group (target delay %i ms)', async delayMs => {
     try {
       const created = await request('POST', '/tabs', { userId, sessionKey: 'popup-dedup', url: `${testSiteUrl}/popup-source` });
       expect(created.response.status).toBe(200);
-      // The context `page` event and the opener `popup` event both see this page.
+      // Register the target's load notification before opening it. window.open
+      // returns before Firefox's initial navigation and Playwright's Page.ready;
+      // a fixed sleep can inspect the registry before page/popup are published.
       const opened = await request('POST', `/tabs/${created.data.tabId}/evaluate`, {
-        userId, expression: "Boolean(window.open('/popup-target', '_blank'))",
+        userId, expression: `new Promise(resolve => {
+          let popup;
+          const ready = event => {
+            if (event.source !== popup || event.origin !== location.origin || event.data !== 'popup-target-ready') return;
+            removeEventListener('message', ready);
+            resolve(true);
+          };
+          addEventListener('message', ready);
+          popup = window.open('/popup-target?delayMs=${delayMs}', '_blank');
+          if (!popup) {
+            removeEventListener('message', ready);
+            resolve(false);
+          }
+        })`,
       });
       expect(opened.response.status).toBe(200);
-      await new Promise(resolve => setTimeout(resolve, 1500));
-
+      expect(opened.data).toEqual({ ok: true, result: true });
       const listed = await request('GET', `/tabs?userId=${encodeURIComponent(userId)}`);
+      expect(listed.response.status).toBe(200);
       const popups = listed.data.tabs.filter(tab => tab.url.includes('/popup-target'));
       expect(popups).toHaveLength(1);
       expect(new Set(listed.data.tabs.map(tab => tab.tabId)).size).toBe(listed.data.tabs.length);
