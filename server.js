@@ -1699,6 +1699,10 @@ async function closeSessionNow(userId, session, {
     if (!sharedSessionExpiryEligible(key, session)) return false;
   }
 
+  // Retirement clears the registry, but download cleanup still owns these tabs.
+  const downloadSession = clearDownloads
+    ? { tabGroups: new Map([...session.tabGroups].map(([groupId, group]) => [groupId, new Map(group)])) }
+    : session;
   if (session.sharedIdentity) {
     // Enumerate before the final fence: context.pages itself may throw. Every
     // page is retired before asynchronous context close can lose ownership.
@@ -1726,6 +1730,7 @@ async function closeSessionNow(userId, session, {
           session.tabGroups.clear();
           if (sessions.get(key) === session) sessions.delete(key);
           refreshActiveTabsGauge();
+          if (clearDownloads) await clearSessionDownloads(downloadSession).catch(() => {});
         }
         throw err;
       }
@@ -1739,7 +1744,7 @@ async function closeSessionNow(userId, session, {
   if (sessions.get(key) === session) sessions.delete(key);
 
   refreshActiveTabsGauge();
-  if (session.sharedIdentity && clearDownloads) await clearSessionDownloads(session).catch(() => {});
+  if (session.sharedIdentity && clearDownloads) await clearSessionDownloads(downloadSession).catch(() => {});
 }
 
 async function closeAllSessions(reason, { clearDownloads = true, clearLocks = true } = {}) {
@@ -1749,6 +1754,9 @@ async function closeAllSessions(reason, { clearDownloads = true, clearLocks = tr
   if (terminal) sessionLifecycleGeneration++;
   for (const [userId, session] of openSessions) {
     if (terminal) session._terminalClose = true;
+    const downloadSession = clearDownloads
+      ? { tabGroups: new Map([...session.tabGroups].map(([groupId, group]) => [groupId, new Map(group)])) }
+      : session;
     try {
       const closing = closeSession(userId, session, { reason, clearDownloads, clearLocks });
       if (terminal && !(await settleWithin(() => closing, SESSION_CLOSE_STEP_TIMEOUT_MS))) {
@@ -1762,6 +1770,7 @@ async function closeAllSessions(reason, { clearDownloads = true, clearLocks = tr
         session.tabGroups.clear();
         if (sessions.get(userId) === session) sessions.delete(userId);
         refreshActiveTabsGauge();
+        if (clearDownloads) await clearSessionDownloads(downloadSession).catch(() => {});
         throw Object.assign(new Error('session close timed out; continuing terminal browser close'), { code: 'session_close_timeout' });
       }
       await closing;
