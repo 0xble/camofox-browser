@@ -17,7 +17,7 @@ function fixture() {
   const box = {
     AsyncLocalStorage, setTimeout, clearTimeout,
     tabLockTimeoutsTotal: { inc() {} }, refreshTabLockQueueDepth() {},
-    TAB_LOCK_TIMEOUT_MS: 1000, HANDLER_TIMEOUT_MS: 10,
+    TAB_LOCK_TIMEOUT_MS: 1000, HANDLER_TIMEOUT_MS: 10, ABANDONED_TAB_TIMEOUT_MS: 1000,
     findTabOwner: id => owners.get(id), isTabLockQueueTimeout: () => false,
     handleTimedOutTab: jest.fn(async () => ({ destroyed: false })),
   };
@@ -246,7 +246,7 @@ test('retiring cleanup refuses new work and preserves a replacement during page 
   oldOwner.session = session;
   Object.assign(f, {
     findTab: () => ({ tabState: group.get('A'), group, listItemId: 'group' }),
-    safePageClose: () => close.promise, clearTabDownloads: async () => {}, log() {},
+    safePageClose: () => close.promise, clearTabDownloads: async () => {}, log() {}, quarantinePage() {},
     refreshActiveTabsGauge() {}, tabsDestroyedTotal: { labels: () => ({ inc() {} }) },
     pluginEvents: { emit() {} },
   });

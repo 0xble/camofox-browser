@@ -101,6 +101,46 @@ regression passes against the same failure mode, then retire the local repair.
 - **Retire when:** upstream excludes in-flight acquisition from both idle browser
   reclamation paths and the same regressions pass.
 
+#### Page retirement and terminal recovery
+
+A close timeout is not evidence that a page stopped. Quarantine the object before
+any asynchronous retirement work, clear its last-used reference, retire its
+registered state, and reject it at registration, lock entry, focus, visibility,
+handoff and restoration selection. A headed transition's final deadline fence
+must precede the destructive lock drain; no later deadline may skip context close.
+Session publication must also follow its final fence so pending restoration stays
+retryable. Terminal shutdown/restart/disconnect/admin-stop supersedes cancellable
+preparation, bounds cookie reads and pending closes, and still attempts every
+owned context without letting late preparation touch a replacement. A terminal
+lifecycle generation also cancels already-running open/relaunch continuations;
+manager-owned unpublished contexts remain part of terminal cleanup's inventory,
+and acquisitions arriving after that generation must close their exact context.
+
+Retirement/reselection audit inventory:
+
+| Path | Required guard |
+| --- | --- |
+| Single-tab and task-group DELETE | Quarantine before downloads/close; clear last-used; fence queued operations. |
+| Abandoned/unresponsive and generic crash destruction | Exact ownership; missing owner is a no-op; retire before bounded close. |
+| Capacity recycling | Shared safe-close boundary retires outgoing objects even on rejection or timeout. |
+| Shared idle-tab close and ephemeral idle sweep | Retire/drain old lock; an unconfirmed close cannot poison identityBusy forever. |
+| Late/aborted new-page cleanup | Quarantine before injected/default close; context events cannot adopt late pages. |
+| Dead-page navigation replacement and snapshot eviction | Retire outgoing object before ID replacement or asynchronous close. |
+| Shared delete/expiry/dead-context/headed transition | Final fence before destructive drain; quarantine registered and context pages. |
+| Ephemeral teardown/fallback/abandoned-context sweep | Retire every known page; track unconfirmed context closes without page resurrection. |
+| Shutdown/restart/disconnect/admin stop | Fence old preparation; bound cookies/close; still attempt all contexts and browser finalization. |
+| Session publication/pending URL restoration | Fence before publication; preserve pending URL on failure; filter retired blank pages. |
+| Registry replacement and popup adoption | Both registration entrypoints reject quarantine; replacement retires outgoing object; old-context events cannot adopt it. |
+| Parked/legacy/app-hidden acquisition | Filter requested/last-used/context selections and recheck after asynchronous focus/visibility. |
+| Manager focus and native/parked visibility | Reject quarantine before focusing/showing, including retirement while queued. |
+| Human/agent handoff and release restoration | Reject retired target; filter protected/last-used/fallback selections. |
+| Launch/fallback/browser self-test | Only unpublished contexts; unconfirmed launch close retains profile ownership and blocks relaunch. |
+
+Regressions: `abandonedTab`, `retirementFences`, `unavailableIdentityRecovery`,
+`sharedIdentityHidden`, `newPageRecovery`, `sessionCloseBounded`, plus the existing
+page-registry, transition-deadline, expiry and handoff suites. Exercise unconfirmed
+close rather than assuming a fulfilled close means the page is gone.
+
 #### Settling timed-out tab operations
 
 - **Behavior:** a route timeout is not browser cancellation. The existing tab
@@ -114,14 +154,32 @@ regression passes against the same failure mode, then retire the local repair.
   streak: a failed bounded liveness probe retires only that exact tab and returns
   `410 tab_destroyed`, `recovery=create_new_tab`. Concurrent retries do not
   duplicate probes or cleanup. Healthy, navigating, human-controlled, settled
-  or replacement targets are preserved. A successful liveness probe does not
-  clear busy state, so responsive work that never settles still needs explicit
-  tab close. Deferred lock release is one-shot, even for detached continuations
-  or a replaced tab.
+  or replacement targets are preserved during the grace period. Every abandoned
+  lock has a separate 30 s settling ceiling, measured from the route returning
+  with pending browser work. No retry is required, and liveness probes cannot
+  extend it. At the ceiling the exact old lock is retired before bounded page
+  closure, then the tab is removed and callers must create a new tab. The old
+  page is quarantined from all registration paths even when closure cannot be
+  confirmed, so it cannot acquire a fresh tab ID and overlap abandoned work.
+  Both parked and legacy handoff selection exclude it before opening or focusing
+  a page, including requested-tab, last-used and context-page fallbacks. Download
+  file cleanup cannot retain the lock or keep its identity busy. Normal settlement
+  and explicit close cancel the timer. If a human handoff defers recovery past
+  that ceiling, returning agent control re-arms it only for the same still-settling
+  lock and page; an existing ceiling is never extended. Deferred lock release is
+  one-shot, even for detached continuations or a replaced tab.
+- **Upstream checked:** `jo-inc/camofox-browser` master
+  `39c82094013480b373df6600d44c7f036f58356e`. PR #14623 proposes skipping the
+  lock for long evaluates, not cancellation or a bounded abandoned-work lifetime.
+  Preserve serialization rather than adopting overlapping page actions.
 - **Surfaces:** `server.js` (`withTabLock`, `withTimeout`, snapshot),
   `lib/browser-errors.js`, `tests/unit/tabOperationSettling.test.js`,
   `tests/unit/timeoutContinuation.test.js`.
-- **Regression:** `NODE_OPTIONS=--experimental-vm-modules npx jest tests/unit/tabOperationSettling.test.js tests/unit/timeoutContinuation.test.js --runInBand`.
+- **Regression:** `node --test tests/unit/abandonedTab.test.js` runs the
+  deterministic-clock ceiling, nested timeout, stale timer, late continuation,
+  bounded page-close and identity-handoff cases without a browser or dependencies.
+  The Jest unit lane also runs these tests alongside
+  `tests/unit/tabOperationSettling.test.js` and `tests/unit/timeoutContinuation.test.js`.
 - **Rollback:** revert the repair commit. No persisted state changes.
 - **Retire when:** upstream guarantees cancellation or equivalent per-tab
   settling before allowing newer work or human handoff.

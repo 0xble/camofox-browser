@@ -9,6 +9,7 @@
  * session always leaves the registry.
  */
 import { describe, test, expect, jest } from '@jest/globals';
+import { isQuarantinedPage } from '../../lib/page-registry.js';
 import { EventEmitter } from 'node:events';
 import { BrowserContext } from '../../node_modules/playwright-core/lib/client/browserContext.js';
 import { createPluginEvents } from '../../lib/plugins.js';
@@ -59,6 +60,8 @@ describe('bounded session close', () => {
     expect(session.tabGroups.size).toBe(0);
     expect(context.close).toHaveBeenCalledTimes(1);
     expect(hung.close).toHaveBeenCalledWith({ runBeforeUnload: false });
+    expect(isQuarantinedPage(hung)).toBe(true);
+    expect(isQuarantinedPage(healthy)).toBe(true);
     expect(healthy.isClosed()).toBe(true);
     expect(destroyed).toHaveBeenCalledWith({ userId: 'hermes_1', reason: 'session_timeout' });
     expect(log).toHaveBeenCalledWith('warn', 'session context close unconfirmed; closed pages individually',

@@ -30,6 +30,7 @@ function fixture({ parked = true, visibleOther = false, handoff = 'agent' } = {}
     sessions: new Map([['identity', session]]), findTab: (_session, id) => id === 'B' ? { tabState } : null,
     tabNotFoundResponse: res => res.status(404).json({ error: 'Tab not found' }),
     withTabLock, HANDLER_TIMEOUT_MS: 1000, applySharedTabHandoff, humanControlledTabs, log,
+    tabLocks: new Map(), armAbandonedTabRecovery: jest.fn(),
     handleRouteError: (err, _req, res) => res.status(err.statusCode || 500).json({ error: err.message }),
   });
   const request = async (value, res = response()) => {

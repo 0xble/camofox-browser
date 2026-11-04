@@ -1,3 +1,4 @@
+import { quarantinePage, isQuarantinedPage } from '../../lib/page-registry.js';
 import assert from 'node:assert/strict';
 // Use the repository's Jest runner, or run this dependency-free regression with node --test.
 const test = globalThis.test ?? (await import('node:test')).test;
@@ -236,7 +237,7 @@ test('application-wide release preserves another human-controlled task', async (
   assert.equal(humanControlledTabs.has('B'), true);
   assert.equal(session.headed, true);
   const release = serverFunction('releaseIdentity', { sessions: new Map([['identity', session]]), sessionCreations: new Map(),
-    humanControlledTabs, findTab: () => ({ tabState: { page: a } }) });
+    humanControlledTabs, isQuarantinedPage, findTab: () => ({ tabState: { page: a } }) });
   assert.equal((await release('identity', { all: true })).released, false);
   assert.equal(hides, 0);
 });
@@ -417,4 +418,24 @@ test('the app-hidden controller implements the page-registration interface serve
   for (const name of ['isManagedPage', 'shouldRegisterUIPage']) {
     assert.ok(source.includes(`visibility.${name}(`) || source.includes(`visibility?.${name}(`), `server.js no longer calls ${name}`);
   }
+});
+
+test('a queued native visibility open cannot focus a page retired while waiting', async () => {
+  let resume;
+  const held = new Promise(resolve => { resume = resolve; });
+  const { visibility } = controller(async (_pid, hidden) => {
+    if (hidden) await held;
+    return { hidden, active: !hidden };
+  });
+  let focused = false;
+  const page = { isClosed: () => false, bringToFront: async () => { focused = true; } };
+  const attaching = visibility.attach();
+  const opening = visibility.open(page).catch(error => error);
+  await new Promise(resolve => setImmediate(resolve));
+  quarantinePage(page);
+  resume();
+  await attaching;
+  assert.equal((await opening).code, 'tab_destroyed');
+  assert.equal(focused, false);
+  assert.equal(visibility.visible.size, 0);
 });

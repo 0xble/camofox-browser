@@ -1,3 +1,4 @@
+import { isQuarantinedPage } from '../../lib/page-registry.js';
 import { jest } from '@jest/globals';
 import fs from 'node:fs/promises';
 import os from 'node:os';
@@ -144,7 +145,7 @@ describe('parking initialization failures', () => {
     const opener = createSharedIdentityWindowOpener({ parkingEnabled: true, sessions, manager: { failedClosures: new Map(), focus },
       getSession, closeSession, registerPage: () => 'T', isBusy: () => false });
     expect(await opener.openWindow('identity')).toMatchObject({ focused: true, tabId: 'T' });
-    expect(getSession).toHaveBeenCalledTimes(1); expect(getSession).toHaveBeenCalledWith('identity', { parkedOpen: true });
+    expect(getSession).toHaveBeenCalledTimes(1); expect(getSession).toHaveBeenCalledWith('identity', expect.objectContaining({ parkedOpen: true }));
     expect(closeSession).not.toHaveBeenCalled(); expect(focus).toHaveBeenCalledTimes(1);
   });
   test('a fallback context still opens its requested tab through the legacy path', async () => {
@@ -679,7 +680,7 @@ describe('no-relaunch visibility with two concurrent callers', () => {
     const sessions = new Map([['identity', session]]), humanControlledTabs = new Set(['B']);
     const closeSession = jest.fn(), log = jest.fn();
     const releaseIdentity = serverFunction('releaseIdentity', { sessions, sessionCreations: new Map(), sharedParkDisplay: {},
-      findTab: () => null, closeSession, identityBusy: () => true, humanControlledTabs, log });
+      findTab: () => null, closeSession, identityBusy: () => true, humanControlledTabs, isQuarantinedPage, log });
     const cleanIdleSharedSessions = serverFunction('cleanIdleSharedSessions', {
       CONFIG: { hiddenTabIdleMin: 0, headedIdleReleaseMin: 30, hiddenSessionIdleMin: 0 }, sessions, identityTransitions: new Map(),
       sharedIdentityIdlePolicy: { agentIdle: () => true, shouldReleaseHeaded: async () => true },

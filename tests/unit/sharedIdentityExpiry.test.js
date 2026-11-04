@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import vm from 'node:vm';
+import { quarantinePage } from '../../lib/page-registry.js';
 import { createSharedIdentityIdlePolicy } from '../../lib/shared-identity-idle.js';
 import { SharedIdentityManager, cookieCheckpointPath } from '../../lib/shared-identity.js';
 import { hasActivePageLeases } from '../../lib/page-lease.js';
@@ -35,7 +36,8 @@ function fixture({ parked = true } = {}) {
   const sharedIdentities = new SharedIdentityManager({ identities: ['fixture'], profileDir });
   sharedIdentities.contexts.set('fixture', context);
   const deps = {
-    sessions: new Map([['fixture', session]]), sharedIdentities,
+    sessions: new Map([['fixture', session]]), sharedIdentities, quarantinePage,
+    UNAVAILABLE_IDENTITY_CLOSE_REASONS: new Set(['shutdown', 'admin_stop', 'browser_restart', 'browser_disconnected']),
     CONFIG: { hiddenTabIdleMin: 0, headedIdleReleaseMin: 0, hiddenSessionIdleMin: 120 },
     sharedIdentityIdlePolicy: createSharedIdentityIdlePolicy({ readIdleSeconds: async () => 0, clock: () => 121 * 60_000 }),
     sharedIdentityRequests: new Map(), sessionCreations: new Map(), identityTransitions: new Map(),

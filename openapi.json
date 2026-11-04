@@ -576,8 +576,10 @@
             "description": "Identity is not configured for shared mode."
           },
           "409": {
-            "description": "Identity is busy",
-            "or context_restart_required because a legacy headless context still has live tabs.": null
+            "description": "Identity is busy, or context_restart_required because a legacy headless context still has live tabs."
+          },
+          "503": {
+            "description": "identity_transition_timeout. The open did not settle within its deadline. The identity stays unavailable until that browser operation settles; it is not silently retried."
           }
         }
       }

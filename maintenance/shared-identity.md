@@ -52,6 +52,32 @@ in the normal Jest unit suite, and `tests/e2e/sharedPersistentLifecycle.test.js`
 on macOS with parking disabled. Exercise first acquisition, lazy open, repeated
 release/reopen, sibling form input, native refusal, and protected human siblings.
 
+### Bounded identity open
+
+The open endpoint has a 60-second caller deadline (`sharedIdentityOpenTimeoutMs`
+in the JSON config, positive values within Node's timer range). Never-settling
+parking discovery, focus, launch, snapshot or visibility work returns explicit
+503 `identity_transition_timeout` instead of retaining a caller and returning
+`identity busy` for hours. The raw browser operation retains profile ownership;
+there is no cancellation, implicit retry, new identity lock or queue. While it
+is unresolved, later identity/tab requests fail with that same 503, idle cleanup
+leaves the session untouched, and late continuations check before closing,
+launching, creating or navigating a new page. Settling releases the guard.
+Independent parked windows retain their concurrent behavior. Terminal/recovery
+close reasons (`shutdown:*`, `admin_stop`, `browser_restart:*`,
+`browser_disconnected`) bypass this block so a never-settling open cannot prevent
+browser recovery. Bulk session teardown records and logs each failure, then
+continues checkpointing the remaining sessions. Ordinary identity-request closes
+and idle cleanup remain blocked. `unavailableIdentityRecovery.test.js` exercises
+these exceptions and the preserved block using an unresolved real opener.
+
+Upstream `39c82094013480b373df6600d44c7f036f58356e` has no named shared-identity
+opener. Related issues #15183 and #14620 concern ephemeral context/page timeout
+recovery, not this fork's persistent-profile ownership. Keep this bounded local
+adaptation until an upstream equivalent passes `sharedIdentityDeadline.test.js`
+and the existing shared-identity lifecycle suites. Revert the bounded-open
+commit to roll back without deleting profiles. Exact-origin matching is unchanged.
+
 ### Changing Display Topology
 
 Rediscover on creation, visibility commands, health checks, and failed creation. Never
