@@ -22,6 +22,7 @@ import { createSharedIdentityRequestTracker } from './lib/shared-identity-reques
 import { launchSharedIdentityContext } from './lib/shared-identity-launch.js';
 import { findParkDisplay } from './lib/park-display-launcher.js';
 import { launchWithVisibilityFallback, createSharedIdentityVisibility } from './lib/shared-identity-visibility.js';
+import { createDarwinIdentityVisibility } from './lib/darwin-identity-visibility.js';
 import { identityIndicator } from './lib/identity-indicator.js';
 import { extensionsForIdentity } from './lib/profile-extensions.js';
 import { windowSnapshot } from './lib/snapshot.js';
@@ -1690,19 +1691,19 @@ async function closeAllSessions(reason, { clearDownloads = true, clearLocks = tr
 
 async function createSharedIdentityContext(userId, profilePath, { headed = false, parkedOpen = false, transitionCheck = () => {} } = {}) {
   transitionCheck();
-  // A legacy headed transition after a parking failure must stay legacy.
-  // The normal parked opener creates contexts through the default headed=false path;
-  // if parking then fails, an /open launches headed directly instead of twice.
+  // Keep parking when available. On macOS without it, an initially hidden
+  // application supports the same context for agent work and human handoff.
   const display = headed ? null : await refreshSharedParkDisplay();
   transitionCheck();
   return launchWithVisibilityFallback({ display, profilePath, headed, fallbackHeaded: headed || parkedOpen, log,
     createVisibility: (current, options) => createSharedIdentityVisibility(current, { ...options, discoverDisplay: refreshSharedParkDisplay }),
+    createBackgroundVisibility: os.platform() === 'darwin' ? createDarwinIdentityVisibility : undefined,
     launch: ({ headed, visibility }) => {
       transitionCheck();
       return launchSharedIdentityContext(profilePath, {
         headed, visibility, extensions: extensionsForIdentity(CONFIG.sharedIdentityExtensions, userId),
         indicator: identityIndicator(CONFIG.sharedIdentityAliases, userId, CONFIG.identityColors),
-        launchOptions, os, getHostOS, config: CONFIG, events: pluginEvents, log,
+        launchOptions, os, getHostOS, config: CONFIG, hasProxy: !!proxyPool, events: pluginEvents, log,
         firefox: { launchPersistentContext: (...args) => { transitionCheck(); return firefox.launchPersistentContext(...args); } },
       });
     },
@@ -3176,7 +3177,7 @@ async function refreshTabRefs(tabState, options = {}) {
  *                   type: object
  *                   description: Parking capability independent of liveness. Existing legacy headless contexts require an explicitly accepted restart before show.
  *                   properties:
- *                     mode: { type: string, enum: [parking, unavailable, disabled, unsupported, unconfigured] }
+ *                     mode: { type: string, enum: [parking, app-hidden, unavailable, disabled, unsupported, unconfigured] }
  *                     parking: { type: boolean }
  *                     sameContextSessions: { type: integer }
  *                     restartRequiredSessions: { type: integer }
@@ -3201,8 +3202,8 @@ app.get('/health', async (req, res) => {
     session.headed = session.visibility.visible.size > 0;
   }
   const visibility = {
-    mode: !CONFIG.sharedIdentityNames.length ? 'unconfigured' : CONFIG.parkDisplay === 'off' ? 'disabled'
-      : os.platform() !== 'darwin' ? 'unsupported' : sharedParkDisplay ? 'parking' : 'unavailable',
+    mode: !CONFIG.sharedIdentityNames.length ? 'unconfigured'
+      : os.platform() !== 'darwin' ? (CONFIG.parkDisplay === 'off' ? 'disabled' : 'unsupported') : sharedParkDisplay ? 'parking' : 'app-hidden',
     parking: Boolean(sharedParkDisplay),
     sameContextSessions: controllers.filter(session => session.visibility.capability().sameContextHandoff).length,
     restartRequiredSessions: [...sessions.values()].filter(session => session.sharedIdentity && !session.visibility && !session.headed).length,
@@ -3441,7 +3442,7 @@ async function releaseIdentity(userId, { headedOnly = false, all = false, tabId 
     const page = tabId == null ? undefined : findTab(session, tabId)?.tabState.page;
     if (tabId != null && !page) throw Object.assign(new Error('Tab not found'), { statusCode: 404 });
     // Idle release must not move a person's checkout or auth window mid-flow.
-    const keep = keepHumanControlled ? [...session.tabGroups.values()].flatMap(group => [...group])
+    const keep = (keepHumanControlled || session.visibility.capability?.().scope === 'identity') ? [...session.tabGroups.values()].flatMap(group => [...group])
       .filter(([id, tab]) => humanControlledTabs.has(id) && tab.page && !tab.page.isClosed?.()).map(([, tab]) => tab.page) : [];
     // Recompute even after a failed park so idle reaping reflects the windows still shown.
     try { return { ok: true, released: await session.visibility.release(keep.length ? { all, page, keep } : { all, page }) }; }
@@ -3520,7 +3521,7 @@ sharedIdentityWindow = createSharedIdentityWindowOpener({
   closeSession,
   registerPage: registerSharedIdentityPage,
   isBusy: identityBusy,
-  parkingEnabled: async () => Boolean(await refreshSharedParkDisplay()),
+  parkingEnabled: async () => os.platform() === 'darwin' || Boolean(await refreshSharedParkDisplay()),
   transitionTimeoutMs: CONFIG.sharedIdentityOpenTimeoutMs,
 });
 

@@ -82,7 +82,7 @@ test.each([null, { park: {}, main: {} }])('health separates current parking capa
   const res = response(); await handler({}, res);
   expect(res.status).not.toHaveBeenCalled();
   expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ ok: true, visibility: {
-    mode: sharedParkDisplay ? 'parking' : 'unavailable', parking: Boolean(sharedParkDisplay),
+    mode: sharedParkDisplay ? 'parking' : 'app-hidden', parking: Boolean(sharedParkDisplay),
     sameContextSessions: sharedParkDisplay ? 1 : 0, restartRequiredSessions: 1, failedWindows: 2,
   } }));
   expect(refreshSharedParkDisplay).toHaveBeenCalledTimes(1);
