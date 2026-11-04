@@ -84,8 +84,9 @@ Installation, deployment, and runtime activation require separate authorization.
 - The macOS arm64 archive digest is
   `sha256:9038f86d666c9780b6fff199d488737b8596c01f24e3e517845a0ecfb0cf8add`.
   This is a source/CI candidate, not evidence that the live engine was replaced.
-- Both native launch paths enable humanization, including macOS, after the
-  released near-edge mouse acknowledgement fix. See
+- Both native launch paths enable humanization on macOS only when the selected
+  engine metadata is at least `158.0.1-beta.41`; older or unknown engines keep
+  it disabled with one warning. Other platforms retain humanization. See
   [macOS input evidence](maintenance/page-creation-recovery.md).
 - Deployment is separate: the dotfiles launcher `automation/camofox/launch.py`
   still guards `engines/152.0.4-beta.30` and its matching `version.json`.

@@ -11,8 +11,10 @@ Compare both native launch paths and shared page-creation recovery with upstream
 ### CAMOFOX-004: macOS mouse and shared tab creation recovery
 
 - **Status:** Active. Installation and runtime verification remain separate.
-- **Behavior:** enable native mouse humanization on every platform in both
-  launch paths, paired with the `v158.0.1-beta.41` engine pin. This supersedes
+- **Behavior:** both launch paths enable native mouse humanization on macOS
+  only when the selected engine metadata is at least `v158.0.1-beta.41`; old
+  or unknown macOS engines fail closed with one warning. Other platforms keep
+  humanization enabled. The source/CI pin is `v158.0.1-beta.41`. This supersedes
   the macOS workaround for `v152.0.4-beta.30`; it does not remove page-creation
   recovery. Shared page-creation failures never destroy other tasks' identity
   tabs. Request deadlines fence late continuations and close late pages.
