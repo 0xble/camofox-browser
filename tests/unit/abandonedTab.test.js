@@ -26,7 +26,7 @@ function serverFunction(name) {
 // Run the actual lock, timeout, destruction and identity admission functions.
 // Only pages, filesystem cleanup, metrics and the clock are collaborators.
 function fixture() {
-  const timers = new Set(), closed = [], destroyed = [];
+  const timers = new Set(), closed = [], destroyed = [], logs = [];
   const page = name => ({ closed: false, isClosed() { return this.closed; },
     evaluate: expression => typeof expression === 'function' ? Promise.resolve(1) : new Promise(() => {}),
     async close() { this.closed = true; closed.push(name); }, removeAllListeners() {},
@@ -46,20 +46,30 @@ function fixture() {
     findTabOwner(id) { const tabState = group.get(id); return tabState ? { tabState, session, userId: 'identity' } : null; },
     findTab(_session, id) { const tabState = group.get(id); return tabState ? { tabState, group, listItemId: 'task' } : null; },
     isTabLockQueueTimeout: () => false, handleTabTimeout,
-    quarantinePage, clearTabDownloads: async () => {}, log() {}, applySharedTabHandoff,
+    quarantinePage, clearTabDownloads: async () => {}, log: (...entry) => logs.push(entry), applySharedTabHandoff,
+    AbortController, ensureBrowser: async () => {}, getSearchFallbacks: () => [], validateUrl: () => null,
+    isGoogleSearchUrl: () => false, withPageLoadDuration: (_label, operation) => operation(),
+    navigatePage: page => page.goto(), NAVIGATE_TIMEOUT_MS: 1000, navigationRequestTimeoutMs: () => 10,
+    MAX_CONCURRENT_PER_USER: 1, healthState: { activeOps: 0 },
     normalizeUserId: id => id, handleRouteError: (error, _req, res) => { res.error = error; },
     tabsDestroyedTotal: { labels: reason => ({ inc: () => destroyed.push(reason) }) }, pluginEvents: { emit() {} },
     sharedIdentityRequests: new Map(), sessionCreations: new Map(),
     sharedIdentities: { closings: new Set() }, userConcurrency: new Map(), hasActivePageLeases: () => false,
   };
   vm.runInNewContext(source.slice(source.indexOf('class TabLock {'), source.indexOf('function findTabOwner(tabId)')) +
-    '\n' + ['handleTimedOutTab', 'safePageClose', 'destroyUnresponsiveTab', 'identityBusy'].map(serverFunction).join('\n') +
+    '\n' + ['handleTimedOutTab', 'safePageClose', 'destroyUnresponsiveTab', 'identityBusy', 'withUserLimit'].map(serverFunction).join('\n') +
     ';globalThis.run = withTabLock; globalThis.timeout = withTimeout; globalThis.locks = tabLocks; globalThis.human = humanControlledTabs;', box);
-  const handoffStart = source.indexOf("app.post('/tabs/:tabId/handoff'");
-  const handlerStart = source.indexOf('async (req, res) => {', handoffStart);
-  const handlerEnd = source.indexOf('\n});', handlerStart);
-  box.handoff = vm.runInNewContext(`(${source.slice(handlerStart, handlerEnd + 2)})`, box);
-  return Object.assign(box, { session, group, sessions, closed, destroyed, timers,
+  function route(declaration) {
+    const start = source.indexOf(declaration);
+    assert.notEqual(start, -1);
+    const handlerStart = source.indexOf('async (req, res) => {', start);
+    const handlerEnd = source.indexOf('\n});', handlerStart);
+    return vm.runInNewContext(`(${source.slice(handlerStart, handlerEnd + 2)})`, box);
+  }
+  box.handoff = route("app.post('/tabs/:tabId/handoff'");
+  box.navigate = route("app.post('/tabs/:tabId/navigate'");
+  box.closeTab = route("app.delete('/tabs/:tabId'");
+  return Object.assign(box, { session, group, sessions, closed, destroyed, timers, logs,
     async fire(ms) { for (const timer of [...timers]) if (timer.ms === ms && timers.delete(timer)) timer.fn(); await turn(); },
   });
 }
@@ -71,6 +81,79 @@ async function abandon(f, operation = () => f.group.get('A').page.evaluate('new 
   assert.equal(error.code, 'operation_timeout');
   assert.equal(f.locks.get('A').settling, true);
 }
+
+it('does not arm abandoned recovery without an expected or current owner', async () => {
+  const f = fixture();
+  const lock = f.getTabLock('missing');
+  lock.settling = true;
+  assert.doesNotThrow(() => f.armAbandonedTabRecovery('missing', lock, null));
+  assert.equal(lock.settlingTimer ?? null, null);
+  assert.equal([...f.timers].some(timer => timer.ms === 20), false);
+  await f.fire(20);
+  assert.deepEqual(f.destroyed, []);
+});
+
+it('logs a no-op when the owner disappears before abandoned recovery fires', async () => {
+  const f = fixture();
+  await abandon(f);
+  const lock = f.locks.get('A');
+  f.group.delete('A');
+  await f.fire(20);
+  assert.equal(lock.settlingTimer, null);
+  assert.deepEqual(f.destroyed, []);
+  assert.equal(f.group.has('B'), true);
+  assert.ok(f.logs.some(([level, message, fields]) => level === 'info' &&
+    message === 'abandoned tab recovery skipped' && fields.tabId === 'A' && fields.reason === 'tab_missing'));
+});
+
+for (const failure of ['synchronous', 'asynchronous']) {
+  it(`logs ${failure} recovery errors instead of escaping the timer`, async () => {
+    const f = fixture();
+    await abandon(f);
+    f.destroyUnresponsiveTab = () => {
+      if (failure === 'synchronous') throw new Error('recovery failed');
+      return Promise.reject(new Error('recovery failed'));
+    };
+    await f.fire(20);
+    assert.ok(f.logs.some(([level, message, fields]) => level === 'error' &&
+      message === 'abandoned tab recovery failed' && fields.tabId === 'A' && fields.error === 'recovery failed'));
+    assert.equal(await f.run('B', async () => 42), 42);
+  });
+}
+
+it('rejects navigation queued before tab deletion without touching the wedged captured page', async () => {
+  const f = fixture(), release = deferred();
+  const capturedPage = f.group.get('A').page;
+  let navigations = 0;
+  capturedPage.close = () => new Promise(() => {});
+  capturedPage.goto = () => { navigations++; return new Promise(() => {}); };
+  const occupying = f.withUserLimit('identity', () => release.promise);
+  const res = { json(body) { this.body = body; return this; } };
+  const navigation = f.navigate({ params: { tabId: 'A' }, body: { userId: 'identity', url: 'https://example.test/' } }, res);
+  await turn();
+  assert.equal(f.userConcurrency.get('identity').queue.length, 1);
+  const closed = { json(body) { this.body = body; return this; } };
+  const deletion = f.closeTab({ params: { tabId: 'A' }, query: { userId: 'identity' } }, closed);
+  await turn();
+  await f.fire(100);
+  await f.fire(25);
+  await deletion;
+  assert.equal(closed.body.ok, true);
+  assert.equal(capturedPage.isClosed(), false, 'page close remains unconfirmed');
+  assert.equal(f.findTabOwner('A'), null);
+  release.resolve();
+  await occupying;
+  await turn();
+  await f.fire(10);
+  await navigation;
+  assert.equal(res.error?.code, 'tab_destroyed');
+  assert.equal(res.error.statusCode, 410);
+  assert.equal(navigations, 0, 'the captured page must not receive stale work');
+  assert.equal([...f.timers].some(timer => timer.ms === 20), false);
+  await f.fire(20);
+  assert.deepEqual(f.destroyed, []);
+  assert.equal(await f.run('B', async () => 42), 42);
+});
 
 it('re-arms abandoned recovery when a late agent handoff releases human control after the first ceiling', async () => {
   const f = fixture(), release = deferred();

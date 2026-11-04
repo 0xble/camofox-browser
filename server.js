@@ -743,15 +743,21 @@ function getTabLock(tabId) {
 // keep their deadline, and stale handoffs cannot target a replacement lock/page.
 function armAbandonedTabRecovery(tabId, lock, expectedOwner) {
   const owner = findTabOwner(tabId);
-  if (!lock?.settling || lock.retired || lock.settlingTimer || tabLocks.get(tabId) !== lock ||
-      owner?.session !== expectedOwner?.session || owner?.tabState !== expectedOwner?.tabState) return;
-  lock.settlingTimer = setTimeout(() => {
-    lock.settlingTimer = null;
-    const current = findTabOwner(tabId);
-    if (!lock.settling || lock.retired || tabLocks.get(tabId) !== lock ||
-        current?.session !== expectedOwner?.session || current?.tabState !== expectedOwner?.tabState) return;
-    void destroyUnresponsiveTab(current.session, tabId, 'abandoned_operation', current.userId)
-      .catch(error => log('error', 'abandoned tab recovery failed', { tabId, error: error.message }));
+  if (!expectedOwner || !owner || !lock?.settling || lock.retired || lock.settlingTimer || tabLocks.get(tabId) !== lock ||
+      owner.session !== expectedOwner.session || owner.tabState !== expectedOwner.tabState) return;
+  lock.settlingTimer = setTimeout(async () => {
+    try {
+      lock.settlingTimer = null;
+      const current = findTabOwner(tabId);
+      if (!lock.settling || lock.retired || tabLocks.get(tabId) !== lock) return;
+      if (!current || current.session !== expectedOwner.session || current.tabState !== expectedOwner.tabState) {
+        log('info', 'abandoned tab recovery skipped', { tabId, reason: current ? 'tab_changed' : 'tab_missing' });
+        return;
+      }
+      await destroyUnresponsiveTab(current.session, tabId, 'abandoned_operation', current.userId);
+    } catch (error) {
+      log('error', 'abandoned tab recovery failed', { tabId, error: error.message });
+    }
   }, ABANDONED_TAB_TIMEOUT_MS);
   lock.settlingTimer.unref?.();
 }
@@ -780,8 +786,8 @@ async function withTabLock(tabId, operation, timeoutMs = HANDLER_TIMEOUT_MS, { a
   const pending = new Set();
   try {
     const currentOwner = findTabOwner(tabId);
-    if (lock.retired || tabLocks.get(tabId) !== lock ||
-        currentOwner?.tabState !== timeoutOwner?.tabState || currentOwner?.session !== timeoutOwner?.session) {
+    if (!timeoutOwner || !currentOwner || lock.retired || tabLocks.get(tabId) !== lock ||
+        currentOwner.tabState !== timeoutOwner.tabState || currentOwner.session !== timeoutOwner.session) {
       throw tabDestroyedError(new Error('Tab destroyed or replaced'));
     }
     if (humanControlledTabs.has(tabId) && !allowHumanControl) {
