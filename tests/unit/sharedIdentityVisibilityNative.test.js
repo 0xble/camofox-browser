@@ -88,8 +88,8 @@ describe('native readback in the add-on (Camoufox-spoofed windows.get)', () => {
   let root, visibility, context, windows, intervals, nextId, browser, readback, onCreated, currentDisplay;
   // Camoufox spoofs windows.get: it always reports the requested park geometry.
   // `native` is what CGWindowList would report.
-  async function setup({ failReads = 0 } = {}) {
-    currentDisplay = display;
+  async function setup({ failReads = 0, showOnly = false } = {}) {
+    currentDisplay = showOnly ? { main: display.main, park: null } : display;
     root = await fs.mkdtemp(path.join(os.tmpdir(), 'park-native-'));
     context = new EventEmitter(); context.livePages = []; context.pages = () => context.livePages;
     windows = new Map(); intervals = []; nextId = 1;
@@ -119,7 +119,7 @@ describe('native readback in the add-on (Camoufox-spoofed windows.get)', () => {
         return null;
       }), update: async () => {} },
     };
-    visibility = await createSharedIdentityVisibility(display, { nativeReadback: readback, rootDir: root, timeoutMs: 2000, discoverDisplay: async () => currentDisplay });
+    visibility = await createSharedIdentityVisibility(currentDisplay, { showOnly, nativeReadback: readback, rootDir: root, timeoutMs: 2000, discoverDisplay: async () => currentDisplay });
     const script = await fs.readFile(path.join(visibility.addon, 'background.js'), 'utf8');
     vm.runInNewContext(script, { browser, fetch, setTimeout, setInterval: fn => { const id = setInterval(fn, 10); intervals.push(id); return id; } });
     await visibility.attach(context);
@@ -178,6 +178,86 @@ describe('native readback in the add-on (Camoufox-spoofed windows.get)', () => {
     await expect(visibility.newPage(context)).resolves.toBe(extra);
     expect(context.pages()).toContain(a);
     expect(a.input).toBe('unsaved A');
+  });
+  test.each([false, true])('show-only exact target move tolerates fixed native dimensions and vertical clamping=%s', async fixedSize => {
+    await setup({ showOnly: true });
+    if (fixedSize) browser.windows.update.mockImplementation(async (id, bounds) => {
+      const w = windows.get(id);
+      Object.assign(w, bounds);
+      w.native.left = bounds.left; w.native.top = 30; // Native vertical clamp ignores the requested top.
+      return w;
+    });
+    windows.set(1, { id: 1, tabs: [{ id: 1, windowId: 1 }], native: { ...windowBounds(display.park) } });
+    windows.set(2, { id: 2, tabs: [{ id: 2, windowId: 2 }], native: { ...onMain } });
+    const document = { title: 'original' };
+    browser.tabs.query = async ({ title }) => title === document.title ? [{ id: 1, windowId: 1 }] : [];
+    const page = { evaluate: async (fn, args) => vm.runInNewContext(`(${fn})(args)`, { document, args }) };
+    const shown = await visibility.open(page);
+    expect(shown).toMatchObject({ onMain: true, number: 1001, frontmost: true });
+    expect(nativelyOnMain(windows.get(1).native, { main: display.main })).toBe(true);
+    expect(windows.get(2).native).toEqual(onMain);
+    expect(browser.windows.update.mock.calls.every(([id]) => id === 1)).toBe(true);
+    expect(browser.windows.remove).not.toHaveBeenCalled();
+    expect(document.title).toBe('original');
+  });
+  test.each(['ignored move', 'empty window list'])('show-only %s cannot be acknowledged from a main-display sibling', async mode => {
+    await setup({ showOnly: true });
+    windows.set(1, { id: 1, tabs: [{ id: 1, windowId: 1 }], native: { ...windowBounds(display.park) } });
+    windows.set(2, { id: 2, tabs: [{ id: 2, windowId: 2 }], native: { ...onMain } });
+    browser.windows.update.mockImplementation(async () => ({}));
+    if (mode === 'empty window list') readback.mockImplementation(async () => []);
+    const document = { title: 'original' };
+    browser.tabs.query = async ({ title }) => title === document.title ? [{ id: 1, windowId: 1 }] : [];
+    const page = { evaluate: async (fn, args) => vm.runInNewContext(`(${fn})(args)`, { document, args }) };
+    await expect(visibility.open(page)).rejects.toThrow(/native window identity/);
+    expect(browser.windows.remove).not.toHaveBeenCalled();
+    expect(nativelyParked(windows.get(1).native, display)).toBe(true);
+  });
+  test('a sibling omitted from the first read cannot steal a cached show-only x signature', async () => {
+    await setup({ showOnly: true });
+    windows.set(1, { id: 1, tabs: [{ id: 1, windowId: 1 }], native: { ...windowBounds(display.park) } });
+    windows.set(2, { id: 2, tabs: [{ id: 2, windowId: 2 }], native: { ...onMain, left: display.main.left } });
+    const real = readback.getMockImplementation();
+    readback.mockImplementationOnce(async () => (await real()).filter(w => w.number !== 1002));
+    browser.windows.update.mockImplementation(async () => ({}));
+    const document = { title: 'original' };
+    browser.tabs.query = async ({ title }) => title === document.title ? [{ id: 1, windowId: 1 }] : [];
+    const page = { evaluate: async (fn, args) => vm.runInNewContext(`(${fn})(args)`, { document, args }) };
+    await expect(visibility.open(page)).rejects.toThrow(/native window identity/);
+    expect(visibility.visible.size).toBe(0);
+    expect(windows.get(1).native).toEqual(windowBounds(display.park));
+    expect(windows.get(2).native).toEqual({ ...onMain, left: display.main.left });
+    // A failed attempt's cached signature must not bind a sibling on the next command.
+    const reservedLeft = browser.windows.update.mock.calls.at(-1)[1].left;
+    windows.get(2).native.left = reservedLeft;
+    await expect(visibility.open(page)).rejects.toThrow(/native window identity/);
+    expect(visibility.visible.size).toBe(0);
+    expect(windows.get(1).native).toEqual(windowBounds(display.park));
+    expect(windows.get(2).native.left).toBe(reservedLeft);
+    expect(browser.windows.remove).not.toHaveBeenCalled();
+  });
+  test('aborted show-only native work cannot move the target after a later release', async () => {
+    await setup({ showOnly: true });
+    windows.set(1, { id: 1, tabs: [{ id: 1, windowId: 1 }], native: { ...windowBounds(display.park) } });
+    const document = { title: 'original' };
+    browser.tabs.query = async ({ title }) => title === document.title ? [{ id: 1, windowId: 1 }] : [];
+    const page = { evaluate: async (fn, args) => vm.runInNewContext(`(${fn})(args)`, { document, args }) };
+    const originalRead = readback.getMockImplementation();
+    let resolveRead, entered;
+    let blockedOnce = false;
+    const blocked = new Promise(resolve => { entered = resolve; });
+    readback.mockImplementation(async () => { if (!blockedOnce) { blockedOnce = true; entered(); await new Promise(resolve => { resolveRead = resolve; }); } return originalRead(); });
+    const abort = new AbortController();
+    const showing = visibility.open(page, { signal: abort.signal });
+    const rejected = expect(showing).rejects.toThrow('cancelled');
+    await blocked;
+    abort.abort(new Error('cancelled'));
+    await rejected;
+    readback.mockImplementation(originalRead);
+    resolveRead();
+    await new Promise(resolve => setTimeout(resolve, 350));
+    expect(browser.windows.update).not.toHaveBeenCalled();
+    expect(browser.windows.remove).not.toHaveBeenCalled();
   });
   test('startup with native readback acknowledges ready', async () => {
     await setup();

@@ -9,6 +9,7 @@ import vm from 'node:vm';
 import os from 'node:os';
 import { launchWithVisibilityFallback } from '../../lib/shared-identity-visibility.js';
 import { createDarwinIdentityVisibility, setDarwinAppHidden } from '../../lib/darwin-identity-visibility.js';
+import { findMainDisplay } from '../../lib/park-display-launcher.js';
 import { createSharedIdentityWindowOpener } from '../../lib/shared-identity-window.js';
 import { applySharedTabHandoff } from '../../lib/shared-tab-handoff.js';
 
@@ -57,7 +58,12 @@ for (const all of [false, true]) {
 
 function controller(setHidden = async (_pid, hidden) => ({ hidden, active: !hidden, activated: !hidden }), options = {}) {
   let processes = [{ pid: 12, ppid: 10, args: '/engine/camoufox -profile /test/profile -juggler-pipe' }];
-  const visibility = createDarwinIdentityVisibility('/test/profile', { rootPid: 10, snapshot: () => processes, setHidden, ...options });
+  let nativeState;
+  const visibility = createDarwinIdentityVisibility('/test/profile', { rootPid: 10, snapshot: () => processes,
+    setHidden: async (...args) => { nativeState = await setHidden(...args); return nativeState; },
+    readState: async () => nativeState,
+    createWindowControl: async () => ({ attach: async () => {}, close: async () => {},
+      open: async () => ({ onMain: true, number: 8, frontmost: true }) }), ...options });
   return { visibility, forgetProcess: () => { processes = []; } };
 }
 
@@ -142,6 +148,79 @@ test('inactive native show succeeds without claiming focus and transfers human c
   assert.equal(native.active, false, 'read back native activation instead of equating unhide with focus');
   assert.equal(native.activated, false);
 });
+
+for (const proof of [{ onMain: false, frontmost: true, number: 8 }, { onMain: false, frontmost: false, number: null }]) {
+  test(`app-hidden handoff refuses unverified target geometry (native number=${proof.number})`, async () => {
+    const { visibility } = controller(undefined, { createWindowControl: async () => ({
+      attach: async () => {}, open: async () => proof, close: async () => {},
+    }) });
+    await visibility.attach();
+    const page = { isClosed: () => false, bringToFront: async () => {} };
+    const session = { visibility, tabGroups: new Map() }, humans = new Set(), tabState = { page };
+    await assert.rejects(applySharedTabHandoff({ tabId: 'A', handoff: 'human', tabState, session,
+      humanControlledTabs: humans }), /native.*main display/);
+    assert.equal(humans.size, 0);
+    assert.equal(tabState.handoff, undefined);
+    assert.equal(visibility.visible.size, 1, 'unconfirmed native state remains protected from expiry');
+  });
+}
+
+test('an active application cannot prove focus of a background native target window', async () => {
+  const { visibility } = controller(undefined, { createWindowControl: async () => ({
+    attach: async () => {}, close: async () => {},
+    open: async () => ({ onMain: true, frontmost: false, number: 8 }),
+  }) });
+  await visibility.attach();
+  assert.deepEqual(await visibility.open({ bringToFront: async () => {} }), { visible: true, focused: false });
+});
+
+test('app-hidden window addon is prepared before launch and cleaned up on launch failure', async () => {
+  let prepared = false, closed = false;
+  const visibility = { prepare: async () => { prepared = true; }, addon: 'native-addon', close: async () => { closed = true; } };
+  await assert.rejects(launchWithVisibilityFallback({ display: null, profilePath: '/test/profile',
+    createBackgroundVisibility: () => visibility,
+    launch: async ({ visibility: control }) => { assert.equal(prepared, true); assert.equal(control.addon, 'native-addon'); throw Error('launch failed'); },
+  }), /launch failed/);
+  assert.equal(closed, true);
+});
+
+for (const failure of ['display query failed', 'display query timed out', 'addon ready ack failed', 'addon ready ack timed out']) {
+  test(`${failure} degrades only handoff, preserving launch and agent pages`, async () => {
+    let closes = 0, shows = 0;
+    const unavailable = Error(failure);
+    const { visibility } = controller(async (_pid, hidden) => {
+      if (!hidden) shows++;
+      return { hidden, active: !hidden };
+    }, { timeoutMs: 30, createWindowControl: async () => {
+      if (!failure.startsWith('addon')) await findMainDisplay({ platform: 'darwin', execute: async () => {
+        if (failure.includes('timed out')) throw unavailable;
+        return { stdout: '[]' };
+      } });
+      return { addon: 'native-addon', attach: async () => {
+        if (failure.includes('timed out')) await new Promise(() => {});
+        throw unavailable;
+      },
+        open: async () => assert.fail('an unattached addon cannot prove handoff'), close: async () => {} };
+    } });
+    const page = { isClosed: () => false, bringToFront: async () => {}, input: 'unsaved' };
+    const context = { close: async () => { closes++; }, pages: () => [page], newPage: async () => page };
+    const acquired = await launchWithVisibilityFallback({ display: null, profilePath: '/test/profile',
+      createBackgroundVisibility: () => visibility, launch: async () => context });
+    assert.equal(acquired, context);
+    assert.equal(await visibility.newPage(context), page);
+    assert.equal(page.input, 'unsaved');
+    assert.equal(visibility.visible.size, 0);
+    assert.equal(visibility.capability().sameContextHandoff, false);
+    const session = { visibility, tabGroups: new Map() }, humans = new Set(), tabState = { page };
+    await assert.rejects(applySharedTabHandoff({ tabId: 'A', handoff: 'human', tabState, session,
+      humanControlledTabs: humans }), /native window handoff unavailable/);
+    assert.equal(humans.size, 0);
+    assert.equal(tabState.handoff, undefined);
+    assert.equal(shows, 0, 'unavailable handoff must not unhide the application');
+    assert.equal(closes, 0);
+    await visibility.close();
+  });
+}
 
 test('native unhide refusal errors and does not transfer human control', async () => {
   const { visibility } = controller(async () => ({ hidden: true, active: false, activated: true }));
@@ -349,6 +428,17 @@ test('failed initial hide preserves its error and records an unconfirmed close',
   assert.equal(launches, 1);
 });
 
+test('main display discovery works without any secondary display and fails closed on absent geometry', async () => {
+  const execute = async (_bin, _args, options) => {
+    assert.equal(options.timeout, 1500);
+    assert.deepEqual(Object.keys(options.env).sort(), ['HOME', 'PATH']);
+    return { stdout: JSON.stringify([{ x: 0, y: 0, width: 2048, height: 1152 }]) };
+  };
+  assert.deepEqual(await findMainDisplay({ platform: 'darwin', execute }), { left: 0, top: 0, width: 2048, height: 1152 });
+  await assert.rejects(findMainDisplay({ platform: 'darwin', execute: async () => ({ stdout: '[]' }) }), /main display/);
+  await assert.rejects(findMainDisplay({ platform: 'linux', execute }), /macOS/);
+});
+
 test('AppKit operation has finite bounds and does not pass the host environment', async () => {
   const result = await setDarwinAppHidden(12, true, { execute: async (file, args, options) => {
     assert.equal(file, '/usr/bin/osascript');
@@ -361,6 +451,60 @@ test('AppKit operation has finite bounds and does not pass the host environment'
   await assert.rejects(setDarwinAppHidden(-1, true), /invalid/);
 });
 
+async function appKitReadback(app, { hidden = true, readOnly = false, lookup = () => app, tick = () => {} } = {}) {
+  return setDarwinAppHidden(12, hidden, { readOnly, execute: async (_file, args) => {
+    const $ = { NSRunningApplication: { runningApplicationWithProcessIdentifier: lookup },
+      NSRunLoop: { currentRunLoop: { runUntilDate: tick } }, NSDate: { dateWithTimeIntervalSinceNow() {} } };
+    return { stdout: vm.runInNewContext(`${args[3]};run(${JSON.stringify(args.slice(-2))})`, { ObjC: { import() {} }, $, Boolean, JSON, Number, Error }) };
+  } });
+}
+
+test('AppKit reissues an unconfirmed hide after servicing its run loop', async () => {
+  let hides = 0, ticks = 0;
+  const app = { isNil: () => false, terminated: false, hidden: false, active: false,
+    get hide() { hides++; if (ticks > 0) this.hidden = true; return false; } };
+  const result = await appKitReadback(app, { tick: () => { ticks++; } });
+  assert.equal(result.hidden, true, 'a rejected early request needs another hide, not just more readback');
+  assert.equal(hides, 2);
+  assert.ok(ticks > 0);
+});
+
+test('AppKit waits a bounded run-loop turn for a newly launched PID to register', async () => {
+  let ticks = 0;
+  const app = { isNil: () => false, terminated: false, hidden: false, active: false,
+    get hide() { this.hidden = true; } };
+  const result = await appKitReadback(app, { lookup: () => ticks ? app : null, tick: () => { ticks++; } });
+  assert.equal(result.hidden, true);
+  assert.equal(ticks, 2, 'one registration turn and one hide readback turn');
+});
+
+test('AppKit hide confirmation tolerates startup taking longer than the old ten turns', async () => {
+  let ticks = 0;
+  const app = { isNil: () => false, terminated: false, hidden: false, active: false,
+    get hide() { if (ticks >= 12) this.hidden = true; } };
+  assert.equal((await appKitReadback(app, { tick: () => { ticks++; } })).hidden, true);
+  assert.equal(ticks, 13);
+});
+
+test('AppKit hide refusal stays bounded and cannot claim hidden state', async () => {
+  let hides = 0, ticks = 0;
+  const app = { isNil: () => false, terminated: false, hidden: false, active: false,
+    get hide() { hides++; return false; } };
+  assert.equal((await appKitReadback(app, { tick: () => { ticks++; } })).hidden, false);
+  assert.equal(hides, 30);
+  assert.equal(ticks, 30);
+  ticks = 0;
+  await assert.rejects(appKitReadback(null, { tick: () => { ticks++; } }), /not running/);
+  assert.equal(ticks, 10);
+});
+
+test('AppKit read-only lookup never hides, unhides or activates an application', async () => {
+  const app = { isNil: () => false, terminated: false, hidden: true, active: false,
+    get hide() { assert.fail('read must not hide'); }, get unhide() { assert.fail('read must not unhide'); },
+    activateWithOptions() { assert.fail('read must not activate'); } };
+  assert.equal((await appKitReadback(app, { hidden: false, readOnly: true })).hidden, true);
+});
+
 // Exercise the real AppKit bridge without touching a live browser or account.
 const nativeTest = process.platform === 'darwin' ? test : test.skip;
 nativeTest('native AppKit readback confirms repeated hide/show of an owned disposable application', async () => {
@@ -370,7 +514,8 @@ nativeTest('native AppKit readback confirms repeated hide/show of an owned dispo
     win.title='Disposable Visibility Test';win.orderFrontRegardless;
     console.log('fixture-ready');app.run;`;
   const child = spawn('/usr/bin/osascript', ['-l', 'JavaScript', '-e', code], {
-    stdio: ['ignore', 'pipe', 'pipe'], timeout: 10000, env: { PATH: '/usr/bin:/bin', HOME: os.homedir() },
+    // Keep the fixture alive across the bounded native calls under full-suite load.
+    stdio: ['ignore', 'pipe', 'pipe'], timeout: 30000, env: { PATH: '/usr/bin:/bin', HOME: os.homedir() },
   });
   try {
     await new Promise((resolve, reject) => {
@@ -381,7 +526,9 @@ nativeTest('native AppKit readback confirms repeated hide/show of an owned dispo
     let readback;
     const visibility = createDarwinIdentityVisibility('/fixture/profile', { rootPid: process.pid,
       snapshot: () => [{ pid: child.pid, ppid: process.pid, args: '/fixture/camoufox -profile /fixture/profile -juggler-pipe' }],
-      setHidden: async (pid, hidden) => { readback = await setDarwinAppHidden(pid, hidden); return readback; } });
+      setHidden: async (pid, hidden) => { readback = await setDarwinAppHidden(pid, hidden); return readback; },
+      createWindowControl: async () => ({ attach: async () => {}, close: async () => {},
+        open: async () => ({ onMain: true, number: 8, frontmost: true }) }) });
     await visibility.attach();
     assert.equal(visibility.visible.size, 0);
     for (let index = 0; index < 3; index++) {
