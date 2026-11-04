@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import vm from 'node:vm';
+import { quarantinePage } from '../../lib/page-registry.js';
 import { SharedIdentityManager } from '../../lib/shared-identity.js';
 import { createSharedIdentityRequestTracker } from '../../lib/shared-identity-requests.js';
 import { createSharedIdentityWindowOpener } from '../../lib/shared-identity-window.js';
@@ -320,7 +321,7 @@ describe('shared identity open deadline', () => {
     f.context.cookies.mockImplementationOnce(() => new Promise(resolve => { settle = resolve; }));
     const closeSessionOnce = (session, operation) => operation();
     Object.assign(f.deps, {
-      closeSessionOnce, sharedIdentityLastUrls: new Map(),
+      closeSessionOnce, quarantinePage, UNAVAILABLE_IDENTITY_CLOSE_REASONS: new Set(['shutdown', 'admin_stop', 'browser_restart', 'browser_disconnected']), sharedIdentityLastUrls: new Map(),
       clearSessionLocks: jest.fn(), clearSessionDownloads: jest.fn(async () => {}),
       refreshActiveTabsGauge() {}, log() {},
     });

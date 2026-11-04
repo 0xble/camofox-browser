@@ -1,3 +1,4 @@
+import { isQuarantinedPage } from '../../lib/page-registry.js';
 import { jest } from '@jest/globals';
 import fs from 'node:fs/promises';
 import os from 'node:os';
@@ -679,7 +680,7 @@ describe('no-relaunch visibility with two concurrent callers', () => {
     const sessions = new Map([['identity', session]]), humanControlledTabs = new Set(['B']);
     const closeSession = jest.fn(), log = jest.fn();
     const releaseIdentity = serverFunction('releaseIdentity', { sessions, sessionCreations: new Map(), sharedParkDisplay: {},
-      findTab: () => null, closeSession, identityBusy: () => true, humanControlledTabs, log });
+      findTab: () => null, closeSession, identityBusy: () => true, humanControlledTabs, isQuarantinedPage, log });
     const cleanIdleSharedSessions = serverFunction('cleanIdleSharedSessions', {
       CONFIG: { hiddenTabIdleMin: 0, headedIdleReleaseMin: 30, hiddenSessionIdleMin: 0 }, sessions, identityTransitions: new Map(),
       sharedIdentityIdlePolicy: { agentIdle: () => true, shouldReleaseHeaded: async () => true },

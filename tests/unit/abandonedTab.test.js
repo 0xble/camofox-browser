@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs';
 import { it as nodeIt } from 'node:test';
 import vm from 'node:vm';
 import { handleTabTimeout } from '../../lib/tab-timeout.js';
-import { createPageRegistry, quarantinePage } from '../../lib/page-registry.js';
+import { createPageRegistry, quarantinePage, isQuarantinedPage } from '../../lib/page-registry.js';
 import { createSharedIdentityWindowOpener } from '../../lib/shared-identity-window.js';
 import { SharedIdentityManager } from '../../lib/shared-identity.js';
 import { applySharedTabHandoff } from '../../lib/shared-tab-handoff.js';
@@ -52,12 +52,13 @@ function fixture() {
     navigatePage: page => page.goto(), NAVIGATE_TIMEOUT_MS: 1000, navigationRequestTimeoutMs: () => 10,
     MAX_CONCURRENT_PER_USER: 1, healthState: { activeOps: 0 },
     normalizeUserId: id => id, handleRouteError: (error, _req, res) => { res.error = error; },
+    tabsRecycledTotal: { inc() {} },
     tabsDestroyedTotal: { labels: reason => ({ inc: () => destroyed.push(reason) }) }, pluginEvents: { emit() {} },
     sharedIdentityRequests: new Map(), sessionCreations: new Map(),
     sharedIdentities: { closings: new Set() }, userConcurrency: new Map(), hasActivePageLeases: () => false,
   };
   vm.runInNewContext(source.slice(source.indexOf('class TabLock {'), source.indexOf('function findTabOwner(tabId)')) +
-    '\n' + ['handleTimedOutTab', 'safePageClose', 'destroyUnresponsiveTab', 'identityBusy', 'withUserLimit'].map(serverFunction).join('\n') +
+    '\n' + ['handleTimedOutTab', 'safePageClose', 'destroyUnresponsiveTab', 'destroyTab', 'recycleOldestTab', 'closeSharedTab', 'identityBusy', 'withUserLimit'].map(serverFunction).join('\n') +
     ';globalThis.run = withTabLock; globalThis.timeout = withTimeout; globalThis.locks = tabLocks; globalThis.human = humanControlledTabs;', box);
   function route(declaration) {
     const start = source.indexOf(declaration);
@@ -69,6 +70,7 @@ function fixture() {
   box.handoff = route("app.post('/tabs/:tabId/handoff'");
   box.navigate = route("app.post('/tabs/:tabId/navigate'");
   box.closeTab = route("app.delete('/tabs/:tabId'");
+  box.closeGroup = route("app.delete('/tabs/group/:listItemId'");
   return Object.assign(box, { session, group, sessions, closed, destroyed, timers, logs,
     async fire(ms) { for (const timer of [...timers]) if (timer.ms === ms && timers.delete(timer)) timer.fn(); await turn(); },
   });
@@ -309,3 +311,77 @@ for (const selection of ['last-used', 'context', 'requested']) {
     assert.equal(result.tabId, 'healthy');
   });
 }
+
+for (const deletion of ['tab', 'group']) {
+  it(`an unconfirmed ${deletion} delete cannot resurrect or select the retired page`, async () => {
+    const f = fixture();
+    const page = f.group.get('A').page;
+    f.session.sharedIdentity = true;
+    f.session.lastUsedPage = page;
+    page.close = () => new Promise(() => {});
+    const res = { json(body) { this.body = body; return this; } };
+    const pending = deletion === 'tab'
+      ? f.closeTab({ params: { tabId: 'A' }, query: { userId: 'identity' } }, res)
+      : f.closeGroup({ params: { listItemId: 'task' }, query: { userId: 'identity' } }, res);
+    await turn();
+    assert.equal(isQuarantinedPage(page), true, 'quarantine precedes asynchronous cleanup');
+    assert.notEqual(f.session.lastUsedPage, page);
+    await f.fire(100);
+    await f.fire(25);
+    await pending;
+    assert.equal(res.body.ok, true);
+    assert.equal(page.isClosed(), false);
+    const registry = createPageRegistry({ sessions: f.sessions });
+    assert.throws(() => registry.registerPage(f.session, 'identity', page, 'task'), { code: 'tab_destroyed' });
+    assert.equal(registry.registerSharedIdentityPage(f.session, 'identity', page), null);
+    const healthy = { isClosed: () => false, bringToFront: async () => {} };
+    f.session.context = { pages: () => [page, healthy] };
+    page.bringToFront = () => assert.fail('retired page was focused');
+    const manager = new SharedIdentityManager({ identities: ['identity'] });
+    manager.contexts.set('identity', f.session.context);
+    assert.equal(await manager.focus('identity'), healthy);
+    const opened = [];
+    f.session.visibility = { visible: new Set(), async open(selected) { opened.push(selected); } };
+    const opener = createSharedIdentityWindowOpener({
+      manager, sessions: f.sessions, getSession: async () => f.session,
+      registerPage: (_session, _user, selected) => { assert.equal(selected, healthy); return 'healthy'; },
+      isBusy: () => false,
+    });
+    assert.equal((await opener.openWindow('identity')).tabId, 'healthy');
+    assert.deepEqual(opened, [healthy]);
+  });
+}
+
+for (const path of ['safe close', 'destroy', 'recycle', 'shared idle']) {
+  it(`the ${path} retirement boundary quarantines an unconfirmed close and fences further work`, async () => {
+    const f = fixture();
+    const tab = f.group.get('A'), page = tab.page;
+    f.session.lastUsedPage = page;
+    page.close = async () => { throw new Error('protocol close rejected'); };
+    const pending = path === 'safe close' ? f.safePageClose(page)
+      : path === 'destroy' ? f.destroyTab(f.session, 'A', 'crashed', 'identity')
+      : path === 'recycle' ? f.recycleOldestTab(f.session, 'request', 'identity')
+      : f.closeSharedTab(f.session, 'A', tab, { userId: 'identity', reason: 'idle_tab' });
+    await pending;
+    assert.equal(isQuarantinedPage(page), true);
+    assert.notEqual(f.session.lastUsedPage, page);
+    await assert.rejects(f.run('A', () => assert.fail('retired page received work')), { code: 'tab_destroyed' });
+    const registry = createPageRegistry({ sessions: f.sessions });
+    assert.throws(() => registry.registerPage(f.session, 'identity', page, 'task'), { code: 'tab_destroyed' });
+  });
+}
+
+it('generic destruction without an owner is a harmless no-op', () => {
+  const f = fixture();
+  assert.equal(f.destroyTab(null, 'missing', 'crashed', 'identity'), false);
+});
+
+it('handoff refuses a quarantined page before changing visibility or ownership', async () => {
+  const page = { isClosed: () => false, bringToFront: () => assert.fail('focused retired page') };
+  quarantinePage(page);
+  const human = new Set();
+  await assert.rejects(applySharedTabHandoff({ tabId: 'retired', handoff: 'human', tabState: { page },
+    humanControlledTabs: human, session: { visibility: { visible: new Set(), open: async () => {} } } }),
+  { code: 'tab_destroyed' });
+  assert.equal(human.size, 0);
+});

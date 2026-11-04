@@ -1,4 +1,5 @@
 import { describe, expect, jest, test } from '@jest/globals';
+import { isQuarantinedPage } from '../../lib/page-registry.js';
 import { createPageWithSessionRecovery } from '../../lib/new-page-recovery.js';
 
 const isTimeoutError = err => err.code === 'timeout';
@@ -48,6 +49,7 @@ describe('createPageWithSessionRecovery', () => {
     await new Promise(resolve => setImmediate(resolve));
     expect(closePage).toHaveBeenCalledTimes(1);
     expect(closePage).toHaveBeenCalledWith(session, page);
+    expect(isQuarantinedPage(page)).toBe(true);
     expect(session.pageLeases.size).toBe(0);
   });
 

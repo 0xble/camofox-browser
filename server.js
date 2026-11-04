@@ -60,7 +60,7 @@ import { createPageWithSessionRecovery } from './lib/new-page-recovery.js';
 import { resolveUploadPaths } from './lib/upload-paths.js';
 import { normalizeUploadFiles } from './lib/upload-files.js';
 import { acquirePageLease, hasActivePageLeases, isPageLeased, releasePageLease, setLeasedPage } from './lib/page-lease.js';
-import { createPageRegistry, findTabByPage, getOpenerTabId, quarantinePage, tabIdsForPage } from './lib/page-registry.js';
+import { createPageRegistry, findTabByPage, getOpenerTabId, quarantinePage, isQuarantinedPage, tabIdsForPage } from './lib/page-registry.js';
 import { createReporter, createTabHealthTracker, collectResourceSnapshot, classifyProxyError, browserProcessTreeRssMb, browserProcessNameRssMb } from './lib/reporter.js';
 import { mountDocs } from './lib/openapi.js';
 import { initSentry, captureException as sentryCaptureException, setupExpressErrorHandler as setupSentryErrorHandler, flush as sentryFlush } from './lib/sentry.js';
@@ -69,7 +69,7 @@ import { SharedIdentityManager } from './lib/shared-identity.js';
 import { readHidIdleSeconds } from './lib/macos-hid-idle.js';
 import { createSharedIdentityIdlePolicy } from './lib/shared-identity-idle.js';
 import { createProfileCleanupGuard, isEligibleForAutomaticCleanup } from './lib/cleanup-policy.js';
-import { closeSessionOnce, teardownEphemeralSession, reapAbandonedContexts } from './lib/session-close.js';
+import { closeSessionOnce, hasSessionClose, teardownEphemeralSession, reapAbandonedContexts, settleWithin, SESSION_CLOSE_STEP_TIMEOUT_MS } from './lib/session-close.js';
 import { tabClosable, latestAgentTabId, sweepIdleEphemeralTabs } from './lib/idle-tabs.js';
 import { applySharedTabHandoff } from './lib/shared-tab-handoff.js';
 import { handleTabTimeout } from './lib/tab-timeout.js';
@@ -771,6 +771,7 @@ function armAbandonedTabRecovery(tabId, lock, expectedOwner) {
 async function withTabLock(tabId, operation, timeoutMs = HANDLER_TIMEOUT_MS, { allowHumanControl = false, navigation = false } = {}) {
   const lock = getTabLock(tabId);
   const timeoutOwner = findTabOwner(tabId);
+  if (timeoutOwner?.tabState?.retired) throw tabDestroyedError(new Error('Tab retiring'));
   try {
     await lock.acquire(TAB_LOCK_TIMEOUT_MS);
   } catch (err) {
@@ -786,7 +787,7 @@ async function withTabLock(tabId, operation, timeoutMs = HANDLER_TIMEOUT_MS, { a
   const pending = new Set();
   try {
     const currentOwner = findTabOwner(tabId);
-    if (!timeoutOwner || !currentOwner || lock.retired || tabLocks.get(tabId) !== lock ||
+    if (!timeoutOwner || !currentOwner || currentOwner.tabState?.retired || lock.retired || tabLocks.get(tabId) !== lock ||
         currentOwner.tabState !== timeoutOwner.tabState || currentOwner.session !== timeoutOwner.session) {
       throw tabDestroyedError(new Error('Tab destroyed or replaced'));
     }
@@ -941,7 +942,20 @@ async function withUserLimit(userId, operation) {
 }
 
 async function safePageClose(page) {
-  if (!page || page.isClosed()) return;
+  if (!page) return;
+  // All retirement callers share this boundary, including leased/unregistered
+  // pages. A bounded close is never proof that abandoned work stopped.
+  quarantinePage(page);
+  for (const session of sessions.values()) {
+    quarantinePage(page, session);
+    for (const group of session.tabGroups.values()) {
+      for (const [tabId, tab] of group) if (tab.page === page) {
+        tabLocks.get(tabId)?.drain();
+        humanControlledTabs.delete(tabId);
+      }
+    }
+  }
+  if (page.isClosed()) return;
   try {
     await Promise.race([
       page.close({ runBeforeUnload: false }),
@@ -1607,11 +1621,18 @@ const UNAVAILABLE_IDENTITY_CLOSE_REASONS = new Set([
 function closeSession(userId, session, options = {}) {
   const key = normalizeUserId(userId);
   const blocked = typeof sharedIdentityWindow !== 'undefined' ? sharedIdentityWindow?.unavailable?.(key) : null;
-  if (blocked && !UNAVAILABLE_IDENTITY_CLOSE_REASONS.has(options.reason?.split(':', 1)[0])) return Promise.reject(blocked);
+  const terminalClose = UNAVAILABLE_IDENTITY_CLOSE_REASONS.has(options.reason?.split(':', 1)[0]);
+  if (blocked && !terminalClose) return Promise.reject(blocked);
   options.transitionCheck?.();
   // Expiry, the tab reaper and other cleanup paths can select the same session
   // in one tick. They share the first teardown, so the persistence checkpoint
   // runs once while the context is alive instead of once more after close.
+  // Terminal authority supersedes only cancellable preparation, never a close
+  // already issued to the context. The old transition is fenced by the marker.
+  if (session?.sharedIdentity && terminalClose && hasSessionClose(session) && !session._destructiveCloseStarted) {
+    session._terminalClose = true;
+    return closeSessionNow(userId, session, options);
+  }
   return closeSessionOnce(session, () => closeSessionNow(userId, session, options));
 }
 
@@ -1623,6 +1644,13 @@ async function closeSessionNow(userId, session, {
   transitionCheck = () => {},
 } = {}) {
   const key = normalizeUserId(userId);
+  const callerCheck = transitionCheck;
+  transitionCheck = () => {
+    callerCheck();
+    if (session?._terminalClose && !UNAVAILABLE_IDENTITY_CLOSE_REASONS.has(reason.split(':', 1)[0])) {
+      throw Object.assign(new Error('Session retired by terminal close'), { code: 'session_destroyed', statusCode: 410 });
+    }
+  };
   transitionCheck();
   const transition = (reason === 'headed_transition' || reason === 'headed_release') && session.sharedIdentity;
   const idleExpiry = reason === 'hidden_idle' && session.sharedIdentity;
@@ -1632,12 +1660,12 @@ async function closeSessionNow(userId, session, {
 
   // Drain locks BEFORE closing context — queued operations get clean "Tab destroyed"
   // (410) instead of messy "Target page closed" (500) errors.
-  if (clearLocks && !idleExpiry) {
+  if (clearLocks && !session.sharedIdentity) {
     transitionCheck();
     clearSessionLocks(session, { preserveTabIds: preserveLockTabIds });
   }
 
-  if (clearDownloads && !idleExpiry) {
+  if (clearDownloads && !session.sharedIdentity) {
     await clearSessionDownloads(session).catch(() => {});
   }
 
@@ -1661,18 +1689,30 @@ async function closeSessionNow(userId, session, {
     return;
   }
 
-  if (session.tracePath) await stopTracing();
+  if (session.tracePath && !session._terminalClose) await stopTracing();
 
   if (idleExpiry) {
     // Cookie/tracing preparation can yield to new agent work or a human open.
     // Recheck before touching locks or invoking the context's close operation.
     if (!sharedSessionExpiryEligible(key, session)) return false;
-    if (clearLocks) clearSessionLocks(session, { preserveTabIds: preserveLockTabIds });
   }
 
   if (session.sharedIdentity) {
+    // Snapshot before the final fence: context.pages itself may throw. Every
+    // page is retired before asynchronous context close can lose ownership.
+    let contextPages = [];
+    try { contextPages = session.context.pages?.() || []; } catch { /* dead context still needs close */ }
+    const retiringPages = new Set([
+      ...[...session.tabGroups.values()].flatMap(group => [...group.values()].map(tab => tab.page)),
+      ...contextPages,
+    ]);
+    // Last abort point: preparation may yield, but draining locks commits this
+    // teardown. Never run another deadline fence between drain and close.
     transitionCheck();
+    for (const page of retiringPages) quarantinePage(page, session);
+    if (clearLocks) clearSessionLocks(session, { preserveTabIds: preserveLockTabIds });
     session._intentionalClose = true;
+    session._destructiveCloseStarted = true;
     const close = sharedIdentities.close(key, { checkpoint: reason !== 'storage_reset', reason, cookies: transitionCookies });
     if (transition) {
       try { await close; }
@@ -1697,14 +1737,32 @@ async function closeSessionNow(userId, session, {
   if (sessions.get(key) === session) sessions.delete(key);
 
   refreshActiveTabsGauge();
-  if (idleExpiry && clearDownloads) await clearSessionDownloads(session).catch(() => {});
+  if (session.sharedIdentity && clearDownloads) await clearSessionDownloads(session).catch(() => {});
 }
 
 async function closeAllSessions(reason, { clearDownloads = true, clearLocks = true } = {}) {
   const openSessions = Array.from(sessions.entries());
   const failures = [];
+  const terminal = UNAVAILABLE_IDENTITY_CLOSE_REASONS.has(reason.split(':', 1)[0]);
   for (const [userId, session] of openSessions) {
-    try { await closeSession(userId, session, { reason, clearDownloads, clearLocks }); }
+    if (terminal) session._terminalClose = true;
+    try {
+      const closing = closeSession(userId, session, { reason, clearDownloads, clearLocks });
+      if (terminal && !(await settleWithin(() => closing, SESSION_CLOSE_STEP_TIMEOUT_MS))) {
+        // An old transition or browser IPC can remain pending forever. Retire
+        // only this exact session, retain manager ownership until confirmed,
+        // and let the browser-wide terminal finalizer run for every identity.
+        for (const group of session.tabGroups.values()) {
+          for (const tab of group.values()) quarantinePage(tab.page, session);
+        }
+        if (clearLocks) clearSessionLocks(session);
+        session.tabGroups.clear();
+        if (sessions.get(userId) === session) sessions.delete(userId);
+        refreshActiveTabsGauge();
+        throw Object.assign(new Error('session close timed out; continuing terminal browser close'), { code: 'session_close_timeout' });
+      }
+      await closing;
+    }
     catch (error) {
       failures.push({ userId, error });
       log('error', 'session close failed', { userId, reason, error: error?.message || String(error) });
@@ -1842,6 +1900,8 @@ async function getSession(userId, { trace = false, headed = false, parkedOpen = 
         try { return await created.visibility.newPage(context); }
         finally { created.headed = Boolean(created.visibility.visible?.size); }
       };
+      // Abort before publishing so a retry still runs pending URL restoration.
+      transitionCheck();
       sessions.set(key, created);
       if (sharedIdentity) {
         // Pages opened by the visible Firefox UI are real user tabs, not leaked
@@ -1864,7 +1924,6 @@ async function getSession(userId, { trace = false, headed = false, parkedOpen = 
         for (const page of context.pages()) {
           if (!created.visibility?.isManagedPage(page)) registerSharedIdentityPage(created, key, page);
         }
-        transitionCheck();
         if (!created.headed && sharedIdentityLastUrls.has(key)) {
           const url = sharedIdentityLastUrls.get(key);
           // The session is already published; a page-creation failure (e.g. a
@@ -1872,7 +1931,7 @@ async function getSession(userId, { trace = false, headed = false, parkedOpen = 
           try {
             transitionCheck();
             const page = created.createPage ? await created.createPage()
-              : context.pages().find(candidate => !candidate.isClosed?.() && candidate.url?.() === 'about:blank')
+              : context.pages().find(candidate => !candidate.isClosed?.() && !isQuarantinedPage(candidate) && candidate.url?.() === 'about:blank')
                 || await context.newPage();
             transitionCheck();
             if (created.visibility) registerSharedIdentityPage(created, key, page);
@@ -2078,6 +2137,7 @@ function handleRouteError(err, req, res, extraFields = {}) {
 }
 
 function destroyTab(session, tabId, reason, userId) {
+  if (!session || !findTab(session, tabId)) return false;
   humanControlledTabs.delete(tabId);
   const lock = tabLocks.get(tabId);
   if (lock) {
@@ -2184,7 +2244,8 @@ const latestSharedTabId = latestAgentTabId;
 
 async function closeSharedTab(session, tabId, tab, { userId, reason, reqId }) {
   await safePageClose(tab.page);
-  if (!tab.page.isClosed?.()) return false;
+  // Even an unconfirmed close retires this page; never leave its drained lock
+  // poisoning identityBusy or permit registration under a new ID.
   const found = findTab(session, tabId);
   if (found?.tabState === tab) {
     found.group.delete(tabId);
@@ -2424,6 +2485,7 @@ async function camofoxPressureCleanup(options = {}) {
       if ((sessionTabCounts.get(item.userId) || 0) <= minTabsPerSession) continue;
       const lockState = pressureLockState(item.tabId);
       if (lockState.active || lockState.queued > 0) continue;
+      quarantinePage(item.tabState.page, sessions.get(item.userId));
       if (item.tabState.navigateAbort) item.tabState.navigateAbort.abort();
       await clearTabDownloads(item.tabState).catch(() => {});
       await safePageClose(item.tabState.page);
@@ -3467,7 +3529,7 @@ async function releaseIdentity(userId, { headedOnly = false, all = false, tabId 
     if (tabId != null && !page) throw Object.assign(new Error('Tab not found'), { statusCode: 404 });
     // Idle release must not move a person's checkout or auth window mid-flow.
     const keep = (keepHumanControlled || session.visibility.capability?.().scope === 'identity') ? [...session.tabGroups.values()].flatMap(group => [...group])
-      .filter(([id, tab]) => humanControlledTabs.has(id) && tab.page && !tab.page.isClosed?.()).map(([, tab]) => tab.page) : [];
+      .filter(([id, tab]) => humanControlledTabs.has(id) && tab.page && !tab.page.isClosed?.() && !isQuarantinedPage(tab.page)).map(([, tab]) => tab.page) : [];
     // Recompute even after a failed park so idle reaping reflects the windows still shown.
     try { return { ok: true, released: await session.visibility.release(keep.length ? { all, page, keep } : { all, page }) }; }
     finally { session.headed = session.visibility.visible.size > 0; }
@@ -3481,10 +3543,10 @@ async function releaseIdentity(userId, { headedOnly = false, all = false, tabId 
   if (identityBusy(userId, session)) return { busy: true };
   if (!all && session.context.pages().some(page => !page.isClosed?.()))
     throw Object.assign(new Error('Without a parking display release would close the whole identity and discard live tab state; close its tabs first or explicitly accept with all: true'), { statusCode: 409, code: 'context_close_required' });
-  const recent = session.lastUsedPage && !session.lastUsedPage.isClosed?.()
+  const recent = session.lastUsedPage && !session.lastUsedPage.isClosed?.() && !isQuarantinedPage(session.lastUsedPage)
     ? session.lastUsedPage
     : [...session.tabGroups.values()].flatMap(group => [...group.values()])
-      .map(tab => tab.page).filter(page => !page.isClosed?.()).at(-1);
+      .map(tab => tab.page).filter(page => !page.isClosed?.() && !isQuarantinedPage(page)).at(-1);
   const url = recent?.url?.();
   await closeSession(userId, session, { reason: 'headed_release' });
   if (url && /^https?:\/\//i.test(url)) sharedIdentityLastUrls.set(userId, url);
@@ -4138,6 +4200,7 @@ app.post('/tabs/:tabId/navigate', async (req, res) => {
         // this navigation once. Destination errors are never recovered as success.
         const replaceDeadTabPage = async () => {
           const previousTabState = tabState;
+          quarantinePage(previousTabState.page, session);
           const createdPage = await createPageWithRecoveryForUser(userId, session);
           session = createdPage.session;
           const replacementPage = createdPage.page;
@@ -6600,6 +6663,7 @@ app.delete('/tabs/:tabId', async (req, res) => {
     const session = sessions.get(normalizeUserId(userId));
     const found = session && findTab(session, req.params.tabId);
     if (found) {
+      quarantinePage(found.tabState.page, session);
       if (found.tabState.navigateAbort) found.tabState.navigateAbort.abort();
       await clearTabDownloads(found.tabState);
       await safePageClose(found.tabState.page);
@@ -6662,6 +6726,7 @@ app.delete('/tabs/group/:listItemId', async (req, res) => {
     const session = sessions.get(normalizeUserId(userId));
     const group = session?.tabGroups.get(req.params.listItemId);
     if (group) {
+      for (const tabState of group.values()) quarantinePage(tabState.page, session);
       for (const [tabId, tabState] of group) {
         await clearTabDownloads(tabState);
         await safePageClose(tabState.page);
@@ -7095,8 +7160,7 @@ setInterval(() => {
     for (const page of contextPages) {
       if (!registered.has(page) && !isPageLeased(session, page)) {
         reaped++;
-        page.removeAllListeners();
-        page.close({ runBeforeUnload: false }).catch(() => {});
+        void safePageClose(page).catch(() => {});
       }
     }
   }

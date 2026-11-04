@@ -101,6 +101,43 @@ regression passes against the same failure mode, then retire the local repair.
 - **Retire when:** upstream excludes in-flight acquisition from both idle browser
   reclamation paths and the same regressions pass.
 
+#### Page retirement and terminal recovery
+
+A close timeout is not evidence that a page stopped. Quarantine the object before
+any asynchronous retirement work, clear its last-used reference, retire its
+registered state, and reject it at registration, lock entry, focus, visibility,
+handoff and restoration selection. A headed transition's final deadline fence
+must precede the destructive lock drain; no later deadline may skip context close.
+Session publication must also follow its final fence so pending restoration stays
+retryable. Terminal shutdown/restart/disconnect/admin-stop supersedes cancellable
+preparation, bounds cookie reads and pending closes, and still attempts every
+owned context without letting late preparation touch a replacement.
+
+Retirement/reselection audit inventory:
+
+| Path | Required guard |
+| --- | --- |
+| Single-tab and task-group DELETE | Quarantine before downloads/close; clear last-used; fence queued operations. |
+| Abandoned/unresponsive and generic crash destruction | Exact ownership; missing owner is a no-op; retire before bounded close. |
+| Capacity recycling | Shared safe-close boundary retires outgoing objects even on rejection or timeout. |
+| Shared idle-tab close and ephemeral idle sweep | Retire/drain old lock; an unconfirmed close cannot poison identityBusy forever. |
+| Late/aborted new-page cleanup | Quarantine before injected/default close; context events cannot adopt late pages. |
+| Dead-page navigation replacement and snapshot eviction | Retire outgoing object before ID replacement or asynchronous close. |
+| Shared delete/expiry/dead-context/headed transition | Final fence before destructive drain; quarantine registered and context pages. |
+| Ephemeral teardown/fallback/abandoned-context sweep | Retire every known page; track unconfirmed context closes without page resurrection. |
+| Shutdown/restart/disconnect/admin stop | Fence old preparation; bound cookies/close; still attempt all contexts and browser finalization. |
+| Session publication/pending URL restoration | Fence before publication; preserve pending URL on failure; filter retired blank pages. |
+| Registry replacement and popup adoption | Both registration entrypoints reject quarantine; replacement retires outgoing object; old-context events cannot adopt it. |
+| Parked/legacy/app-hidden acquisition | Filter requested/last-used/context selections and recheck after asynchronous focus/visibility. |
+| Manager focus and native/parked visibility | Reject quarantine before focusing/showing, including retirement while queued. |
+| Human/agent handoff and release restoration | Reject retired target; filter protected/last-used/fallback selections. |
+| Launch/fallback/browser self-test | Only unpublished contexts; unconfirmed launch close retains profile ownership and blocks relaunch. |
+
+Regressions: `abandonedTab`, `retirementFences`, `unavailableIdentityRecovery`,
+`sharedIdentityHidden`, `newPageRecovery`, `sessionCloseBounded`, plus the existing
+page-registry, transition-deadline, expiry and handoff suites. Exercise unconfirmed
+close rather than assuming a fulfilled close means the page is gone.
+
 #### Settling timed-out tab operations
 
 - **Behavior:** a route timeout is not browser cancellation. The existing tab
