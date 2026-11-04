@@ -52,6 +52,40 @@ in the normal Jest unit suite, and `tests/e2e/sharedPersistentLifecycle.test.js`
 on macOS with parking disabled. Exercise first acquisition, lazy open, repeated
 release/reopen, sibling form input, native refusal, and protected human siblings.
 
+### Native main-display app-hidden handoff
+
+- AppKit `hidden=false`/`active=true` proves application state, not physical
+  placement of the requested window. Prepare the existing visibility addon
+  before persistent launch in show-only mode; never park/create/close windows.
+- Resolve the exact tab/window with the temporary title marker, then bind its
+  native CG number using an unused horizontal main-display position signature. beta.41
+  fingerprint-controlled native sizes do not reliably follow resize requests,
+  and macOS clamps vertical position for tall fingerprint-sized windows.
+  Reserve positions absent from current native windows and other bindings;
+  never accept a main-display sibling or empty window list as target proof.
+- Discover NSScreen main geometry afresh, move only the resolved window with
+  `browser.windows.update`, and require bound-number native main-placement proof
+  before ownership transfer. Focus requires that exact window frontmost within
+  its app plus final read-only AppKit active state. Inactive success remains
+  `{visible:true,focused:false}`. Abort/expiry invalidates delayed native work.
+- Failure keeps the identity protected from expiry with all tabs intact. Release
+  still hides the application. No new dependencies, AX/Accessibility or Screen
+  Recording grants, profile edits, restart, or display reconfiguration are needed.
+  Already-running contexts without the addon need separately authorized normal
+  context replacement; publishing source does not activate it.
+- Regress with app-hidden/native visibility unit suites and the explicit macOS
+  disposable-browser check `node --test tests/native/mainDisplayHandoff.mjs`.
+  It records bound-number/main-display geometry and proves retained PID,
+  target/sibling unsaved inputs and off-main sibling preservation over repeated
+  handoff/release. It never connects to the running server.
+- Upstream preflight: `jo-inc/camofox-browser` master `39c8209` has no corresponding
+  native visibility helper. All-state handoff/visibility/headed/persistent
+  searches found related closed headed/container issue #7990 and closed
+  persistent-profile PR #6525, not an equivalent native per-window proof.
+  This is fork-owned CAMOFOX-002 behavior. Retire when upstream supplies the
+  same preserving native-verified lifecycle. Roll back by reverting this change
+  and separately replacing contexts only when authorized; live tabs stay owned.
+
 ### Bounded identity open
 
 The open endpoint has a 60-second caller deadline (`sharedIdentityOpenTimeoutMs`
