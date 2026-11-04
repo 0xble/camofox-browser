@@ -7,6 +7,7 @@ import { handleTabTimeout } from '../../lib/tab-timeout.js';
 import { createPageRegistry, quarantinePage } from '../../lib/page-registry.js';
 import { createSharedIdentityWindowOpener } from '../../lib/shared-identity-window.js';
 import { SharedIdentityManager } from '../../lib/shared-identity.js';
+import { applySharedTabHandoff } from '../../lib/shared-tab-handoff.js';
 
 const it = globalThis.it ?? nodeIt;
 const source = readFileSync(new URL('../../server.js', import.meta.url), 'utf8');
@@ -45,14 +46,19 @@ function fixture() {
     findTabOwner(id) { const tabState = group.get(id); return tabState ? { tabState, session, userId: 'identity' } : null; },
     findTab(_session, id) { const tabState = group.get(id); return tabState ? { tabState, group, listItemId: 'task' } : null; },
     isTabLockQueueTimeout: () => false, handleTabTimeout,
-    quarantinePage, clearTabDownloads: async () => {}, log() {},
+    quarantinePage, clearTabDownloads: async () => {}, log() {}, applySharedTabHandoff,
+    normalizeUserId: id => id, handleRouteError: (error, _req, res) => { res.error = error; },
     tabsDestroyedTotal: { labels: reason => ({ inc: () => destroyed.push(reason) }) }, pluginEvents: { emit() {} },
     sharedIdentityRequests: new Map(), sessionCreations: new Map(),
     sharedIdentities: { closings: new Set() }, userConcurrency: new Map(), hasActivePageLeases: () => false,
   };
   vm.runInNewContext(source.slice(source.indexOf('class TabLock {'), source.indexOf('function findTabOwner(tabId)')) +
     '\n' + ['handleTimedOutTab', 'safePageClose', 'destroyUnresponsiveTab', 'identityBusy'].map(serverFunction).join('\n') +
-    ';globalThis.run = withTabLock; globalThis.timeout = withTimeout; globalThis.locks = tabLocks;', box);
+    ';globalThis.run = withTabLock; globalThis.timeout = withTimeout; globalThis.locks = tabLocks; globalThis.human = humanControlledTabs;', box);
+  const handoffStart = source.indexOf("app.post('/tabs/:tabId/handoff'");
+  const handlerStart = source.indexOf('async (req, res) => {', handoffStart);
+  const handlerEnd = source.indexOf('\n});', handlerStart);
+  box.handoff = vm.runInNewContext(`(${source.slice(handlerStart, handlerEnd + 2)})`, box);
   return Object.assign(box, { session, group, sessions, closed, destroyed, timers,
     async fire(ms) { for (const timer of [...timers]) if (timer.ms === ms && timers.delete(timer)) timer.fn(); await turn(); },
   });
@@ -65,6 +71,37 @@ async function abandon(f, operation = () => f.group.get('A').page.evaluate('new 
   assert.equal(error.code, 'operation_timeout');
   assert.equal(f.locks.get('A').settling, true);
 }
+
+it('re-arms abandoned recovery when a late agent handoff releases human control after the first ceiling', async () => {
+  const f = fixture(), release = deferred();
+  f.session.sharedIdentity = true;
+  f.human.add('A');
+  f.session.visibility = {
+    visible: new Set([f.group.get('A').page]),
+    async release() {
+      await release.promise;
+      await f.timeout(new Promise(() => {}), 5, 'park');
+    },
+  };
+  const res = { json(body) { this.body = body; return this; } };
+  const pending = f.handoff({ params: { tabId: 'A' }, body: { userId: 'identity', handoff: 'agent' } }, res);
+  await turn();
+  await f.fire(10);
+  await pending;
+  assert.equal(res.error.code, 'operation_timeout');
+  await f.fire(20);
+  assert.deepEqual(f.closed, [], 'human ownership must prevent forced destruction');
+  release.resolve();
+  await turn();
+  await f.fire(5);
+  assert.equal(f.human.has('A'), false);
+  assert.equal(f.locks.get('A').settling, true, 'nested browser work is still pending');
+  await assert.rejects(f.run('A', () => assert.fail('overlap')), { code: 'tab_busy' });
+  await f.fire(20);
+  assert.equal(f.group.has('A'), false);
+  assert.deepEqual(f.closed, ['A']);
+  assert.equal(await f.run('B', async () => 42), 42);
+});
 
 it('destroys a responsive never-settling evaluate at the fixed ceiling without further requests', async () => {
   const f = fixture();

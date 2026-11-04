@@ -124,8 +124,10 @@ regression passes against the same failure mode, then retire the local repair.
   Both parked and legacy handoff selection exclude it before opening or focusing
   a page, including requested-tab, last-used and context-page fallbacks. Download
   file cleanup cannot retain the lock or keep its identity busy. Normal settlement
-  and explicit close cancel the timer. Deferred lock release is one-shot, even
-  for detached continuations or a replaced tab.
+  and explicit close cancel the timer. If a human handoff defers recovery past
+  that ceiling, returning agent control re-arms it only for the same still-settling
+  lock and page; an existing ceiling is never extended. Deferred lock release is
+  one-shot, even for detached continuations or a replaced tab.
 - **Upstream checked:** `jo-inc/camofox-browser` master
   `39c82094013480b373df6600d44c7f036f58356e`. PR #14623 proposes skipping the
   lock for long evaluates, not cancellation or a bounded abandoned-work lifetime.

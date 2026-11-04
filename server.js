@@ -739,6 +739,23 @@ function getTabLock(tabId) {
   return tabLocks.get(tabId);
 }
 
+// Re-arm only after a human releases a still-settling tab. Existing ceilings
+// keep their deadline, and stale handoffs cannot target a replacement lock/page.
+function armAbandonedTabRecovery(tabId, lock, expectedOwner) {
+  const owner = findTabOwner(tabId);
+  if (!lock?.settling || lock.retired || lock.settlingTimer || tabLocks.get(tabId) !== lock ||
+      owner?.session !== expectedOwner?.session || owner?.tabState !== expectedOwner?.tabState) return;
+  lock.settlingTimer = setTimeout(() => {
+    lock.settlingTimer = null;
+    const current = findTabOwner(tabId);
+    if (!lock.settling || lock.retired || tabLocks.get(tabId) !== lock ||
+        current?.session !== expectedOwner?.session || current?.tabState !== expectedOwner?.tabState) return;
+    void destroyUnresponsiveTab(current.session, tabId, 'abandoned_operation', current.userId)
+      .catch(error => log('error', 'abandoned tab recovery failed', { tabId, error: error.message }));
+  }, ABANDONED_TAB_TIMEOUT_MS);
+  lock.settlingTimer.unref?.();
+}
+
 // Timeout is INSIDE the lock so each operation gets its full budget
 // regardless of how long it waited in the queue. A timed-out operation is a
 // recoverable failure, not cancellation. Keep the tab unavailable until both
@@ -799,17 +816,7 @@ async function withTabLock(tabId, operation, timeoutMs = HANDLER_TIMEOUT_MS, { a
     if (pending.size && !lock.retired && tabLocks.get(tabId) === lock) {
       lock.settling = true;
       lock.rejectQueued(tabBusyError());
-      lock.settlingTimer = setTimeout(() => {
-        lock.settlingTimer = null;
-        const current = findTabOwner(tabId);
-        if (!lock.settling || lock.retired || tabLocks.get(tabId) !== lock ||
-            current?.session !== timeoutOwner?.session || current?.tabState !== timeoutOwner?.tabState) return;
-        // Retire and close the exact old page, never unlock it for overlapping
-        // work. Cleanup is page-close bounded and leaves sibling tabs alone.
-        void destroyUnresponsiveTab(current.session, tabId, 'abandoned_operation', current.userId)
-          .catch(error => log('error', 'abandoned tab recovery failed', { tabId, error: error.message }));
-      }, ABANDONED_TAB_TIMEOUT_MS);
-      lock.settlingTimer.unref?.();
+      armAbandonedTabRecovery(tabId, lock, timeoutOwner);
       pending.release = () => {
         if (lock.retired || tabLocks.get(tabId) !== lock) return;
         lock.settling = false;
@@ -1586,10 +1593,16 @@ function clearSessionLocks(session, { preserveTabIds = new Set() } = {}) {
   refreshTabLockQueueDepth();
 }
 
+// Only browser-wide terminal/recovery paths may reclaim an identity while its
+// timed-out raw open is unresolved. Ordinary requests and idle cleanup must not.
+const UNAVAILABLE_IDENTITY_CLOSE_REASONS = new Set([
+  'shutdown', 'admin_stop', 'browser_restart', 'browser_disconnected',
+]);
+
 function closeSession(userId, session, options = {}) {
   const key = normalizeUserId(userId);
   const blocked = typeof sharedIdentityWindow !== 'undefined' ? sharedIdentityWindow?.unavailable?.(key) : null;
-  if (blocked) return Promise.reject(blocked);
+  if (blocked && !UNAVAILABLE_IDENTITY_CLOSE_REASONS.has(options.reason?.split(':', 1)[0])) return Promise.reject(blocked);
   options.transitionCheck?.();
   // Expiry, the tab reaper and other cleanup paths can select the same session
   // in one tick. They share the first teardown, so the persistence checkpoint
@@ -1684,9 +1697,15 @@ async function closeSessionNow(userId, session, {
 
 async function closeAllSessions(reason, { clearDownloads = true, clearLocks = true } = {}) {
   const openSessions = Array.from(sessions.entries());
+  const failures = [];
   for (const [userId, session] of openSessions) {
-    await closeSession(userId, session, { reason, clearDownloads, clearLocks });
+    try { await closeSession(userId, session, { reason, clearDownloads, clearLocks }); }
+    catch (error) {
+      failures.push({ userId, error });
+      log('error', 'session close failed', { userId, reason, error: error?.message || String(error) });
+    }
   }
+  return failures;
 }
 
 async function createSharedIdentityContext(userId, profilePath, { headed = false, parkedOpen = false, transitionCheck = () => {} } = {}) {
@@ -3652,12 +3671,14 @@ app.post('/tabs/:tabId/handoff', async (req, res) => {
   try {
     const result = await withTabLock(req.params.tabId, async () => {
       const current = findTab(session, req.params.tabId);
+      const handoffLock = tabLocks.get(req.params.tabId);
       return applySharedTabHandoff({
         tabId: req.params.tabId,
         handoff,
         tabState: current?.tabState,
         session,
         humanControlledTabs,
+        onAgentControl: () => armAbandonedTabRecovery(req.params.tabId, handoffLock, { session, tabState: current?.tabState }),
         log,
       });
     }, HANDLER_TIMEOUT_MS, { allowHumanControl: true });
