@@ -23,4 +23,17 @@ describe('local-hardening plugin', () => {
       telemetry: false,
     });
   });
+
+  test('pins the beta.30 automation popup policy over engine defaults', () => {
+    const events = createPluginEvents();
+    register({}, { events, log: jest.fn() });
+    const options = { firefoxUserPrefs: { 'dom.disable_open_during_load': true, 'existing.preference': true } };
+
+    events.emit('browser:launching', { options });
+
+    expect(options.firefoxUserPrefs).toMatchObject({
+      'dom.disable_open_during_load': false,
+      'existing.preference': true,
+    });
+  });
 });
