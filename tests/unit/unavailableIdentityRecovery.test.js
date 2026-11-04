@@ -29,7 +29,7 @@ async function fixture() {
   expect(sharedIdentityWindow.unavailable('blocked')).not.toBeNull();
   const checkpoint = jest.fn();
   const box = {
-    sessions, sharedIdentityWindow, closeSessionOnce, hasSessionClose, settleWithin, SESSION_CLOSE_STEP_TIMEOUT_MS, quarantinePage,
+    sessionLifecycleGeneration: 0, sessions, sharedIdentityWindow, closeSessionOnce, hasSessionClose, settleWithin, SESSION_CLOSE_STEP_TIMEOUT_MS, quarantinePage,
     sharedIdentities: { close: jest.fn(async (id, { checkpoint: save }) => {
       if (save) checkpoint(id);
       await sessions.get(id).context.close();
@@ -135,4 +135,14 @@ test('terminal takeover fences a late headed-transition cookie continuation befo
   resume([]);
   expect((await old).code).toBe('session_destroyed');
   expect(contexts[0].close).toHaveBeenCalledTimes(1);
+});
+
+test('terminal cleanup includes a manager-owned context with no published session', async () => {
+  const { box } = await fixture();
+  const orphan = { pages: () => [], close: jest.fn(async () => {}) };
+  box.sharedIdentities.contexts = new Map([['orphan', orphan]]);
+  const close = box.sharedIdentities.close.getMockImplementation();
+  box.sharedIdentities.close.mockImplementation((id, options) => id === 'orphan' ? orphan.close() : close(id, options));
+  await box.closeAll('admin_stop');
+  expect(orphan.close).toHaveBeenCalledTimes(1);
 });

@@ -1,3 +1,4 @@
+import { isQuarantinedPage } from '../../lib/page-registry.js';
 import { jest } from '@jest/globals';
 import fs from 'node:fs';
 import vm from 'node:vm';
@@ -51,7 +52,7 @@ test.each([false, true])('last-URL restoration respects the parked page factory 
     sharedIdentities: { failedClosures: new Set(), closings: new Set(), owns: () => true, open: async () => context },
     coalesceInflight: (_map, _key, operation) => operation(), MAX_SESSIONS: 10, FLY_MACHINE_ID: '',
     proxyPool: null, browserLaunchProxy: null, CONFIG: {}, contextIdentityOptions: () => ({}),
-    sharedIdentityLastUrls: urls, registerSharedIdentityPage, log: jest.fn(),
+    isQuarantinedPage, sharedIdentityLastUrls: urls, registerSharedIdentityPage, log: jest.fn(),
   });
   const session = await getSession('identity');
   const target = parked ? restored : blank;
@@ -76,7 +77,7 @@ test('a parked createPage rejection during last-URL restore still yields a usabl
     sharedIdentities: { failedClosures: new Set(), closings: new Set(), owns: () => true, open: async () => context, contexts: new Map([['identity', context]]) },
     coalesceInflight: (_map, _key, operation) => operation(), MAX_SESSIONS: 10, FLY_MACHINE_ID: '',
     proxyPool: null, browserLaunchProxy: null, CONFIG: {}, contextIdentityOptions: () => ({}),
-    sharedIdentityLastUrls: urls, registerSharedIdentityPage, log,
+    isQuarantinedPage, sharedIdentityLastUrls: urls, registerSharedIdentityPage, log,
   });
   const session = await getSession('identity');
   expect(sessions.get('identity')).toBe(session);

@@ -111,7 +111,10 @@ must precede the destructive lock drain; no later deadline may skip context clos
 Session publication must also follow its final fence so pending restoration stays
 retryable. Terminal shutdown/restart/disconnect/admin-stop supersedes cancellable
 preparation, bounds cookie reads and pending closes, and still attempts every
-owned context without letting late preparation touch a replacement.
+owned context without letting late preparation touch a replacement. A terminal
+lifecycle generation also cancels already-running open/relaunch continuations;
+manager-owned unpublished contexts remain part of terminal cleanup's inventory,
+and acquisitions arriving after that generation must close their exact context.
 
 Retirement/reselection audit inventory:
 

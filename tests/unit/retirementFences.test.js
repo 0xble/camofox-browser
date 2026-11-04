@@ -1,6 +1,7 @@
 import { jest } from '@jest/globals';
 import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
+import { createSharedIdentityWindowOpener } from '../../lib/shared-identity-window.js';
 import { SharedIdentityManager } from '../../lib/shared-identity.js';
 import { quarantinePage, isQuarantinedPage, createPageRegistry } from '../../lib/page-registry.js';
 
@@ -128,7 +129,7 @@ test('a failed shared context close quarantines registered and unregistered page
   expect(f.session.lastUsedPage).toBe(null);
 });
 
-test.each(['shutdown:SIGTERM', 'admin_stop', 'browser_restart:recovery', 'browser_disconnected'])(
+test.each(['shutdown:SIGTERM', 'admin_stop', 'browser_restart:recovery', 'browser_disconnected', 'api_delete_session'])(
   '%s still issues context close when shared cookie snapshot never settles', async reason => {
     jest.useFakeTimers();
     try {
@@ -145,3 +146,41 @@ test.each(['shutdown:SIGTERM', 'admin_stop', 'browser_restart:recovery', 'browse
       expect(isQuarantinedPage(page)).toBe(true);
     } finally { jest.useRealTimers(); }
   });
+
+test('terminal generation cancels an opener already awaiting destructive context close', async () => {
+  let generation = 0, resume;
+  const page = { isClosed: () => false, url: () => 'https://fixture.test/form' };
+  const session = { headed: false, context: { pages: () => [page] }, tabGroups: new Map(), lastUsedPage: page };
+  const sessions = new Map([['identity', session]]);
+  const getSession = jest.fn(async () => ({ ...session, headed: true }));
+  const opener = createSharedIdentityWindowOpener({
+    manager: { focus: async () => page, failedClosures: new Set() }, sessions, getSession, isBusy: () => false,
+    registerPage: () => 'replacement', lifecycleGeneration: () => generation,
+    closeSession: async () => { await new Promise(resolve => { resume = resolve; }); sessions.delete('identity'); },
+  });
+  const opening = opener.openWindow('identity', null, { allowRestart: true }).catch(error => error);
+  for (let i = 0; i < 10 && !resume; i++) await Promise.resolve();
+  expect(resume).toBeDefined();
+  generation++;
+  resume();
+  expect((await opening).code).toBe('session_destroyed');
+  expect(getSession).not.toHaveBeenCalled();
+});
+
+test('an acquisition returning after terminal retirement closes its exact context without publishing', async () => {
+  const f = creationFixture(); f.retry();
+  f.deps.sessionLifecycleGeneration = 0;
+  const context = f.deps.sharedIdentities.contexts.get('identity');
+  context.close = jest.fn(async () => {});
+  f.deps.sharedIdentities.close = jest.fn(async () => context.close());
+  let resume;
+  f.deps.sharedIdentities.open = () => new Promise(resolve => { resume = resolve; });
+  const opening = f.create('identity').catch(error => error);
+  await Promise.resolve();
+  f.deps.sessionLifecycleGeneration++;
+  resume(context);
+  expect((await opening).code).toBe('session_destroyed');
+  await Promise.resolve();
+  expect(f.deps.sessions.size).toBe(0);
+  expect(context.close).toHaveBeenCalledTimes(1);
+});

@@ -621,6 +621,8 @@ app.post('/sessions/:userId/cookies', express.json({ limit: '512kb' }), async (r
 });
 
 let browser = null;
+// Terminal retirement invalidates pre-existing acquisitions without an identity lock.
+let sessionLifecycleGeneration = 0;
 let _lastBrowserPid = null; // Track PID independently for force-kill after close
 let _browserClosePromise = null; // Shared promise for concurrent close serialization
 let _lastBrowserRestartAt = 0; // Timestamp of last browser relaunch (for stale tab detection)
@@ -1698,7 +1700,7 @@ async function closeSessionNow(userId, session, {
   }
 
   if (session.sharedIdentity) {
-    // Snapshot before the final fence: context.pages itself may throw. Every
+    // Enumerate before the final fence: context.pages itself may throw. Every
     // page is retired before asynchronous context close can lose ownership.
     let contextPages = [];
     try { contextPages = session.context.pages?.() || []; } catch { /* dead context still needs close */ }
@@ -1744,6 +1746,7 @@ async function closeAllSessions(reason, { clearDownloads = true, clearLocks = tr
   const openSessions = Array.from(sessions.entries());
   const failures = [];
   const terminal = UNAVAILABLE_IDENTITY_CLOSE_REASONS.has(reason.split(':', 1)[0]);
+  if (terminal) sessionLifecycleGeneration++;
   for (const [userId, session] of openSessions) {
     if (terminal) session._terminalClose = true;
     try {
@@ -1766,6 +1769,19 @@ async function closeAllSessions(reason, { clearDownloads = true, clearLocks = tr
     catch (error) {
       failures.push({ userId, error });
       log('error', 'session close failed', { userId, reason, error: error?.message || String(error) });
+    }
+  }
+  if (terminal) {
+    const published = new Set(openSessions.map(([userId]) => userId));
+    for (const [userId] of sharedIdentities.contexts || []) {
+      if (published.has(userId)) continue;
+      try {
+        const close = sharedIdentities.close(userId, { reason });
+        if (!(await settleWithin(() => close, SESSION_CLOSE_STEP_TIMEOUT_MS))) {
+          throw new Error('unpublished identity close timed out');
+        }
+        await close;
+      } catch (error) { failures.push({ userId, error }); }
     }
   }
   return failures;
@@ -1793,6 +1809,14 @@ async function createSharedIdentityContext(userId, profilePath, { headed = false
 }
 
 async function getSession(userId, { trace = false, headed = false, parkedOpen = false, transitionCheck = () => {} } = {}) {
+  const generation = typeof sessionLifecycleGeneration === 'undefined' ? 0 : sessionLifecycleGeneration;
+  const generationCheck = () => {
+    if (generation !== (typeof sessionLifecycleGeneration === 'undefined' ? 0 : sessionLifecycleGeneration)) {
+      throw Object.assign(new Error('Session retired by terminal close'), { code: 'session_destroyed', statusCode: 410 });
+    }
+  };
+  const callerCheck = transitionCheck;
+  transitionCheck = () => { generationCheck(); callerCheck(); };
   const key = normalizeUserId(userId);
   const blocked = typeof sharedIdentityWindow !== 'undefined' ? sharedIdentityWindow?.unavailable?.(key) : null;
   if (blocked) throw blocked;
@@ -1880,6 +1904,20 @@ async function getSession(userId, { trace = false, headed = false, parkedOpen = 
       const context = sharedIdentity
         ? await sharedIdentities.open(key, profilePath => createSharedIdentityContext(key, profilePath, { headed, parkedOpen, transitionCheck }))
         : await b.newContext(contextOptions);
+      const checkAcquisition = () => {
+        try { generationCheck(); }
+        catch (error) {
+          // Late contexts remain owned but unpublished. Close exactly this
+          // context without overlapping a terminal close already in progress.
+          if (sharedIdentity) {
+            if (sharedIdentities.contexts.get(key) === context && !sharedIdentities.closings.has(key)) {
+              void sharedIdentities.close(key, { checkpoint: false, reason: 'admin_stop' }).catch(() => {});
+            }
+          } else { void context.close().catch(() => {}); }
+          throw error;
+        }
+      };
+      checkAcquisition();
 
       let tracePath = null;
       if (trace) {
@@ -1901,6 +1939,7 @@ async function getSession(userId, { trace = false, headed = false, parkedOpen = 
         finally { created.headed = Boolean(created.visibility.visible?.size); }
       };
       // Abort before publishing so a retry still runs pending URL restoration.
+      checkAcquisition();
       transitionCheck();
       sessions.set(key, created);
       if (sharedIdentity) {
@@ -3602,6 +3641,7 @@ async function cleanIdleSharedSessions() {
 
 sharedIdentityWindow = createSharedIdentityWindowOpener({
   manager: sharedIdentities,
+  lifecycleGeneration: () => sessionLifecycleGeneration,
   sessions,
   getSession,
   closeSession,

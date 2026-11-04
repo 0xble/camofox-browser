@@ -1,3 +1,4 @@
+import { isQuarantinedPage } from '../../lib/page-registry.js';
 import { jest } from '@jest/globals';
 import fs from 'node:fs';
 import vm from 'node:vm';
@@ -29,7 +30,7 @@ test.each(['tab-a', null])('no-park release (%s) preserves idle sibling input in
   ]) };
   const closeSession = jest.fn();
   const release = serverFunction('releaseIdentity', { sessions: new Map([['identity', session]]),
-    sessionCreations: new Map(), sharedIdentityLastUrls: new Map(), identityBusy: () => false, closeSession, log: jest.fn() });
+    isQuarantinedPage, sessionCreations: new Map(), sharedIdentityLastUrls: new Map(), identityBusy: () => false, closeSession, log: jest.fn() });
   await expect(release('identity', { tabId })).rejects.toMatchObject({ statusCode: 409, code: 'context_close_required' });
   expect(closeSession).not.toHaveBeenCalled();
   expect(context.close).not.toHaveBeenCalled();
