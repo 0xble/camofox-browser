@@ -75,7 +75,8 @@ describe('shared persistent identity lifecycle over HTTP', () => {
 
     const human = await request('POST', `/tabs/${created.data.tabId}/handoff`, { userId, handoff: 'human' });
     expect(human.response.status).toBe(200);
-    expect(human.data).toMatchObject({ ok: true, handoff: 'human', focused: true });
+    expect(human.data).toMatchObject({ ok: true, handoff: 'human', focused: hidesApplication ? expect.any(Boolean) : true });
+    if (hidesApplication) expect(human.data.visible).toBe(true);
 
     const blocked = await request('POST', `/tabs/${created.data.tabId}/navigate`, { userId, url: `${testSiteUrl}/pageB` });
     expect(blocked.response.status).toBe(409);

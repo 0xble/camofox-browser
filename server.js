@@ -3575,7 +3575,7 @@ sharedIdentityWindow = createSharedIdentityWindowOpener({
  *                 default: false
  *                 description: Explicitly accept restarting a legacy headless context and discarding every live tab's in-memory state. Has no effect in parking mode.
  *     responses:
- *       200: { description: "Shared identity is visible; restarted is true after a headless transition; restoreFailed is true if bounded URL restoration failed." }
+ *       200: { description: "Shared identity is visible; app-hidden mode returns visible: true and focused equal to the native active-state readback (false is a successful unhide without activation). restarted is true after a headless transition; restoreFailed is true if bounded URL restoration failed." }
  *       404: { description: Identity is not configured for shared mode. }
  *       409: { description: "Identity is busy, or context_restart_required because a legacy headless context still has live tabs." }
  *       503: { description: "identity_transition_timeout. The open did not settle within its deadline. The identity stays unavailable until that browser operation settles; it is not silently retried." }
@@ -3616,7 +3616,7 @@ app.post('/browser/identities/:userId/open', async (req, res) => {
  *                 type: string
  *                 description: Caller-owned tab to show in parking mode, as for open.
  *     responses:
- *       200: { description: Focus result after the requested window is shown. }
+ *       200: { description: "Window shown; app-hidden mode returns visible: true and focused equal to the native active-state readback, which may be false." }
  *       404: { description: Identity is not configured or is not open. }
  *       409: { description: Identity is headless; use open to show it. }
  */
@@ -3659,7 +3659,7 @@ app.post('/browser/identities/:userId/focus', async (req, res) => {
  *               userId: { type: string, description: Shared identity owner. }
  *               handoff: { type: string, enum: [human, agent] }
  *     responses:
- *       200: { description: "Control transferred after the requested show or park completes; focused is true only after a human handoff succeeds. If the park on an agent return fails, agent control is still returned and the response adds parked: false and a reason." }
+ *       200: { description: "Control transferred after the requested show or park completes. In app-hidden mode a human handoff succeeds after confirmed unhide, returns visible: true, and reports focused equal to the native active-state readback (which may be false). If the park on an agent return fails, agent control is still returned and the response adds parked: false and a reason." }
  *       400: { description: Invalid handoff payload. }
  *       404: { description: Tab not found. }
  *       409: { description: Tab is not a shared identity tab or is no longer available. }
@@ -3901,6 +3901,8 @@ app.post('/tabs', async (req, res) => {
       }
       signal.throwIfAborted();
       
+      // A create request has no tabId for request tracking to mark as recent.
+      if (session.sharedIdentity) session.lastUsedPage = tabState.page;
       pluginEvents.emit('tab:created', { userId, tabId, page, url: page.url() });
       log('info', 'tab created', { reqId: req.reqId, tabId, userId, sessionKey: resolvedSessionKey, url: page.url() });
       return {

@@ -570,7 +570,7 @@
         },
         "responses": {
           "200": {
-            "description": "Shared identity is visible; restarted is true after a headless transition; restoreFailed is true if bounded URL restoration failed."
+            "description": "Shared identity is visible; app-hidden mode returns visible: true and focused equal to the native active-state readback (false is a successful unhide without activation). restarted is true after a headless transition; restoreFailed is true if bounded URL restoration failed."
           },
           "404": {
             "description": "Identity is not configured for shared mode."
@@ -618,7 +618,7 @@
         },
         "responses": {
           "200": {
-            "description": "Focus result after the requested window is shown."
+            "description": "Window shown; app-hidden mode returns visible: true and focused equal to the native active-state readback, which may be false."
           },
           "404": {
             "description": "Identity is not configured or is not open."
@@ -674,7 +674,7 @@
         },
         "responses": {
           "200": {
-            "description": "Control transferred after the requested show or park completes; focused is true only after a human handoff succeeds. If the park on an agent return fails, agent control is still returned and the response adds parked: false and a reason."
+            "description": "Control transferred after the requested show or park completes. In app-hidden mode a human handoff succeeds after confirmed unhide, returns visible: true, and reports focused equal to the native active-state readback (which may be false). If the park on an agent return fails, agent control is still returned and the response adds parked: false and a reason."
           },
           "400": {
             "description": "Invalid handoff payload."
