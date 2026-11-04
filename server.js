@@ -64,7 +64,7 @@ import { createPageRegistry, findTabByPage, getOpenerTabId, tabIdsForPage } from
 import { createReporter, createTabHealthTracker, collectResourceSnapshot, classifyProxyError, browserProcessTreeRssMb, browserProcessNameRssMb } from './lib/reporter.js';
 import { mountDocs } from './lib/openapi.js';
 import { initSentry, captureException as sentryCaptureException, setupExpressErrorHandler as setupSentryErrorHandler, flush as sentryFlush } from './lib/sentry.js';
-import { prepareExternalCamoufoxExecutable } from './lib/camoufox-executable.js';
+import { nativeHumanizeEnabled, prepareExternalCamoufoxExecutable } from './lib/camoufox-executable.js';
 import { SharedIdentityManager } from './lib/shared-identity.js';
 import { readHidIdleSeconds } from './lib/macos-hid-idle.js';
 import { createSharedIdentityIdlePolicy } from './lib/shared-identity-idle.js';
@@ -1432,9 +1432,8 @@ async function launchBrowserInstance() {
         executable_path: externalCamoufox?.executablePath,
         headless: useVirtualDisplay ? false : !useDesktopWindow,
         os: hostOS,
-        // Camoufox native mouse humanization hangs on macOS (even on a
-        // fresh local button fixture). Preserve the supported default elsewhere.
-        humanize: os.platform() !== 'darwin',
+        // Older or unknown macOS engines can hang on the first native click.
+        humanize: nativeHumanizeEnabled({ platform: os.platform(), executablePath: CONFIG.camoufoxExecutablePath, log }),
         enable_cache: true,
         proxy: launchProxy,
         geoip: !!launchProxy,

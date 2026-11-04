@@ -54,9 +54,10 @@ together. Preserve these invariants when applying the shared adoption rules belo
   is open and proposes active-session memory restarts and faster crashed-tab
   cleanup, not a released equivalent of our shared-profile lifecycle. Do not
   import its session destruction into keep-open identities.
-- Camoufox engine release `v152.0.4-beta.30` remains the latest published
-  engine. Engine issues #719 (unresponsive Juggler pipe) and #762 (content
-  process memory crash) are related reports, not confirmed local root causes.
+- At that reconciliation, Camoufox `v152.0.4-beta.30` was the engine baseline
+  (superseded by the candidate pin below). Engine issues #719 (unresponsive
+  Juggler pipe) and #762 (content process memory crash) are related reports,
+  not confirmed local root causes.
 - Source synchronization does not prove installation. Deploy a separately
   verified immutable release from the landed fork and retain profile backups.
 
@@ -70,6 +71,31 @@ repository test/build gates, then publish only to `origin` and read back its SHA
 If reconciliation, tests, or publication cannot complete safely, report `Blocked`
 with the exact failing stage, refs, and recovery action; never silently defer sync.
 Installation, deployment, and runtime activation require separate authorization.
+
+### Camoufox engine pin: v158.0.1-beta.41
+
+- CI, Docker and build defaults pin `158.0.1` / `beta.41`; keep `camoufox-js`
+  at `0.11.5`. Do not substitute v156: its property set is incompatible.
+- CI uses the existing `camoufox-backup-428447379` mirror of
+  [upstream v158.0.1-beta.41](https://github.com/daijro/camoufox/releases/tag/v158.0.1-beta.41).
+  The official release's `digest` for `camoufox-158.0.1-beta.41-lin.x86_64.zip`
+  is `sha256:3f2eb1d0451fa58e45e43e55f5e6181565069791ae60c0574f0ceb1f01341c33`;
+  the mirror asset has the same digest.
+- The macOS arm64 archive digest is
+  `sha256:9038f86d666c9780b6fff199d488737b8596c01f24e3e517845a0ecfb0cf8add`.
+  This is a source/CI candidate, not evidence that the live engine was replaced.
+- Both native launch paths enable humanization on macOS only when the selected
+  engine metadata is at least `158.0.1-beta.41`; older or unknown engines keep
+  it disabled with one warning. Other platforms retain humanization. See
+  [macOS input evidence](maintenance/page-creation-recovery.md).
+- Deployment is separate: the dotfiles launcher `automation/camofox/launch.py`
+  still guards `engines/152.0.4-beta.30` and its matching `version.json`.
+  Its owner must update the expected engine directory to `engines/158.0.1-beta.41`
+  and metadata to `{'version': '158.0.1', 'release': 'beta.41'}` together with
+  the verified cache pin before activation. This repository does not edit it.
+- Regress with `tests/e2e/nativeHumanize.test.js`: real trusted clicks on twelve
+  cold pages per top-edge/mid-page target, macOS fingerprint even on Linux CI,
+  and one 8 s bound covering both the native click and its page handler.
 
 ## Verify
 

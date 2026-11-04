@@ -129,7 +129,7 @@ make fetch
 
 # Override arch or version explicitly
 make up ARCH=x86_64
-make up VERSION=135.0.1 RELEASE=beta.24
+make up VERSION=158.0.1 RELEASE=beta.41
 ```
 
 #### Windows
