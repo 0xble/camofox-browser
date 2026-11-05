@@ -783,11 +783,48 @@
             }
           },
           "429": {
-            "description": "Tab limit reached.",
+            "description": "No safely recyclable idle agent tab; origin-only diagnostics identify tabs owned by the requesting identity.",
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Error"
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    },
+                    "code": {
+                      "type": "string",
+                      "enum": [
+                        "tab_limit_reached"
+                      ]
+                    },
+                    "tabs": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "tabId": {
+                            "type": "string"
+                          },
+                          "sessionKey": {
+                            "type": "string"
+                          },
+                          "origin": {
+                            "type": "string",
+                            "nullable": true
+                          },
+                          "ageSeconds": {
+                            "type": "integer",
+                            "nullable": true
+                          },
+                          "idleSeconds": {
+                            "type": "integer",
+                            "nullable": true
+                          }
+                        }
+                      }
+                    }
+                  }
                 }
               }
             }
