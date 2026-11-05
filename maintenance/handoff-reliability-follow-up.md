@@ -16,9 +16,10 @@ human control or unhide the application.
 
 Prepare and attach failures emit a WARN at degradation time. The production
 logger is forwarded through both direct and parking-fallback launch paths.
-Capability and `/health.visibility.handoffUnavailable` expose the stage,
-sanitized cause, stable code and `relaunchRequired: true`. Profile paths and
-private HTTP endpoints are redacted. No identity name or page content is added.
+Capability and `/health.visibility.handoffUnavailable` expose only the stage,
+stable code and `relaunchRequired: true`. Detailed causes remain in WARN logs,
+with profile paths and private HTTP endpoints redacted. No identity name or
+page content is added to health diagnostics.
 
 ### Why recovery remains explicit
 

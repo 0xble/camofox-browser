@@ -637,9 +637,9 @@ for (const stage of ['prepare', 'attach']) for (const cause of ['display query f
     assert.equal(logs.length, 1, 'log once at degradation, not on every failed handoff');
     assert.equal(logs[0][0], 'warn');
     assert.equal(logs[0][2].cause, cause);
-    assert.equal(visibility.capability().handoffUnavailable.code, 'handoff_unavailable');
-    assert.equal(visibility.capability().handoffUnavailable.cause, cause);
-    assert.equal(visibility.capability().handoffUnavailable.stage, stage);
+    assert.deepEqual(visibility.capability().handoffUnavailable, {
+      code: 'handoff_unavailable', stage, relaunchRequired: true,
+    });
     await assert.rejects(visibility.open({ bringToFront: async () => assert.fail('must not focus') }), error => {
       assert.equal(error.code, 'handoff_unavailable');
       assert.equal(error.statusCode, 409);

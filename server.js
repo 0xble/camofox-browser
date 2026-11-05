@@ -3347,13 +3347,12 @@ async function refreshTabRefs(tabState, options = {}) {
  *                     failedWindows: { type: integer }
  *                     handoffUnavailable:
  *                       type: array
- *                       description: Sanitized native handoff degradation causes; no identity or page data.
+ *                       description: Native handoff degradation status; detailed causes are available only in server WARN logs.
  *                       items:
  *                         type: object
  *                         properties:
  *                           code: { type: string, enum: [handoff_unavailable] }
  *                           stage: { type: string, enum: [prepare, attach] }
- *                           cause: { type: string }
  *                           relaunchRequired: { type: boolean }
  *       503:
  *         description: Unhealthy or recovering. Visibility capability is reported separately on every response.
@@ -3380,7 +3379,8 @@ app.get('/health', async (req, res) => {
     parking: Boolean(sharedParkDisplay),
     sameContextSessions: controllers.filter(session => session.visibility.capability().sameContextHandoff).length,
     restartRequiredSessions: [...sessions.values()].filter(session => session.sharedIdentity && !session.visibility && !session.headed).length,
-    handoffUnavailable: controllers.map(session => session.visibility.capability().handoffUnavailable).filter(Boolean),
+    handoffUnavailable: controllers.map(session => session.visibility.capability().handoffUnavailable).filter(Boolean)
+      .map(({ code, stage, relaunchRequired }) => ({ code, stage, relaunchRequired })),
     failedWindows: controllers.reduce((sum, session) => sum + session.visibility.capability().failedWindows, 0),
   };
   if (healthState.isRecovering) {
@@ -3735,7 +3735,7 @@ sharedIdentityWindow = createSharedIdentityWindowOpener({
  *     responses:
  *       200: { description: "Shared identity is visible; app-hidden mode returns visible: true and focused equal to the native active-state readback (false is a successful unhide without activation). restarted is true after a headless transition; restoreFailed is true if bounded URL restoration failed." }
  *       404: { description: Identity is not configured for shared mode. }
- *       409: { description: "Identity is busy, or context_restart_required because a legacy headless context still has live tabs." }
+ *       409: { description: "Identity is busy, context_restart_required because a legacy headless context still has live tabs, or native handoff is unavailable (code handoff_unavailable, retryable false; relaunch this browser context)." }
  *       503: { description: "identity_transition_timeout. The open did not settle within its deadline. The identity stays unavailable until that browser operation settles; it is not silently retried." }
  */
 app.post('/browser/identities/:userId/open', async (req, res) => {
@@ -3776,7 +3776,7 @@ app.post('/browser/identities/:userId/open', async (req, res) => {
  *     responses:
  *       200: { description: "Window shown; app-hidden mode returns visible: true and focused equal to the native active-state readback, which may be false." }
  *       404: { description: Identity is not configured or is not open. }
- *       409: { description: Identity is headless; use open to show it. }
+ *       409: { description: "Identity is headless (use open to show it), or native handoff is unavailable (code handoff_unavailable, retryable false; relaunch this browser context)." }
  */
 app.post('/browser/identities/:userId/focus', async (req, res) => {
   const userId = normalizeUserId(req.params.userId);
