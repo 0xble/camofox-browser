@@ -586,3 +586,44 @@ test('a queued native visibility open cannot focus a page retired while waiting'
   assert.equal(focused, false);
   assert.equal(visibility.visible.size, 0);
 });
+for (const stage of ['prepare', 'attach']) for (const cause of ['display query failed', 'identity visibility operation timed out after 12000ms']) {
+  test(`native handoff degradation is typed and diagnosed (${stage}: ${cause})`, async () => {
+    const logs = [];
+    const original = Error(cause);
+    const { visibility } = controller(undefined, { log: (...entry) => logs.push(entry),
+      createWindowControl: async () => {
+        if (stage === 'prepare') throw original;
+        return { addon: '/addon', attach: async () => { throw original; } };
+      } });
+    await visibility.prepare();
+    await visibility.attach();
+    assert.equal(logs.length, 1, 'log once at degradation, not on every failed handoff');
+    assert.equal(logs[0][0], 'warn');
+    assert.equal(logs[0][2].cause, cause);
+    assert.equal(visibility.capability().handoffUnavailable.code, 'handoff_unavailable');
+    assert.equal(visibility.capability().handoffUnavailable.cause, cause);
+    assert.equal(visibility.capability().handoffUnavailable.stage, stage);
+    await assert.rejects(visibility.open({ bringToFront: async () => assert.fail('must not focus') }), error => {
+      assert.equal(error.code, 'handoff_unavailable');
+      assert.equal(error.statusCode, 409);
+      assert.equal(error.cause, original);
+      return true;
+    });
+    assert.equal(logs.length, 1);
+  });
+}
+
+test('direct and parking-fallback launches forward native degradation warnings without private paths/endpoints', async () => {
+  for (const display of [null, { main: {}, park: {} }]) {
+    const logs = [];
+    const profilePath = '/private/owned-profile';
+    await launchWithVisibilityFallback({ display, profilePath, log: (...entry) => logs.push(entry),
+      prepareProfile: async () => null, createVisibility: async () => { throw Error('parking failed'); },
+      createBackgroundVisibility: (profile, options) => createDarwinIdentityVisibility(profile, { ...options, rootPid: 10, snapshot: () => [{ pid: 12, ppid: 10, args: `/engine/camoufox -profile ${profile} -juggler-pipe` }], setHidden: async () => ({ hidden: true }),
+        createWindowControl: async () => { throw Error(`failed ${profile} http://127.0.0.1:1234/secret-token`); } }),
+      launch: async () => ({ pages: () => [], once() {} }) });
+    const warning = logs.find(([, message]) => message.startsWith('native window handoff unavailable'));
+    assert.equal(warning[0], 'warn');
+    assert.equal(warning[2].cause, 'failed [profile] [endpoint]');
+  }
+});

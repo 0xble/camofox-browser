@@ -356,6 +356,34 @@
                         },
                         "failedWindows": {
                           "type": "integer"
+                        },
+                        "handoffUnavailable": {
+                          "type": "array",
+                          "description": "Sanitized native handoff degradation causes; no identity or page data.",
+                          "items": {
+                            "type": "object",
+                            "properties": {
+                              "code": {
+                                "type": "string",
+                                "enum": [
+                                  "handoff_unavailable"
+                                ]
+                              },
+                              "stage": {
+                                "type": "string",
+                                "enum": [
+                                  "prepare",
+                                  "attach"
+                                ]
+                              },
+                              "cause": {
+                                "type": "string"
+                              },
+                              "relaunchRequired": {
+                                "type": "boolean"
+                              }
+                            }
+                          }
                         }
                       }
                     }
@@ -683,7 +711,7 @@
             "description": "Tab not found."
           },
           "409": {
-            "description": "Tab is not a shared identity tab or is no longer available."
+            "description": "Tab is not a shared identity tab, is no longer available, or native handoff is unavailable (code handoff_unavailable, retryable false; no control transfer)."
           },
           "503": {
             "description": "Retryable tab_busy while a previous operation is still settling. No control transfer occurred."

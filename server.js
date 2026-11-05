@@ -2064,7 +2064,7 @@ function handleRouteError(err, req, res, extraFields = {}) {
   failuresTotal.labels(failureType, action).inc();
   // These paths already contained the failure. Do not reinterpret their
   // original timeout/closed-context text as permission to destroy a session.
-  if (err.code === 'shared_page_unavailable' || err.code === 'request_timeout' || err.code === 'identity_transition_timeout') {
+  if (err.code === 'handoff_unavailable' || err.code === 'shared_page_unavailable' || err.code === 'request_timeout' || err.code === 'identity_transition_timeout') {
     return sendError(res, err, extraFields);
   }
 
@@ -3316,6 +3316,16 @@ async function refreshTabRefs(tabState, options = {}) {
  *                     sameContextSessions: { type: integer }
  *                     restartRequiredSessions: { type: integer }
  *                     failedWindows: { type: integer }
+ *                     handoffUnavailable:
+ *                       type: array
+ *                       description: Sanitized native handoff degradation causes; no identity or page data.
+ *                       items:
+ *                         type: object
+ *                         properties:
+ *                           code: { type: string, enum: [handoff_unavailable] }
+ *                           stage: { type: string, enum: [prepare, attach] }
+ *                           cause: { type: string }
+ *                           relaunchRequired: { type: boolean }
  *       503:
  *         description: Unhealthy or recovering. Visibility capability is reported separately on every response.
  *         content:
@@ -3341,6 +3351,7 @@ app.get('/health', async (req, res) => {
     parking: Boolean(sharedParkDisplay),
     sameContextSessions: controllers.filter(session => session.visibility.capability().sameContextHandoff).length,
     restartRequiredSessions: [...sessions.values()].filter(session => session.sharedIdentity && !session.visibility && !session.headed).length,
+    handoffUnavailable: controllers.map(session => session.visibility.capability().handoffUnavailable).filter(Boolean),
     failedWindows: controllers.reduce((sum, session) => sum + session.visibility.capability().failedWindows, 0),
   };
   if (healthState.isRecovering) {
@@ -3773,7 +3784,7 @@ app.post('/browser/identities/:userId/focus', async (req, res) => {
  *       200: { description: "Control transferred after the requested show or park completes. In app-hidden mode a human handoff succeeds after confirmed unhide, returns visible: true, and reports focused equal to the native active-state readback (which may be false). If the park on an agent return fails, agent control is still returned and the response adds parked: false and a reason." }
  *       400: { description: Invalid handoff payload. }
  *       404: { description: Tab not found. }
- *       409: { description: Tab is not a shared identity tab or is no longer available. }
+ *       409: { description: 'Tab is not a shared identity tab, is no longer available, or native handoff is unavailable (code handoff_unavailable, retryable false; no control transfer).' }
  *       503: { description: "Retryable tab_busy while a previous operation is still settling. No control transfer occurred." }
  */
 app.post('/tabs/:tabId/handoff', async (req, res) => {
@@ -8224,11 +8235,12 @@ const server = app.listen(PORT, CONFIG.bindHost || undefined, async () => {
   refreshTabLockQueueDepth();
   const address = server.address();
   const bindHost = typeof address === 'object' && address ? address.address : CONFIG.bindHost;
-  pluginEvents.emit('server:started', { port: PORT, host: bindHost, pid: process.pid, plugins: loadedPlugins });
+  const boundPort = typeof address === 'object' && address ? address.port : PORT;
+  pluginEvents.emit('server:started', { port: boundPort, host: bindHost, pid: process.pid, plugins: loadedPlugins });
   if (FLY_MACHINE_ID) {
-    log('info', 'server started (fly)', { port: PORT, host: bindHost, pid: process.pid, machineId: FLY_MACHINE_ID, nodeVersion: process.version });
+    log('info', 'server started (fly)', { port: boundPort, host: bindHost, pid: process.pid, machineId: FLY_MACHINE_ID, nodeVersion: process.version });
   } else {
-    log('info', 'server started', { port: PORT, host: bindHost, pid: process.pid, nodeVersion: process.version });
+    log('info', 'server started', { port: boundPort, host: bindHost, pid: process.pid, nodeVersion: process.version });
   }
   const tmpCleanup = cleanupOrphanedTempFiles({ tmpDir: os.tmpdir() });
   if (tmpCleanup.removed > 0) {
