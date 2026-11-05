@@ -1,85 +1,49 @@
-import path from 'path';
-import { fileURLToPath } from 'url';
 import crypto from 'crypto';
-import { launchServer } from '../../lib/launcher.js';
-import { loadConfig } from '../../lib/config.js';
+import { jest } from '@jest/globals';
+import http from 'node:http';
+import { once } from 'node:events';
+import { startCookieServer } from '../helpers/cookieServer.js';
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
+test('Fetch refuses the old random-port range member 3659 without sending a request', async () => {
+  // The refusal precedes connection, even if a listener exists there.
+  await expect(fetch('http://127.0.0.1:3659/health')).rejects.toMatchObject({ cause: { message: 'bad port' } });
+});
 
+test('cookie fixtures ignore the old port draw and listen concurrently on owned ephemeral ports', async () => {
+  const random = jest.spyOn(Math, 'random').mockReturnValue((3659 - 3100 + 0.25) / 900);
+  const fixtures = [];
+  try {
+    fixtures.push(await startCookieServer('fixture-key'));
+    fixtures.push(await startCookieServer());
+    expect(fixtures[0].url).not.toBe(fixtures[1].url);
+    for (const { url } of fixtures) {
+      expect(new URL(url).port).not.toBe('3659');
+      const response = await fetch(`${url}/health`);
+      expect(response.status).toBe(200);
+      await response.arrayBuffer();
+    }
+  } finally {
+    random.mockRestore();
+    await Promise.all(fixtures.map(fixture => fixture.stop()));
+  }
+  for (const { url } of fixtures) {
+    // The exact listener is gone, rather than a SIGTERM-only assumption.
+    const server = http.createServer();
+    server.listen(Number(new URL(url).port), '127.0.0.1');
+    await once(server, 'listening');
+    await new Promise(resolve => server.close(resolve));
+  }
+}, 45000);
 const TEST_API_KEY = 'test-cookie-key-' + crypto.randomUUID();
-let serverProcess = null;
-let serverUrl = null;
-
+let fixture, serverUrl;
 async function startServerWithApiKey(apiKey) {
-  const port = Math.floor(3100 + Math.random() * 900);
-  const cfg = loadConfig();
-  const pluginDir = path.join(__dirname, '../..');
-
-  serverProcess = launchServer({
-    pluginDir,
-    port,
-    env: { ...cfg.serverEnv, TMPDIR: process.env.TMPDIR, CAMOFOX_CRASH_REPORT_ENABLED: 'false', CAMOFOX_API_KEY: apiKey, DEBUG_RESPONSES: 'false' },
-    log: { info: () => {}, error: (msg) => console.error(msg) },
-  });
-
-  for (let i = 0; i < 30; i++) {
-    await new Promise((r) => setTimeout(r, 500));
-    try {
-      const res = await fetch(`http://localhost:${port}/health`);
-      if (res.ok) {
-        serverUrl = `http://localhost:${port}`;
-        return;
-      }
-    } catch {}
-  }
-  throw new Error('Server failed to start');
+  fixture = await startCookieServer(apiKey);
+  serverUrl = fixture.url;
 }
-
-async function startServerWithoutApiKey() {
-  const port = Math.floor(3100 + Math.random() * 900);
-  const cfg = loadConfig();
-  const pluginDir = path.join(__dirname, '../..');
-
-  const env = { ...cfg.serverEnv, TMPDIR: process.env.TMPDIR, CAMOFOX_CRASH_REPORT_ENABLED: 'false', DEBUG_RESPONSES: 'false' };
-  delete env.CAMOFOX_API_KEY;
-
-  serverProcess = launchServer({
-    pluginDir,
-    port,
-    env,
-    log: { info: () => {}, error: (msg) => console.error(msg) },
-  });
-
-  for (let i = 0; i < 30; i++) {
-    await new Promise((r) => setTimeout(r, 500));
-    try {
-      const res = await fetch(`http://localhost:${port}/health`);
-      if (res.ok) {
-        serverUrl = `http://localhost:${port}`;
-        return;
-      }
-    } catch {}
-  }
-  throw new Error('Server failed to start');
-}
-
-function stopServer() {
-  return new Promise((resolve) => {
-    const proc = serverProcess;
-    if (!proc) return resolve();
-    const killTimer = setTimeout(() => {
-      if (!proc.killed) proc.kill('SIGKILL');
-    }, 5000);
-    proc.on('close', () => {
-      clearTimeout(killTimer);
-      if (serverProcess === proc) {
-        serverProcess = null;
-        serverUrl = null;
-      }
-      resolve();
-    });
-    proc.kill('SIGTERM');
-  });
+const startServerWithoutApiKey = () => startServerWithApiKey(undefined);
+async function stopServer() {
+  await fixture?.stop();
+  fixture = serverUrl = null;
 }
 
 async function postCookies(userId, cookies, headers = {}) {

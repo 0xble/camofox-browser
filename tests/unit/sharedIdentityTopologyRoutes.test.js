@@ -73,7 +73,9 @@ test.each([false, true])('open propagates explicit restart acceptance (%s) witho
 
 test.each([null, { park: {}, main: {} }])('health separates current parking capability from liveness (display=%j)', async sharedParkDisplay => {
   const updateDisplay = jest.fn(), refreshSharedParkDisplay = jest.fn();
-  const controller = { updateDisplay, visible: new Map(), capability: () => ({ sameContextHandoff: Boolean(sharedParkDisplay), failedWindows: 2 }) };
+  const handoffUnavailable = sharedParkDisplay ? undefined
+    : { code: 'handoff_unavailable', stage: 'prepare', cause: 'display query failed', relaunchRequired: true };
+  const controller = { updateDisplay, visible: new Map(), capability: () => ({ sameContextHandoff: Boolean(sharedParkDisplay), failedWindows: 2, handoffUnavailable }) };
   const sessions = new Map([['parked', { visibility: controller }], ['legacy', { sharedIdentity: true, headed: false }]]);
   const handler = route('get', '/health', {
     CONFIG: { sharedIdentityNames: ['identity'], parkDisplay: 'DeskPad' }, refreshSharedParkDisplay, sharedParkDisplay,
@@ -85,6 +87,7 @@ test.each([null, { park: {}, main: {} }])('health separates current parking capa
   expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ ok: true, visibility: {
     mode: sharedParkDisplay ? 'parking' : 'app-hidden', parking: Boolean(sharedParkDisplay),
     sameContextSessions: sharedParkDisplay ? 1 : 0, restartRequiredSessions: 1, failedWindows: 2,
+    handoffUnavailable: handoffUnavailable ? [{ code: 'handoff_unavailable', stage: 'prepare', relaunchRequired: true }] : [],
   } }));
   expect(refreshSharedParkDisplay).toHaveBeenCalledTimes(1);
   expect(updateDisplay).toHaveBeenCalledWith(sharedParkDisplay);
