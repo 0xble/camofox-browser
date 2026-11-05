@@ -66,7 +66,7 @@ function creationFixture() {
     sharedIdentities: { failedClosures: new Set(), closings: new Set(), contexts: new Map([['identity', context]]),
       owns: () => true, open: async () => context },
     coalesceInflight: (_map, _key, operation) => operation(), MAX_SESSIONS: 10, FLY_MACHINE_ID: null,
-    CONFIG: {}, isQuarantinedPage, proxyPool: null, browserLaunchProxy: null, contextIdentityOptions: () => ({}),
+    CONFIG: {}, isQuarantinedPage, proxyPool: null, browserLaunchProxy: null, contextIdentityOptions: () => ({}), trackContextTracing() {},
     registerSharedIdentityPage() {}, clearSessionLocks() {}, clearSessionDownloads: async () => {},
     refreshActiveTabsGauge() {}, log() {},
   };

@@ -2459,7 +2459,7 @@
           "Interaction"
         ],
         "summary": "Evaluate JavaScript in tab",
-        "description": "Runs arbitrary JS in the page context and returns the result.",
+        "description": "Runs JS in the page, or discovers/evaluates document-bound direct payment-processor frames. Frame operations require exact merchant and processor origins. Rediscovery invalidates previous frame IDs; navigation/reload/detachment refuses stale bindings. Frame operations and secret page evaluation never emit expression/result plugin events; errors are sanitized. Protected evaluation is refused while the owning context is traced, and tracing cannot start after protected use.",
         "parameters": [
           {
             "name": "tabId",
@@ -2477,8 +2477,7 @@
               "schema": {
                 "type": "object",
                 "required": [
-                  "userId",
-                  "expression"
+                  "userId"
                 ],
                 "properties": {
                   "userId": {
@@ -2486,7 +2485,32 @@
                   },
                   "expression": {
                     "type": "string",
-                    "description": "JavaScript expression to evaluate."
+                    "description": "JavaScript expression; required except for paymentOperation discover."
+                  },
+                  "paymentOperation": {
+                    "type": "string",
+                    "enum": [
+                      "discover",
+                      "evaluate"
+                    ],
+                    "description": "Discover returns result as an array of frame_id/origin bindings. Evaluate requires frameId, merchantOrigin, frameOrigin and expression."
+                  },
+                  "frameId": {
+                    "type": "string",
+                    "description": "Opaque document binding returned by discover on this tab."
+                  },
+                  "merchantOrigin": {
+                    "type": "string",
+                    "description": "Exact top-level merchant origin bound during discovery."
+                  },
+                  "frameOrigin": {
+                    "type": "string",
+                    "description": "Exact allowlisted processor origin returned by discover."
+                  },
+                  "secret": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Suppress expression/result events and sanitize errors for secret page evaluations; frame operations always use this protection."
                   }
                 }
               }

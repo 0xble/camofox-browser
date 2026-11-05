@@ -51,7 +51,7 @@ test.each([false, true])('last-URL restoration respects the parked page factory 
     normalizeUserId: String, sessions: new Map(), sessionCreations: new Map(),
     sharedIdentities: { failedClosures: new Set(), closings: new Set(), owns: () => true, open: async () => context },
     coalesceInflight: (_map, _key, operation) => operation(), MAX_SESSIONS: 10, FLY_MACHINE_ID: '',
-    proxyPool: null, browserLaunchProxy: null, CONFIG: {}, contextIdentityOptions: () => ({}),
+    proxyPool: null, browserLaunchProxy: null, CONFIG: {}, contextIdentityOptions: () => ({}), trackContextTracing() {},
     isQuarantinedPage, sharedIdentityLastUrls: urls, registerSharedIdentityPage, log: jest.fn(),
   });
   const session = await getSession('identity');
@@ -76,7 +76,7 @@ test('a parked createPage rejection during last-URL restore still yields a usabl
     normalizeUserId: String, sessions, sessionCreations: new Map(),
     sharedIdentities: { failedClosures: new Set(), closings: new Set(), owns: () => true, open: async () => context, contexts: new Map([['identity', context]]) },
     coalesceInflight: (_map, _key, operation) => operation(), MAX_SESSIONS: 10, FLY_MACHINE_ID: '',
-    proxyPool: null, browserLaunchProxy: null, CONFIG: {}, contextIdentityOptions: () => ({}),
+    proxyPool: null, browserLaunchProxy: null, CONFIG: {}, contextIdentityOptions: () => ({}), trackContextTracing() {},
     isQuarantinedPage, sharedIdentityLastUrls: urls, registerSharedIdentityPage, log,
   });
   const session = await getSession('identity');
