@@ -1,5 +1,4 @@
 import assert from 'node:assert/strict';
-import { mock } from 'node:test';
 const test = globalThis.test ?? (await import('node:test')).test;
 import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
@@ -15,11 +14,18 @@ function serverFunction(name, deps, async = true) {
   if (start < 0) return undefined;
   return vm.runInNewContext(`(${source.slice(start, source.indexOf('\n}\n', start) + 2)})`, deps);
 }
+// Small runner-independent spy: Jest does not expose Node's `mock` export.
+function spy(implementation = () => {}) {
+  let calls = 0;
+  const fn = (...args) => { calls++; return implementation(...args); };
+  fn.mock = { callCount: () => calls, mockImplementation: next => { implementation = next; } };
+  return fn;
+}
 const NOW = 10_000_000;
 const IDLE = NOW - 31 * 60_000;
 function tab(at = IDLE) {
   const page = { url: () => 'https://person:secret@fixture.test/private?token=secret#secret',
-    isClosed: () => false, on: () => {}, title: async () => '', close: mock.fn(async () => {}) };
+    isClosed: () => false, on: () => {}, title: async () => '', close: spy(async () => {}) };
   return { page, createdAt: at - 1000, pressureObservedAt: at - 1000, lastAgentActivityAt: at, toolCalls: 0,
     visitedUrls: new Set(), activeDownloads: 0 };
 }
@@ -27,7 +33,7 @@ function fixture({ legacy = false, global = false, headed = true } = {}) {
   const old = tab(IDLE - 1000), idle = tab(), latest = tab(NOW);
   const session = { sharedIdentity: true, headed, keepOpen: true, lastAccess: NOW,
     tabGroups: new Map([['abandoned-task', new Map([['old', old], ['idle', idle]])], ['active-task', new Map([['latest', latest]])]]),
-    visibility: { visible: new Map(headed ? [[1, {}]] : []), isPageVisible: mock.fn(() => false) } };
+    visibility: { visible: new Map(headed ? [[1, {}]] : []), isPageVisible: spy(() => false) } };
   const sessions = new Map([['shared', session]]);
   const newTab = tab(NOW);
   const humanControlledTabs = new Set(), tabLocks = new Map();
@@ -38,13 +44,13 @@ function fixture({ legacy = false, global = false, headed = true } = {}) {
     CONFIG: { hiddenTabIdleMin: 30, hiddenSessionIdleMin: 0, headedIdleReleaseMin: 0 },
     sharedIdentityIdlePolicy: createSharedIdentityIdlePolicy({ readIdleSeconds: async () => 7200, clock: () => NOW }),
     identityTransitions: new Map(), sharedIdentityRequests: new Map(),
-    identityBusy: () => false, closeSession: mock.fn(async () => {}),
+    identityBusy: () => false, closeSession: spy(async () => {}),
     MAX_TABS_PER_SESSION: global ? 10 : 3, MAX_TABS_GLOBAL: global ? 3 : 100,
     getTotalTabCount: () => [...session.tabGroups.values()].reduce((n, g) => n + g.size, 0),
     FLY_MACHINE_ID: null, normalizeUserId: String, getSession: async () => session,
     withRequestDeadline, requestTimeoutMs: () => 1000, navigationRequestTimeoutMs: () => 1000, releasePageLease,
-    createPageWithRecoveryForUser: mock.fn(async () => ({ session, page: newTab.page })),
-    createLeasedPage: mock.fn(async () => ({ page: newTab.page })),
+    createPageWithRecoveryForUser: spy(async () => ({ session, page: newTab.page })),
+    createLeasedPage: spy(async () => ({ page: newTab.page })),
     registerPage: (_session, _user, _page, key) => {
       session.tabGroups.set(key, new Map([['new', newTab]]));
       return { tabId: 'new', tabState: newTab };
@@ -55,10 +61,10 @@ function fixture({ legacy = false, global = false, headed = true } = {}) {
     },
     validateUrl: () => null, withTabLock: async (_id, work) => work(),
     withPageLoadDuration: (_name, work) => work(), navigatePage: async () => {}, recordNavSuccess: () => {},
-    pluginEvents: { emit: mock.fn() }, log: () => {},
+    pluginEvents: { emit: spy() }, log: () => {},
     refreshTabLockQueueDepth: () => {}, refreshActiveTabsGauge: () => {},
-    tabsRecycledTotal: { inc: mock.fn() }, tabsReapedTotal: { inc: mock.fn() },
-    recycleOldestTab: mock.fn(async () => { await old.page.close(); return true; }),
+    tabsRecycledTotal: { inc: spy() }, tabsReapedTotal: { inc: spy() },
+    recycleOldestTab: spy(async () => { await old.page.close(); return true; }),
     browserErrorStatus, browserErrorCode, browserErrorRecovery, isRetryableBrowserError,
     safeError: err => err.message, StaleRefsError: class extends Error {}, sentryCaptureException: () => {},
     hashIdentifier: () => null, actionFromReq: () => 'create',
