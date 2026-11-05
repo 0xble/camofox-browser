@@ -3143,8 +3143,16 @@ function snapshotCandidateFrames(page) {
     if (frame === page.mainFrame()) return false;
     const frameUrl = frame.url();
     const frameName = frame.name();
-    if (IFRAME_SKIP_PATTERNS.some(p => p.test(frameUrl) || p.test(frameName))) return false;
-    return Boolean(frameUrl) && frameUrl !== 'about:blank' && frameUrl !== 'about:srcdoc';
+    if (!frameUrl || frameUrl === 'about:blank' || frameUrl === 'about:srcdoc') return false;
+    let frameLocation;
+    try {
+      const parsedUrl = new URL(frameUrl);
+      // Embedded resource/return URLs in query or fragment do not identify this frame.
+      frameLocation = `${parsedUrl.hostname}${parsedUrl.pathname}`;
+    } catch {
+      return false;
+    }
+    return !IFRAME_SKIP_PATTERNS.some(p => p.test(frameLocation) || p.test(frameName));
   });
 }
 
