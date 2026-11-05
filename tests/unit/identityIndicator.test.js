@@ -1,4 +1,5 @@
 import { jest } from '@jest/globals';
+import { testMainDisplay, withWindowConfig } from '../helpers/sharedLaunchGeometry.js';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -82,7 +83,7 @@ describe('indicator at launch', () => {
   const launched = [];
   const firefox = { launchPersistentContext: jest.fn(async (_profile, options) => { launched.push(options); return { on() {}, close: async () => {} }; }) };
   const launch = (headed, indicator) => launchSharedIdentityContext(profile, {
-    headed, indicator, firefox, launchOptions: async options => ({ ...options }), os: { platform: () => 'darwin' },
+    headed, indicator, firefox, discoverMainDisplay: testMainDisplay, launchOptions: async options => withWindowConfig(options), os: { platform: () => 'darwin' },
     getHostOS: () => 'macos', config: {}, events: { emitAsync: async () => {} },
   });
 
@@ -100,10 +101,11 @@ describe('indicator at launch', () => {
     expect(await fs.readFile(path.join(launched[0].addons[0], 'background.js'), 'utf8')).toContain('#1d4ed8');
   });
 
-  test('headless launches and unmapped identities are unchanged, and nothing is written to the profile', async () => {
+  test('headless launch writes no profile geometry; unmapped headed launch has no indicator', async () => {
     await launch(false, identityIndicator(aliases, id('a')));
+    expect(await fs.readdir(profile)).toEqual([]);
     await launch(true, null);
     expect(launched.map(options => options.addons)).toEqual([undefined, undefined]);
-    expect(await fs.readdir(profile)).toEqual([]);
+    expect(await fs.readdir(profile)).toEqual(['xulstore.json']);
   });
 });

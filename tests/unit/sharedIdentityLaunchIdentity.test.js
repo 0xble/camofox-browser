@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, jest, test } from '@jest/globals';
 import fs from 'node:fs/promises';
+import { testMainDisplay, withWindowConfig } from '../helpers/sharedLaunchGeometry.js';
 import { readFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -32,12 +33,13 @@ describe('shared identity persistent launch identity', () => {
     };
     const launchOptions = jest.fn(async (options) => {
       fingerprint.push({ ...options });
-      return { ...options, fromFingerprint: true };
+      return { ...withWindowConfig(options), fromFingerprint: true };
     });
     await launchSharedIdentityContext(profile, {
       extensions: [],
       firefox,
       launchOptions,
+      discoverMainDisplay: testMainDisplay,
       os: { platform: () => 'darwin' },
       getHostOS: () => 'macos',
       config: { directIdentity: identity },

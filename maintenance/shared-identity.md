@@ -52,6 +52,10 @@ in the normal Jest unit suite, and `tests/e2e/sharedPersistentLifecycle.test.js`
 on macOS with parking disabled. Exercise first acquisition, lazy open, repeated
 release/reopen, sibling form input, native refusal, and protected human siblings.
 
+### Headed fingerprint geometry
+
+`shared-identity-launch.js` passes BrowserForge's camelCase `screen.maxWidth/maxHeight` bounded to main and (when present) parking displays. The applied `CAMOU_CONFIG_N` chunks after launch hooks supply `window.outerWidth/outerHeight` for xulstore and the visibility controller; never stretch the native window to a monitor. BrowserForge can return an outer window larger than its constrained screen, especially on a small virtual monitor. Fit the sampled aspect ratio through Camoufox's `window` option and regenerate, bounded to eight attempts; do not clamp only the native bounds or impose one global size. Headless/warm-up launches are unchanged. Topology refresh retains the selected size; legacy parking signatures remain small unique decrements of that size. A Camoufox window can refuse even a one-pixel resize, so headed fingerprint-sized parking binds by the same reversible motion proof as main-display handoff, keeping every physical resize request at the applied outer size. Ambiguous motion stays fail-closed. Main-display proofs retain the motion challenge and exact CGWindow binding below.
+
 ### Native main-display app-hidden handoff
 
 - AppKit `hidden=false`/`active=true` proves application state, not physical
