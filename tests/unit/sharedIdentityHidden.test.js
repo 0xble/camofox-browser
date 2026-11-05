@@ -113,6 +113,43 @@ test('visibility requests run in caller order after failures without blocking an
   assert.equal(visibility.visible.size, 0, 'the last caller must win');
 });
 
+test('app-wide visibility protects every page, including direct human tab switches', async () => {
+  const { visibility } = controller();
+  await visibility.attach();
+  const shown = { bringToFront: async () => {} }, background = {};
+  const opening = visibility.open(shown);
+  assert.equal(visibility.isPageVisible(shown), true, 'protect target before the first await');
+  await opening;
+  assert.equal(visibility.isPageVisible(shown), true);
+  assert.equal(visibility.isPageVisible(background), true);
+  await visibility.release();
+  assert.equal(visibility.isPageVisible(shown), false);
+  assert.equal(visibility.isPageVisible(background), false);
+});
+
+test('cleanup refresh observes external unhide/hide without changing app visibility', async () => {
+  const native = { hidden: true }, calls = [];
+  const { visibility } = controller(async (_pid, hidden) => { calls.push(hidden); native.hidden = hidden; return { hidden }; },
+    { readState: async () => native });
+  await visibility.attach();
+  native.hidden = false; // Human opens the application from the Dock.
+  await visibility.refresh();
+  assert.equal(visibility.isPageVisible({}), true);
+  native.hidden = true; // Human Cmd+H, not a service release.
+  await visibility.refresh();
+  assert.equal(visibility.isPageVisible({}), false);
+  assert.deepEqual(calls, [true], 'readback must not issue hide/show');
+});
+
+test('failed cleanup refresh cannot make a visible application collectible', async () => {
+  let fail = false;
+  const { visibility } = controller(async (_pid, hidden) => ({ hidden }), { readState: async () => { if (fail) throw Error('readback failed'); return { hidden: true }; } });
+  await visibility.attach();
+  fail = true;
+  await assert.rejects(visibility.refresh(), /readback failed/);
+  assert.equal(visibility.isPageVisible({}), true);
+});
+
 test('hide refusal reports failure and retains visible state without closing anything', async () => {
   const { visibility } = controller(async () => ({ hidden: false }));
   await assert.rejects(visibility.release(), /not confirmed/);
