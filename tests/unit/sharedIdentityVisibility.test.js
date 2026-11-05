@@ -247,7 +247,10 @@ describe('no-relaunch visibility with two concurrent callers', () => {
     expect(result).toMatchObject({ tabId: 'B', restarted: false });
     expect(windows.get(1)).toMatchObject(windowBounds(display.park));
     expect(windows.get(2)).toMatchObject(windowBounds(display.main, true));
+    expect(visibility.isPageVisible(a)).toBe(false);
+    expect(visibility.isPageVisible(b)).toBe(true);
     expect(await visibility.release()).toBe(true);
+    expect(visibility.isPageVisible(b)).toBe(false);
     expect(groupA.get('A').page).toBe(a);
     expect(a.url()).toContain('about:blank#camofox-');
     expect(a.state.input).toBe('unsaved form state');

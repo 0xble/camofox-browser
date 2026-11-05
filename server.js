@@ -434,6 +434,7 @@ function sendError(res, err, extraFields = {}) {
   };
   if (code) body.code = code;
   if (recovery) body.recovery = recovery;
+  if (code === 'tab_limit_reached') body.tabs = err.tabs;
   if (err instanceof StaleRefsError) body.ref = err.ref;
   if (status >= 500 && !err.statusCode && !recovery) {
     const req = res.req;
@@ -2281,16 +2282,24 @@ async function recycleOldestTab(session, reqId, userId) {
   return { recycledTabId: oldestTabId, recycledFromGroup: oldestGroupKey };
 }
 
-// A hidden shared tab may be closed only when nothing could be using it right
+// A shared agent tab may be closed only when nothing could be using it right
 // now. Rechecked immediately before close so a request that arrived since
 // candidate selection is never cut off.
 function sharedTabClosable(session, tabId, tab, latestTabId) {
+  if (session.sharedIdentity) {
+    const found = findTab(session, tabId);
+    if (session._closing || tab.retiring || found?.listItemId === '__shared_identity__' || tab.handoff === 'human') return false;
+    if (session.visibility?.isPageVisible?.(tab.page)) return false;
+    // Legacy headed contexts have no per-page visibility readback. Fail closed.
+    if ((session.headed || session.visibility?.visible.size) && !session.visibility?.isPageVisible) return false;
+  }
   return tabClosable({ session, tabId, tab, latestTabId, tabLocks, humanControlledTabs });
 }
 
 const latestSharedTabId = latestAgentTabId;
 
 async function closeSharedTab(session, tabId, tab, { userId, reason, reqId }) {
+  tab.retiring = true;
   await safePageClose(tab.page);
   // Even an unconfirmed close retires this page; never leave its drained lock
   // poisoning identityBusy or permit registration under a new ID.
@@ -2310,16 +2319,35 @@ async function closeSharedTab(session, tabId, tab, { userId, reason, reqId }) {
   return true;
 }
 
+function tabLimitError(session) {
+  const now = Date.now();
+  const tabs = [...session.tabGroups].flatMap(([sessionKey, group]) => [...group].map(([tabId, tab]) => {
+    let origin = null;
+    try { origin = new URL(tab.page.url()).origin; } catch {}
+    return { tabId, sessionKey, origin,
+      ageSeconds: Number.isFinite(tab.createdAt ?? tab.pressureObservedAt) ? Math.max(0, Math.floor((now - (tab.createdAt ?? tab.pressureObservedAt)) / 1000)) : null,
+      idleSeconds: Number.isFinite(tab.lastAgentActivityAt) ? Math.max(0, Math.floor((now - tab.lastAgentActivityAt) / 1000)) : null };
+  }));
+  return Object.assign(new Error('Maximum tabs reached; no idle agent tab can be safely recycled'), {
+    statusCode: 429, code: 'tab_limit_reached', tabs,
+  });
+}
+
 async function recycleIdleSharedTab(session, reqId, userId) {
   // 0 disables idle-tab cleanup entirely, including cap eviction.
   if (!CONFIG.hiddenTabIdleMin) return null;
+  try { await session.visibility?.refresh?.(); } catch { return null; }
+  if (session.headed || session.visibility?.visible.size) {
+    if (!await sharedIdentityIdlePolicy.shouldReleaseHeaded(CONFIG.hiddenTabIdleMin)) return null;
+  }
   const latestTabId = latestSharedTabId(session);
   const candidates = [...session.tabGroups.values()].flatMap(group => [...group])
     .filter(([tabId, tab]) => sharedIdentityIdlePolicy.agentIdle(tab.lastAgentActivityAt, CONFIG.hiddenTabIdleMin)
       && sharedTabClosable(session, tabId, tab, latestTabId))
     .sort((a, b) => a[1].lastAgentActivityAt - b[1].lastAgentActivityAt);
   for (const [tabId, tab] of candidates) {
-    if (!sharedTabClosable(session, tabId, tab, latestTabId)) continue;
+    if (!sharedIdentityIdlePolicy.agentIdle(tab.lastAgentActivityAt, CONFIG.hiddenTabIdleMin)
+      || !sharedTabClosable(session, tabId, tab, latestSharedTabId(session))) continue;
     if (await closeSharedTab(session, tabId, tab, { userId, reason: 'idle_cap', reqId })) {
       tabsRecycledTotal.inc();
       return { recycledTabId: tabId, recycledFromGroup: null };
@@ -2389,6 +2417,7 @@ function createTabState(page) {
     lastNavigationHttpStatus: null,
     googleRetryCount: 0,
     navigateAbort: null,
+    createdAt: Date.now(),
     pressureObservedAt: Date.now(),
     lastAgentActivityAt: Date.now(),
     pressureObservedToolCalls: 0,
@@ -3626,19 +3655,26 @@ async function cleanIdleSharedSessions() {
     }
   }
   for (const [key, original] of [...sessions]) {
-    if (sessions.get(key) !== original || !original.sharedIdentity || original.headed || identityTransitions.has(key)
+    if (sessions.get(key) !== original || !original.sharedIdentity || identityTransitions.has(key)
       || (typeof sharedIdentityWindow !== 'undefined' && sharedIdentityWindow?.unavailable?.(key))) continue;
+    try { await original.visibility?.refresh?.(); } catch { continue; }
     if (tabThreshold) {
-      const latestTabId = latestSharedTabId(original);
       const tabs = [...original.tabGroups.values()].flatMap(group => [...group.entries()]);
       for (const [tabId, tab] of tabs) {
-        if (sessions.get(key) !== original || original.headed || identityTransitions.has(key)
+        if (sessions.get(key) !== original || identityTransitions.has(key)
           || (typeof sharedIdentityWindow !== 'undefined' && sharedIdentityWindow?.unavailable?.(key))) break;
+        if (!sharedIdentityIdlePolicy.agentIdle(tab.lastAgentActivityAt, CONFIG.hiddenTabIdleMin)) continue;
+        try { await original.visibility?.refresh?.(); } catch { break; }
+        if ((original.headed || original.visibility?.visible.size)
+          && !await sharedIdentityIdlePolicy.shouldReleaseHeaded(CONFIG.hiddenTabIdleMin)) break;
+        if (sessions.get(key) !== original || identityTransitions.has(key)) break;
         if (!sharedIdentityIdlePolicy.agentIdle(tab.lastAgentActivityAt, CONFIG.hiddenTabIdleMin)
-          || sharedIdentityRequests.get(key) || !sharedTabClosable(original, tabId, tab, latestTabId)) continue;
+          || sharedIdentityRequests.get(key) || !sharedTabClosable(original, tabId, tab, latestSharedTabId(original))) continue;
         if (await closeSharedTab(original, tabId, tab, { userId: key, reason: 'shared_idle' })) tabsReapedTotal.inc();
       }
     }
+    try { await original.visibility?.refresh?.(); } catch { continue; }
+    if (original.headed || original.visibility?.visible.size) continue;
     if (sharedSessionExpiryEligible(key, original)) {
       // Parking hides live windows. Expiry must checkpoint and close the context.
       await closeSession(key, original, { reason: 'hidden_idle' }).catch(err => {
@@ -3861,11 +3897,24 @@ app.post('/tabs/:tabId/handoff', async (req, res) => {
  *             schema:
  *               $ref: '#/components/schemas/Error'
  *       429:
- *         description: Tab limit reached.
+ *         description: No safely recyclable idle agent tab; origin-only diagnostics identify tabs owned by the requesting identity.
  *         content:
  *           application/json:
  *             schema:
- *               $ref: '#/components/schemas/Error'
+ *               type: object
+ *               properties:
+ *                 error: { type: string }
+ *                 code: { type: string, enum: [tab_limit_reached] }
+ *                 tabs:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       tabId: { type: string }
+ *                       sessionKey: { type: string }
+ *                       origin: { type: string, nullable: true }
+ *                       ageSeconds: { type: integer, nullable: true }
+ *                       idleSeconds: { type: integer, nullable: true }
  *       409:
  *         description: Cannot enable tracing on an existing session.
  *         content:
@@ -3930,11 +3979,11 @@ app.post('/tabs', async (req, res) => {
       // Recycle oldest tab when limits are reached instead of rejecting
       if (totalTabs >= MAX_TABS_PER_SESSION || getTotalTabCount() >= MAX_TABS_GLOBAL) {
         const recycled = session.sharedIdentity
-          ? (session.headed ? null : await recycleIdleSharedTab(session, req.reqId, userId))
+          ? await recycleIdleSharedTab(session, req.reqId, userId)
           : await recycleOldestTab(session, req.reqId, userId);
         signal.throwIfAborted();
         if (!recycled) {
-          throw Object.assign(new Error('Maximum tabs per session reached'), { statusCode: 429 });
+          throw tabLimitError(session);
         }
       }
       
@@ -7432,10 +7481,10 @@ app.post('/tabs/open', async (req, res) => {
     let totalTabs = 0;
     for (const g of session.tabGroups.values()) totalTabs += g.size;
     if (totalTabs >= MAX_TABS_PER_SESSION || getTotalTabCount() >= MAX_TABS_GLOBAL) {
-      const recycled = await recycleOldestTab(session, req.reqId, userId);
-      if (!recycled) {
-        return res.status(429).json({ error: 'Maximum tabs per session reached' });
-      }
+      const recycled = session.sharedIdentity
+        ? await recycleIdleSharedTab(session, req.reqId, userId)
+        : await recycleOldestTab(session, req.reqId, userId);
+      if (!recycled) throw tabLimitError(session);
     }
     
     let { page, lease } = await createLeasedPage(session);
