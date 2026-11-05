@@ -29,6 +29,7 @@ export async function startCookieServer(apiKey) {
     await fs.rm(directory, { recursive: true, force: true });
   })();
   try {
+    const deadline = Date.now() + 15000;
     const url = await new Promise((resolve, reject) => {
       timer = setTimeout(() => reject(Error(`Cookie server listen deadline exceeded: ${output}`)), 15000);
       const inspect = message => {
@@ -50,7 +51,7 @@ export async function startCookieServer(apiKey) {
       proc.once('exit', (code, signal) => reject(Error(`Cookie server exited before listening (${code ?? signal}): ${output}`)));
     });
     clearTimeout(timer);
-    const response = await fetch(`${url}/health`, { signal: AbortSignal.timeout(15000) });
+    const response = await fetch(`${url}/health`, { signal: AbortSignal.timeout(Math.max(1, deadline - Date.now())) });
     if (!response.ok) throw Error(`Cookie server health returned ${response.status}: ${output}`);
     await response.arrayBuffer();
     return { url, stop };
