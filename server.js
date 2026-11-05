@@ -437,6 +437,7 @@ function sendError(res, err, extraFields = {}) {
   };
   if (code) body.code = code;
   if (recovery) body.recovery = recovery;
+  if (code === 'tab_limit_reached') body.tabs = err.tabs;
   if (err instanceof StaleRefsError) body.ref = err.ref;
   if (status >= 500 && !err.statusCode && !recovery) {
     const req = res.req;
@@ -2068,7 +2069,7 @@ function handleRouteError(err, req, res, extraFields = {}) {
   failuresTotal.labels(failureType, action).inc();
   // These paths already contained the failure. Do not reinterpret their
   // original timeout/closed-context text as permission to destroy a session.
-  if (err.code === 'shared_page_unavailable' || err.code === 'request_timeout' || err.code === 'identity_transition_timeout') {
+  if (err.code === 'handoff_unavailable' || err.code === 'shared_page_unavailable' || err.code === 'request_timeout' || err.code === 'identity_transition_timeout') {
     return sendError(res, err, extraFields);
   }
 
@@ -2285,16 +2286,24 @@ async function recycleOldestTab(session, reqId, userId) {
   return { recycledTabId: oldestTabId, recycledFromGroup: oldestGroupKey };
 }
 
-// A hidden shared tab may be closed only when nothing could be using it right
+// A shared agent tab may be closed only when nothing could be using it right
 // now. Rechecked immediately before close so a request that arrived since
 // candidate selection is never cut off.
 function sharedTabClosable(session, tabId, tab, latestTabId) {
+  if (session.sharedIdentity) {
+    const found = findTab(session, tabId);
+    if (session._closing || tab.retiring || found?.listItemId === '__shared_identity__' || tab.handoff === 'human') return false;
+    if (session.visibility?.isPageVisible?.(tab.page)) return false;
+    // Legacy headed contexts have no per-page visibility readback. Fail closed.
+    if ((session.headed || session.visibility?.visible.size) && !session.visibility?.isPageVisible) return false;
+  }
   return tabClosable({ session, tabId, tab, latestTabId, tabLocks, humanControlledTabs });
 }
 
 const latestSharedTabId = latestAgentTabId;
 
 async function closeSharedTab(session, tabId, tab, { userId, reason, reqId }) {
+  tab.retiring = true;
   await safePageClose(tab.page);
   // Even an unconfirmed close retires this page; never leave its drained lock
   // poisoning identityBusy or permit registration under a new ID.
@@ -2314,16 +2323,35 @@ async function closeSharedTab(session, tabId, tab, { userId, reason, reqId }) {
   return true;
 }
 
+function tabLimitError(session) {
+  const now = Date.now();
+  const tabs = [...session.tabGroups].flatMap(([sessionKey, group]) => [...group].map(([tabId, tab]) => {
+    let origin = null;
+    try { origin = new URL(tab.page.url()).origin; } catch {}
+    return { tabId, sessionKey, origin,
+      ageSeconds: Number.isFinite(tab.createdAt ?? tab.pressureObservedAt) ? Math.max(0, Math.floor((now - (tab.createdAt ?? tab.pressureObservedAt)) / 1000)) : null,
+      idleSeconds: Number.isFinite(tab.lastAgentActivityAt) ? Math.max(0, Math.floor((now - tab.lastAgentActivityAt) / 1000)) : null };
+  }));
+  return Object.assign(new Error('Maximum tabs reached; no idle agent tab can be safely recycled'), {
+    statusCode: 429, code: 'tab_limit_reached', tabs,
+  });
+}
+
 async function recycleIdleSharedTab(session, reqId, userId) {
   // 0 disables idle-tab cleanup entirely, including cap eviction.
   if (!CONFIG.hiddenTabIdleMin) return null;
+  try { await session.visibility?.refresh?.(); } catch { return null; }
+  if (session.headed || session.visibility?.visible.size) {
+    if (!await sharedIdentityIdlePolicy.shouldReleaseHeaded(CONFIG.hiddenTabIdleMin)) return null;
+  }
   const latestTabId = latestSharedTabId(session);
   const candidates = [...session.tabGroups.values()].flatMap(group => [...group])
     .filter(([tabId, tab]) => sharedIdentityIdlePolicy.agentIdle(tab.lastAgentActivityAt, CONFIG.hiddenTabIdleMin)
       && sharedTabClosable(session, tabId, tab, latestTabId))
     .sort((a, b) => a[1].lastAgentActivityAt - b[1].lastAgentActivityAt);
   for (const [tabId, tab] of candidates) {
-    if (!sharedTabClosable(session, tabId, tab, latestTabId)) continue;
+    if (!sharedIdentityIdlePolicy.agentIdle(tab.lastAgentActivityAt, CONFIG.hiddenTabIdleMin)
+      || !sharedTabClosable(session, tabId, tab, latestSharedTabId(session))) continue;
     if (await closeSharedTab(session, tabId, tab, { userId, reason: 'idle_cap', reqId })) {
       tabsRecycledTotal.inc();
       return { recycledTabId: tabId, recycledFromGroup: null };
@@ -2393,6 +2421,7 @@ function createTabState(page) {
     lastNavigationHttpStatus: null,
     googleRetryCount: 0,
     navigateAbort: null,
+    createdAt: Date.now(),
     pressureObservedAt: Date.now(),
     lastAgentActivityAt: Date.now(),
     pressureObservedToolCalls: 0,
@@ -3320,6 +3349,15 @@ async function refreshTabRefs(tabState, options = {}) {
  *                     sameContextSessions: { type: integer }
  *                     restartRequiredSessions: { type: integer }
  *                     failedWindows: { type: integer }
+ *                     handoffUnavailable:
+ *                       type: array
+ *                       description: Native handoff degradation status; detailed causes are available only in server WARN logs.
+ *                       items:
+ *                         type: object
+ *                         properties:
+ *                           code: { type: string, enum: [handoff_unavailable] }
+ *                           stage: { type: string, enum: [prepare, attach] }
+ *                           relaunchRequired: { type: boolean }
  *       503:
  *         description: Unhealthy or recovering. Visibility capability is reported separately on every response.
  *         content:
@@ -3345,6 +3383,8 @@ app.get('/health', async (req, res) => {
     parking: Boolean(sharedParkDisplay),
     sameContextSessions: controllers.filter(session => session.visibility.capability().sameContextHandoff).length,
     restartRequiredSessions: [...sessions.values()].filter(session => session.sharedIdentity && !session.visibility && !session.headed).length,
+    handoffUnavailable: controllers.map(session => session.visibility.capability().handoffUnavailable).filter(Boolean)
+      .map(({ code, stage, relaunchRequired }) => ({ code, stage, relaunchRequired })),
     failedWindows: controllers.reduce((sum, session) => sum + session.visibility.capability().failedWindows, 0),
   };
   if (healthState.isRecovering) {
@@ -3630,19 +3670,26 @@ async function cleanIdleSharedSessions() {
     }
   }
   for (const [key, original] of [...sessions]) {
-    if (sessions.get(key) !== original || !original.sharedIdentity || original.headed || identityTransitions.has(key)
+    if (sessions.get(key) !== original || !original.sharedIdentity || identityTransitions.has(key)
       || (typeof sharedIdentityWindow !== 'undefined' && sharedIdentityWindow?.unavailable?.(key))) continue;
+    try { await original.visibility?.refresh?.(); } catch { continue; }
     if (tabThreshold) {
-      const latestTabId = latestSharedTabId(original);
       const tabs = [...original.tabGroups.values()].flatMap(group => [...group.entries()]);
       for (const [tabId, tab] of tabs) {
-        if (sessions.get(key) !== original || original.headed || identityTransitions.has(key)
+        if (sessions.get(key) !== original || identityTransitions.has(key)
           || (typeof sharedIdentityWindow !== 'undefined' && sharedIdentityWindow?.unavailable?.(key))) break;
+        if (!sharedIdentityIdlePolicy.agentIdle(tab.lastAgentActivityAt, CONFIG.hiddenTabIdleMin)) continue;
+        try { await original.visibility?.refresh?.(); } catch { break; }
+        if ((original.headed || original.visibility?.visible.size)
+          && !await sharedIdentityIdlePolicy.shouldReleaseHeaded(CONFIG.hiddenTabIdleMin)) break;
+        if (sessions.get(key) !== original || identityTransitions.has(key)) break;
         if (!sharedIdentityIdlePolicy.agentIdle(tab.lastAgentActivityAt, CONFIG.hiddenTabIdleMin)
-          || sharedIdentityRequests.get(key) || !sharedTabClosable(original, tabId, tab, latestTabId)) continue;
+          || sharedIdentityRequests.get(key) || !sharedTabClosable(original, tabId, tab, latestSharedTabId(original))) continue;
         if (await closeSharedTab(original, tabId, tab, { userId: key, reason: 'shared_idle' })) tabsReapedTotal.inc();
       }
     }
+    try { await original.visibility?.refresh?.(); } catch { continue; }
+    if (original.headed || original.visibility?.visible.size) continue;
     if (sharedSessionExpiryEligible(key, original)) {
       // Parking hides live windows. Expiry must checkpoint and close the context.
       await closeSession(key, original, { reason: 'hidden_idle' }).catch(err => {
@@ -3692,7 +3739,7 @@ sharedIdentityWindow = createSharedIdentityWindowOpener({
  *     responses:
  *       200: { description: "Shared identity is visible; app-hidden mode returns visible: true and focused equal to the native active-state readback (false is a successful unhide without activation). restarted is true after a headless transition; restoreFailed is true if bounded URL restoration failed." }
  *       404: { description: Identity is not configured for shared mode. }
- *       409: { description: "Identity is busy, or context_restart_required because a legacy headless context still has live tabs." }
+ *       409: { description: "Identity is busy, context_restart_required because a legacy headless context still has live tabs, or native handoff is unavailable (code handoff_unavailable, retryable false; relaunch this browser context)." }
  *       503: { description: "identity_transition_timeout. The open did not settle within its deadline. The identity stays unavailable until that browser operation settles; it is not silently retried." }
  */
 app.post('/browser/identities/:userId/open', async (req, res) => {
@@ -3733,7 +3780,7 @@ app.post('/browser/identities/:userId/open', async (req, res) => {
  *     responses:
  *       200: { description: "Window shown; app-hidden mode returns visible: true and focused equal to the native active-state readback, which may be false." }
  *       404: { description: Identity is not configured or is not open. }
- *       409: { description: Identity is headless; use open to show it. }
+ *       409: { description: "Identity is headless (use open to show it), or native handoff is unavailable (code handoff_unavailable, retryable false; relaunch this browser context)." }
  */
 app.post('/browser/identities/:userId/focus', async (req, res) => {
   const userId = normalizeUserId(req.params.userId);
@@ -3777,7 +3824,7 @@ app.post('/browser/identities/:userId/focus', async (req, res) => {
  *       200: { description: "Control transferred after the requested show or park completes. In app-hidden mode a human handoff succeeds after confirmed unhide, returns visible: true, and reports focused equal to the native active-state readback (which may be false). If the park on an agent return fails, agent control is still returned and the response adds parked: false and a reason." }
  *       400: { description: Invalid handoff payload. }
  *       404: { description: Tab not found. }
- *       409: { description: Tab is not a shared identity tab or is no longer available. }
+ *       409: { description: 'Tab is not a shared identity tab, is no longer available, or native handoff is unavailable (code handoff_unavailable, retryable false; no control transfer).' }
  *       503: { description: "Retryable tab_busy while a previous operation is still settling. No control transfer occurred." }
  */
 app.post('/tabs/:tabId/handoff', async (req, res) => {
@@ -3865,11 +3912,24 @@ app.post('/tabs/:tabId/handoff', async (req, res) => {
  *             schema:
  *               $ref: '#/components/schemas/Error'
  *       429:
- *         description: Tab limit reached.
+ *         description: No safely recyclable idle agent tab; origin-only diagnostics identify tabs owned by the requesting identity.
  *         content:
  *           application/json:
  *             schema:
- *               $ref: '#/components/schemas/Error'
+ *               type: object
+ *               properties:
+ *                 error: { type: string }
+ *                 code: { type: string, enum: [tab_limit_reached] }
+ *                 tabs:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       tabId: { type: string }
+ *                       sessionKey: { type: string }
+ *                       origin: { type: string, nullable: true }
+ *                       ageSeconds: { type: integer, nullable: true }
+ *                       idleSeconds: { type: integer, nullable: true }
  *       409:
  *         description: Cannot enable tracing on an existing session.
  *         content:
@@ -3934,11 +3994,11 @@ app.post('/tabs', async (req, res) => {
       // Recycle oldest tab when limits are reached instead of rejecting
       if (totalTabs >= MAX_TABS_PER_SESSION || getTotalTabCount() >= MAX_TABS_GLOBAL) {
         const recycled = session.sharedIdentity
-          ? (session.headed ? null : await recycleIdleSharedTab(session, req.reqId, userId))
+          ? await recycleIdleSharedTab(session, req.reqId, userId)
           : await recycleOldestTab(session, req.reqId, userId);
         signal.throwIfAborted();
         if (!recycled) {
-          throw Object.assign(new Error('Maximum tabs per session reached'), { statusCode: 429 });
+          throw tabLimitError(session);
         }
       }
       
@@ -7454,10 +7514,10 @@ app.post('/tabs/open', async (req, res) => {
     let totalTabs = 0;
     for (const g of session.tabGroups.values()) totalTabs += g.size;
     if (totalTabs >= MAX_TABS_PER_SESSION || getTotalTabCount() >= MAX_TABS_GLOBAL) {
-      const recycled = await recycleOldestTab(session, req.reqId, userId);
-      if (!recycled) {
-        return res.status(429).json({ error: 'Maximum tabs per session reached' });
-      }
+      const recycled = session.sharedIdentity
+        ? await recycleIdleSharedTab(session, req.reqId, userId)
+        : await recycleOldestTab(session, req.reqId, userId);
+      if (!recycled) throw tabLimitError(session);
     }
     
     let { page, lease } = await createLeasedPage(session);
@@ -8246,11 +8306,12 @@ const server = app.listen(PORT, CONFIG.bindHost || undefined, async () => {
   refreshTabLockQueueDepth();
   const address = server.address();
   const bindHost = typeof address === 'object' && address ? address.address : CONFIG.bindHost;
-  pluginEvents.emit('server:started', { port: PORT, host: bindHost, pid: process.pid, plugins: loadedPlugins });
+  const boundPort = typeof address === 'object' && address ? address.port : PORT;
+  pluginEvents.emit('server:started', { port: boundPort, host: bindHost, pid: process.pid, plugins: loadedPlugins });
   if (FLY_MACHINE_ID) {
-    log('info', 'server started (fly)', { port: PORT, host: bindHost, pid: process.pid, machineId: FLY_MACHINE_ID, nodeVersion: process.version });
+    log('info', 'server started (fly)', { port: boundPort, host: bindHost, pid: process.pid, machineId: FLY_MACHINE_ID, nodeVersion: process.version });
   } else {
-    log('info', 'server started', { port: PORT, host: bindHost, pid: process.pid, nodeVersion: process.version });
+    log('info', 'server started', { port: boundPort, host: bindHost, pid: process.pid, nodeVersion: process.version });
   }
   const tmpCleanup = cleanupOrphanedTempFiles({ tmpDir: os.tmpdir() });
   if (tmpCleanup.removed > 0) {

@@ -266,6 +266,10 @@ describe('actionFromReq classifies routes correctly', () => {
 });
 
 describe('classifyError categorizes timeout vs proxy', () => {
+  test.each(['No safely idle tab available', 'Tab creation timed out after waiting'])('coded tab admission limit → "tab_limit" (%s)', message => {
+    expect(classifyError(Object.assign(new Error(message), { code: 'tab_limit_reached', statusCode: 429 }))).toBe('tab_limit');
+  });
+
   test('action timeout → "timeout"', () => {
     expect(classifyError(new Error('action timed out after 30000ms'))).toBe('timeout');
   });

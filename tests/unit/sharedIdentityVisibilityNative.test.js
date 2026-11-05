@@ -88,13 +88,15 @@ describe('native readback in the add-on (Camoufox-spoofed windows.get)', () => {
   let root, visibility, context, windows, intervals, nextId, browser, readback, onCreated, currentDisplay;
   // Camoufox spoofs windows.get: it always reports the requested park geometry.
   // `native` is what CGWindowList would report.
-  async function setup({ failReads = 0, showOnly = false } = {}) {
+  async function setup({ failReads = 0, showOnly = false, geometryReadMs = 0 } = {}) {
+    let now = Date.now();
     currentDisplay = showOnly ? { main: display.main, park: null } : display;
     root = await fs.mkdtemp(path.join(os.tmpdir(), 'park-native-'));
     context = new EventEmitter(); context.livePages = []; context.pages = () => context.livePages;
     windows = new Map(); intervals = []; nextId = 1;
     let failures = failReads;
     readback = jest.fn(async () => {
+      now += geometryReadMs;
       if (failures > 0) { failures--; throw new Error('osascript timed out'); }
       return [...windows.values()].map(w => ({ number: w.id + 1000, ...w.native }));
     });
@@ -119,9 +121,11 @@ describe('native readback in the add-on (Camoufox-spoofed windows.get)', () => {
         return null;
       }), update: async () => {} },
     };
-    visibility = await createSharedIdentityVisibility(currentDisplay, { showOnly, nativeReadback: readback, rootDir: root, timeoutMs: 2000, discoverDisplay: async () => currentDisplay });
+    visibility = await createSharedIdentityVisibility(currentDisplay, { showOnly, nativeReadback: readback, rootDir: root, timeoutMs: geometryReadMs ? 10000 : 2000, discoverDisplay: async () => currentDisplay });
     const script = await fs.readFile(path.join(visibility.addon, 'background.js'), 'utf8');
-    vm.runInNewContext(script, { browser, fetch, setTimeout, setInterval: fn => { const id = setInterval(fn, 10); intervals.push(id); return id; } });
+    vm.runInNewContext(script, { browser, fetch, setTimeout,
+      Date: geometryReadMs ? class extends Date { static now() { return now; } } : Date,
+      setInterval: fn => { const id = setInterval(fn, 10); intervals.push(id); return id; } });
     await visibility.attach(context);
   }
   afterEach(async () => { for (const id of intervals) clearInterval(id); await visibility?.close(); await fs.rm(root, { recursive: true, force: true }); });
@@ -200,6 +204,34 @@ describe('native readback in the add-on (Camoufox-spoofed windows.get)', () => {
     expect(browser.windows.remove).not.toHaveBeenCalled();
     expect(document.title).toBe('original');
   });
+  test('show-only binds the exact target through WindowServer lock-screen scaling, not fingerprint geometry', async () => {
+    await setup({ showOnly: true });
+    windows.set(1, { id: 1, tabs: [{ id: 1, windowId: 1 }], native: { ...windowBounds(display.park) } });
+    windows.set(2, { id: 2, tabs: [{ id: 2, windowId: 2 }], native: { ...onMain } });
+    const sibling = { ...windows.get(2).native };
+    browser.windows.update.mockImplementation(async (id, bounds) => {
+      const w = windows.get(id);
+      // WindowServer scales desktop windows about the display center while
+      // locked. AppKit frames and windows.get remain in untransformed points.
+      w.native = { left: Math.round(102.4 + .9 * bounds.left), top: 94,
+        width: 1153, height: 811 };
+      return { ...w, ...bounds };
+    });
+    const document = { title: 'original' };
+    browser.tabs.query = async ({ title }) => title === document.title ? [{ id: 1, windowId: 1 }] : [];
+    const page = { evaluate: async (fn, args) => vm.runInNewContext(`(${fn})(args)`, { document, args }) };
+    expect(await visibility.open(page)).toMatchObject({ onMain: true, number: 1001 });
+    expect(windows.get(2).native).toEqual(sibling);
+    expect(browser.windows.update.mock.calls.every(([id]) => id === 1)).toBe(true);
+  });
+  test('show-only fits successful 1500ms native reads inside the 10-second command deadline', async () => {
+    await setup({ showOnly: true, geometryReadMs: 1500 });
+    windows.set(1, { id: 1, tabs: [{ id: 1, windowId: 1 }], native: { ...onMain } });
+    const document = { title: 'original' };
+    browser.tabs.query = async ({ title }) => title === document.title ? [{ id: 1, windowId: 1 }] : [];
+    const page = { evaluate: async (fn, args) => vm.runInNewContext(`(${fn})(args)`, { document, args }) };
+    expect(await visibility.open(page)).toMatchObject({ onMain: true, number: 1001 });
+  });
   test.each(['ignored move', 'empty window list'])('show-only %s cannot be acknowledged from a main-display sibling', async mode => {
     await setup({ showOnly: true });
     windows.set(1, { id: 1, tabs: [{ id: 1, windowId: 1 }], native: { ...windowBounds(display.park) } });
@@ -258,6 +290,33 @@ describe('native readback in the add-on (Camoufox-spoofed windows.get)', () => {
     await new Promise(resolve => setTimeout(resolve, 350));
     expect(browser.windows.update).not.toHaveBeenCalled();
     expect(browser.windows.remove).not.toHaveBeenCalled();
+  });
+  test.each([false, true])('cancelled show during tab activation cannot move a cached=%s target', async cached => {
+    await setup({ showOnly: true });
+    windows.set(1, { id: 1, tabs: [{ id: 1, windowId: 1 }], native: { ...onMain } });
+    const document = { title: 'original' };
+    browser.tabs.query = async ({ title }) => title === document.title ? [{ id: 1, windowId: 1 }] : [];
+    const page = { evaluate: async (fn, args) => vm.runInNewContext(`(${fn})(args)`, { document, args }) };
+    if (cached) await visibility.open(page);
+    browser.windows.update.mockClear();
+    let resume, entered;
+    const blocked = new Promise(resolve => { entered = resolve; });
+    browser.tabs.update = async () => { entered(); await new Promise(resolve => { resume = resolve; }); };
+    const abort = new AbortController();
+    const showing = visibility.open(page, { signal: abort.signal });
+    const rejected = expect(showing).rejects.toThrow('cancelled');
+    await blocked; abort.abort(new Error('cancelled')); await rejected;
+    resume(); await new Promise(resolve => setTimeout(resolve, 350));
+    expect(browser.windows.update).not.toHaveBeenCalled();
+    expect(browser.windows.remove).not.toHaveBeenCalled();
+  });
+  test('parking show recovers a transient initial native read failure', async () => {
+    await setup();
+    const p = await visibility.newPage(context);
+    const originalRead = readback.getMockImplementation();
+    readback.mockRejectedValueOnce(new Error('osascript timed out')).mockImplementation(originalRead);
+    await visibility.open(p);
+    expect(visibility.visible.has(1)).toBe(true);
   });
   test('startup with native readback acknowledges ready', async () => {
     await setup();

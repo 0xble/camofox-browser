@@ -113,6 +113,43 @@ test('visibility requests run in caller order after failures without blocking an
   assert.equal(visibility.visible.size, 0, 'the last caller must win');
 });
 
+test('app-wide visibility protects every page, including direct human tab switches', async () => {
+  const { visibility } = controller();
+  await visibility.attach();
+  const shown = { bringToFront: async () => {} }, background = {};
+  const opening = visibility.open(shown);
+  assert.equal(visibility.isPageVisible(shown), true, 'protect target before the first await');
+  await opening;
+  assert.equal(visibility.isPageVisible(shown), true);
+  assert.equal(visibility.isPageVisible(background), true);
+  await visibility.release();
+  assert.equal(visibility.isPageVisible(shown), false);
+  assert.equal(visibility.isPageVisible(background), false);
+});
+
+test('cleanup refresh observes external unhide/hide without changing app visibility', async () => {
+  const native = { hidden: true }, calls = [];
+  const { visibility } = controller(async (_pid, hidden) => { calls.push(hidden); native.hidden = hidden; return { hidden }; },
+    { readState: async () => native });
+  await visibility.attach();
+  native.hidden = false; // Human opens the application from the Dock.
+  await visibility.refresh();
+  assert.equal(visibility.isPageVisible({}), true);
+  native.hidden = true; // Human Cmd+H, not a service release.
+  await visibility.refresh();
+  assert.equal(visibility.isPageVisible({}), false);
+  assert.deepEqual(calls, [true], 'readback must not issue hide/show');
+});
+
+test('failed cleanup refresh cannot make a visible application collectible', async () => {
+  let fail = false;
+  const { visibility } = controller(async (_pid, hidden) => ({ hidden }), { readState: async () => { if (fail) throw Error('readback failed'); return { hidden: true }; } });
+  await visibility.attach();
+  fail = true;
+  await assert.rejects(visibility.refresh(), /readback failed/);
+  assert.equal(visibility.isPageVisible({}), true);
+});
+
 test('hide refusal reports failure and retains visible state without closing anything', async () => {
   const { visibility } = controller(async () => ({ hidden: false }));
   await assert.rejects(visibility.release(), /not confirmed/);
@@ -585,4 +622,45 @@ test('a queued native visibility open cannot focus a page retired while waiting'
   assert.equal((await opening).code, 'tab_destroyed');
   assert.equal(focused, false);
   assert.equal(visibility.visible.size, 0);
+});
+for (const stage of ['prepare', 'attach']) for (const cause of ['display query failed', 'identity visibility operation timed out after 12000ms']) {
+  test(`native handoff degradation is typed and diagnosed (${stage}: ${cause})`, async () => {
+    const logs = [];
+    const original = Error(cause);
+    const { visibility } = controller(undefined, { log: (...entry) => logs.push(entry),
+      createWindowControl: async () => {
+        if (stage === 'prepare') throw original;
+        return { addon: '/addon', attach: async () => { throw original; } };
+      } });
+    await visibility.prepare();
+    await visibility.attach();
+    assert.equal(logs.length, 1, 'log once at degradation, not on every failed handoff');
+    assert.equal(logs[0][0], 'warn');
+    assert.equal(logs[0][2].cause, cause);
+    assert.deepEqual(visibility.capability().handoffUnavailable, {
+      code: 'handoff_unavailable', stage, relaunchRequired: true,
+    });
+    await assert.rejects(visibility.open({ bringToFront: async () => assert.fail('must not focus') }), error => {
+      assert.equal(error.code, 'handoff_unavailable');
+      assert.equal(error.statusCode, 409);
+      assert.equal(error.cause, original);
+      return true;
+    });
+    assert.equal(logs.length, 1);
+  });
+}
+
+test('direct and parking-fallback launches forward native degradation warnings without private paths/endpoints', async () => {
+  for (const display of [null, { main: {}, park: {} }]) {
+    const logs = [];
+    const profilePath = '/private/owned-profile';
+    await launchWithVisibilityFallback({ display, profilePath, log: (...entry) => logs.push(entry),
+      prepareProfile: async () => null, createVisibility: async () => { throw Error('parking failed'); },
+      createBackgroundVisibility: (profile, options) => createDarwinIdentityVisibility(profile, { ...options, rootPid: 10, snapshot: () => [{ pid: 12, ppid: 10, args: `/engine/camoufox -profile ${profile} -juggler-pipe` }], setHidden: async () => ({ hidden: true }),
+        createWindowControl: async () => { throw Error(`failed ${profile} http://127.0.0.1:1234/secret-token`); } }),
+      launch: async () => ({ pages: () => [], once() {} }) });
+    const warning = logs.find(([, message]) => message.startsWith('native window handoff unavailable'));
+    assert.equal(warning[0], 'warn');
+    assert.equal(warning[2].cause, 'failed [profile] [endpoint]');
+  }
 });

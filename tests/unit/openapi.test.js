@@ -44,6 +44,18 @@ function parseServerRoutes(source) {
 const serverRoutes = parseServerRoutes(serverSrc);
 
 describe('OpenAPI spec', () => {
+  test.each(['open', 'focus'])('identity %s documents non-retryable native handoff unavailability', action => {
+    const description = spec.paths[`/browser/identities/{userId}/${action}`].post.responses['409'].description;
+    expect(description).toContain('handoff_unavailable');
+    expect(description).toContain('retryable false');
+  });
+
+  test('health handoff diagnostics document only public status fields', () => {
+    const schema = spec.paths['/health'].get.responses['200'].content['application/json'].schema;
+    expect(Object.keys(schema.properties.visibility.properties.handoffUnavailable.items.properties).sort())
+      .toEqual(['code', 'relaunchRequired', 'stage']);
+  });
+
   test('is valid OpenAPI 3.0.x shape', () => {
     expect(spec.openapi).toMatch(/^3\.0\.\d+$/);
     expect(spec.info).toBeDefined();

@@ -356,6 +356,31 @@
                         },
                         "failedWindows": {
                           "type": "integer"
+                        },
+                        "handoffUnavailable": {
+                          "type": "array",
+                          "description": "Native handoff degradation status; detailed causes are available only in server WARN logs.",
+                          "items": {
+                            "type": "object",
+                            "properties": {
+                              "code": {
+                                "type": "string",
+                                "enum": [
+                                  "handoff_unavailable"
+                                ]
+                              },
+                              "stage": {
+                                "type": "string",
+                                "enum": [
+                                  "prepare",
+                                  "attach"
+                                ]
+                              },
+                              "relaunchRequired": {
+                                "type": "boolean"
+                              }
+                            }
+                          }
                         }
                       }
                     }
@@ -576,7 +601,7 @@
             "description": "Identity is not configured for shared mode."
           },
           "409": {
-            "description": "Identity is busy, or context_restart_required because a legacy headless context still has live tabs."
+            "description": "Identity is busy, context_restart_required because a legacy headless context still has live tabs, or native handoff is unavailable (code handoff_unavailable, retryable false; relaunch this browser context)."
           },
           "503": {
             "description": "identity_transition_timeout. The open did not settle within its deadline. The identity stays unavailable until that browser operation settles; it is not silently retried."
@@ -624,7 +649,7 @@
             "description": "Identity is not configured or is not open."
           },
           "409": {
-            "description": "Identity is headless; use open to show it."
+            "description": "Identity is headless (use open to show it), or native handoff is unavailable (code handoff_unavailable, retryable false; relaunch this browser context)."
           }
         }
       }
@@ -683,7 +708,7 @@
             "description": "Tab not found."
           },
           "409": {
-            "description": "Tab is not a shared identity tab or is no longer available."
+            "description": "Tab is not a shared identity tab, is no longer available, or native handoff is unavailable (code handoff_unavailable, retryable false; no control transfer)."
           },
           "503": {
             "description": "Retryable tab_busy while a previous operation is still settling. No control transfer occurred."
@@ -783,11 +808,48 @@
             }
           },
           "429": {
-            "description": "Tab limit reached.",
+            "description": "No safely recyclable idle agent tab; origin-only diagnostics identify tabs owned by the requesting identity.",
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Error"
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    },
+                    "code": {
+                      "type": "string",
+                      "enum": [
+                        "tab_limit_reached"
+                      ]
+                    },
+                    "tabs": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "tabId": {
+                            "type": "string"
+                          },
+                          "sessionKey": {
+                            "type": "string"
+                          },
+                          "origin": {
+                            "type": "string",
+                            "nullable": true
+                          },
+                          "ageSeconds": {
+                            "type": "integer",
+                            "nullable": true
+                          },
+                          "idleSeconds": {
+                            "type": "integer",
+                            "nullable": true
+                          }
+                        }
+                      }
+                    }
+                  }
                 }
               }
             }

@@ -61,13 +61,19 @@ release/reopen, sibling form input, native refusal, and protected human siblings
   failure leaves AppKit hiding and tab creation working, but handoff fails closed
   before unhide with no visible/focused success or ownership transfer.
 - Resolve the exact tab/window with the temporary title marker, then bind its
-  native CG number using an unused horizontal main-display position signature. beta.41
-  fingerprint-controlled native sizes do not reliably follow resize requests,
-  and macOS clamps vertical position for tall fingerprint-sized windows.
-  Reserve positions absent from current native windows and other bindings;
-  never accept a main-display sibling or empty window list as target proof.
-  Revalidate the position reservation against a fresh native list immediately
-  before each bind update; readbacks before this reservation cannot bind a number.
+  native CG number using an out-and-back horizontal motion challenge. Never
+  equate WebExtension/AppKit coordinates with CGWindow visual bounds: while
+  locked, WindowServer scales desktop windows by 0.9 around the display center.
+  A plain disposable AppKit window reproduces this independently of Camoufox
+  fingerprinting. beta.41 also fixes native sizes to its random fingerprint and
+  macOS clamps tall windows vertically, so dimensions are not identity proof.
+  Require the same PID-owned native numbers across three command-scoped samples,
+  exactly one native window tracking opposite horizontal moves back to its first
+  position, stable candidate top/width/height, and no moving sibling. Missing,
+  new, ambiguous or empty lists fail closed. Cache only that exact native number.
+  Return the next challenge bounds with each native sample so successful
+  1500ms readbacks fit the existing 10-second command deadline; cancellation
+  and topology checks still fence every native read and subsequent window move.
 - Discover NSScreen main geometry afresh, move only the resolved window with
   `browser.windows.update`, and require bound-number native main-placement proof
   before ownership transfer. Focus requires that exact window frontmost within
@@ -79,10 +85,16 @@ release/reopen, sibling form input, native refusal, and protected human siblings
   Already-running contexts without the addon need separately authorized normal
   context replacement; publishing source does not activate it.
 - Regress with app-hidden/native visibility unit suites and the explicit macOS
-  disposable-browser check `node --test tests/native/mainDisplayHandoff.mjs`.
-  It records bound-number/main-display geometry and proves retained PID,
+  disposable-browser check
+  `CAMOFOX_NATIVE_TEST_APP=/path/to/signed/Camoufox.app node --test tests/native/mainDisplayHandoff.mjs`.
+  It copies that app into scratch and uses the production shared launch helper
+  (random fingerprint and en-US/America/Los_Angeles unless explicitly overridden).
+  It records CSS/fingerprint versus native bounds and proves retained PID,
   target/sibling unsaved inputs and off-main sibling preservation over repeated
-  handoff/release. It never connects to the running server.
+  handoff/release, exact-window frontmost order and independent AppKit hidden
+  readback after release. `focused:false` is expected while loginwindow owns a
+  locked desktop; native per-app window order alone is not global focus proof.
+  It never connects to the running server.
 - Upstream preflight: `jo-inc/camofox-browser` master `39c8209` has no corresponding
   native visibility helper. All-state handoff/visibility/headed/persistent
   searches found related closed headed/container issue #7990 and closed
