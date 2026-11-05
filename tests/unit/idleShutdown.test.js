@@ -69,7 +69,7 @@ function fixture({ timeoutMs = 300_000, hasBrowser = true, machineId = '' } = {}
   };
   const sandbox = {
     initialBrowser: hasBrowser ? browser : null,
-    sessions, coalesceInflight, sharedIdentities,
+    sessions, coalesceInflight, sharedIdentities, trackContextTracing() {},
     sharedIdentityRequests: new Map(), sharedIdentityLastUrls: new Map(),
     CONFIG: { browserIdleTimeoutMs: timeoutMs, sharedIdentityAliases: {},
       sharedIdentityNames: [], directIdentity: {}, browserRssRestartThresholdMb: 1000 },
