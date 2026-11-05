@@ -118,10 +118,25 @@ test('parking handoff uses fingerprint outer size and exact native bindings', {
       events: { emitAsync: async (_event, { options }) => { options.executablePath = path.join(appPath, 'Contents/MacOS/camoufox'); } },
     });
     await visibility.attach(context);
-    const page = await visibility.newPage(context), sibling = await visibility.newPage(context);
+    const [page, sibling] = await Promise.all([visibility.newPage(context), visibility.newPage(context)]);
+    const extra = await Promise.all(Array.from({ length: 3 }, () => visibility.newPage(context)));
     await page.setContent('<input value="target unsaved">');
     await sibling.setContent('<input value="sibling unsaved">');
     const pid = findBrowserPid(process.pid, snapshotDarwinProcesses(), profilePath);
+    const codes = new Set();
+    for (const [index, p] of [page, sibling, ...extra].entries()) {
+      await visibility.open(p);
+      const opened = [...visibility.visible.values()].at(-1);
+      const script = await fs.readFile(path.join(visibility.addon, 'background.js'), 'utf8');
+      const endpoint = script.match(/const endpoint="([^"]+)"/)[1];
+      const proof = await (await fetch(endpoint + '/geometry', { method: 'POST', body: JSON.stringify({ windowId: opened.windowId, action: 'show' }) })).json();
+      assert.equal(proof.onMain, true);
+      assert.ok(Number.isSafeInteger(proof.number));
+      codes.add(proof.number);
+      await visibility.release({ page: p });
+      console.log(JSON.stringify({ concurrentBinding: { index, number: proof.number } }));
+    }
+    assert.equal(codes.size, 5, '2- and 3-way concurrent creates have distinct native bindings');
     await visibility.open(page);
     const opened = [...visibility.visible.values()].at(-1);
     const script = await fs.readFile(path.join(visibility.addon, 'background.js'), 'utf8');

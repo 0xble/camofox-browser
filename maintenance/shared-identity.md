@@ -107,6 +107,27 @@ release/reopen, sibling form input, native refusal, and protected human siblings
   same preserving native-verified lifecycle. Roll back by reverting this change
   and separately replacing contexts only when authorized; live tabs stay owned.
 
+### Sized parking proof
+
+Sized parking cannot reuse the same three-point motion for concurrent creates:
+all equal-sized native windows would pass the same direction/return test. Each
+unbound parking window instead reserves a distinct second excursion and samples
+`base → 48 → base → code → base`. One measured positive affine x transform must
+explain all five observations of exactly one CGWindow; changing native number
+sets, duplicate candidates, ignored updates, resizing, or incorrect excursion
+ratios fail closed. Codes are allocated synchronously without a shared-identity
+lock, queue, or serialization, and are reusable after binding by native number.
+Show-only keeps the stricter existing three-point proof unchanged. All requested
+parking excursions are checked against the current topology to avoid any overlap
+with human main, including full-display windows; no challenge changes dimensions.
+
+Display discovery failure is a launch degradation, not an agent-acquisition
+failure: skip screen constraints and the profile geometry seed, warn, and retain
+the app-hidden controller's explicit unavailable-handoff capability. Known-display
+invalid applied geometry still fails before browser launch. Fitted window
+regeneration sets minimum sampled screen dimensions as well as physical maxima;
+the final applied config must fit its own sampled screen too.
+
 ### Bounded identity open
 
 The open endpoint has a 60-second caller deadline (`sharedIdentityOpenTimeoutMs`
