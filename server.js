@@ -14,6 +14,8 @@ import { contextIdentityOptions, launchLocale } from './lib/browser-identity.js'
 import { normalizePlaywrightProxy, createProxyPool, buildProxyUrl } from './lib/proxy.js';
 import { createFlyHelpers } from './lib/fly.js';
 import { withRequestDeadline } from './lib/request-deadline.js';
+import { createEvaluateOperation } from './lib/evaluate-operation.js';
+import { trackContextTracing } from './lib/context-tracing.js';
 import { createPluginEvents, loadPlugins, typeEventPayload } from './lib/plugins.js';
 import { requireAuth, accessKeyMiddleware, timingSafeCompare as _timingSafeCompare, isLoopbackAddress as _isLoopbackAddress } from './lib/auth.js';
 import { sharedIdentityMetadata } from './lib/shared-identity-metadata.js';
@@ -125,6 +127,7 @@ reporter.startWatchdog(30_000, () => {
 
 // --- Plugin event bus ---
 const pluginEvents = createPluginEvents();
+const evaluateOperation = createEvaluateOperation({ events: pluginEvents });
 
 // --- Shared auth middleware ---
 const authMiddleware = () => requireAuth(CONFIG);
@@ -1928,6 +1931,7 @@ async function getSession(userId, { trace = false, headed = false, parkedOpen = 
       };
       checkAcquisition();
 
+      trackContextTracing(context);
       let tracePath = null;
       if (trace) {
         const traceDir = ensureTracesDir(CONFIG.tracesDir, key);
@@ -1936,7 +1940,7 @@ async function getSession(userId, { trace = false, headed = false, parkedOpen = 
           await context.tracing.start({ screenshots: true, snapshots: true, sources: false });
           log('info', 'tracing enabled for session', { userId: key, traceDir, tracePath });
         } catch (err) {
-          log('warn', 'tracing.start failed; session will not be traced', { userId: key, error: err.message });
+          log('warn', 'tracing.start failed; protected evaluation stays disabled', { userId: key, error: err.message });
           tracePath = null;
         }
       }
@@ -6434,7 +6438,7 @@ app.get('/tabs/:tabId/stats', async (req, res) => {
  *   post:
  *     tags: [Interaction]
  *     summary: Evaluate JavaScript in tab
- *     description: Runs arbitrary JS in the page context and returns the result.
+ *     description: Runs JS in the page, or discovers/evaluates document-bound direct payment-processor frames. Frame operations require exact merchant and processor origins. Rediscovery invalidates previous frame IDs; navigation/reload/detachment refuses stale bindings. Frame operations and secret page evaluation never emit expression/result plugin events; errors are sanitized. Protected evaluation is refused while the owning context is traced, and tracing cannot start after protected use.
  *     parameters:
  *       - name: tabId
  *         in: path
@@ -6447,13 +6451,30 @@ app.get('/tabs/:tabId/stats', async (req, res) => {
  *         application/json:
  *           schema:
  *             type: object
- *             required: [userId, expression]
+ *             required: [userId]
  *             properties:
  *               userId:
  *                 type: string
  *               expression:
  *                 type: string
- *                 description: JavaScript expression to evaluate.
+ *                 description: JavaScript expression; required except for paymentOperation discover.
+ *               paymentOperation:
+ *                 type: string
+ *                 enum: [discover, evaluate]
+ *                 description: Discover returns result as an array of frame_id/origin bindings. Evaluate requires frameId, merchantOrigin, frameOrigin and expression.
+ *               frameId:
+ *                 type: string
+ *                 description: Opaque document binding returned by discover on this tab.
+ *               merchantOrigin:
+ *                 type: string
+ *                 description: Exact top-level merchant origin bound during discovery.
+ *               frameOrigin:
+ *                 type: string
+ *                 description: Exact allowlisted processor origin returned by discover.
+ *               secret:
+ *                 type: boolean
+ *                 default: false
+ *                 description: Suppress expression/result events and sanitize errors for secret page evaluations; frame operations always use this protection.
  *     responses:
  *       200:
  *         description: Evaluation result.
@@ -6494,7 +6515,7 @@ app.post('/tabs/:tabId/evaluate', express.json({ limit: CONFIG.evaluateMaxBodySi
   try {
     const { userId, expression } = req.body;
     if (!userId) return res.status(400).json({ error: 'userId is required' });
-    if (!expression) return res.status(400).json({ error: 'expression is required' });
+    if (req.body.paymentOperation !== 'discover' && (typeof expression !== 'string' || !expression.trim())) return res.status(400).json({ error: 'expression is required' });
 
     const session = sessions.get(normalizeUserId(userId));
     const found = session && findTab(session, req.params.tabId);
@@ -6504,16 +6525,17 @@ app.post('/tabs/:tabId/evaluate', express.json({ limit: CONFIG.evaluateMaxBodySi
     const { tabState } = found;
     tabState.toolCalls++; tabState.consecutiveFailures = 0;
 
-    pluginEvents.emit('tab:evaluate', { userId, tabId: req.params.tabId, expression });
     const result = await withUserLimit(userId, () => withTabLock(
       req.params.tabId,
-      () => tabState.page.evaluate(expression),
+      () => evaluateOperation(tabState.page, req.body, { userId, tabId: req.params.tabId }),
       requestTimeoutMs(),
     ));
-    pluginEvents.emit('tab:evaluated', { userId, tabId: req.params.tabId, result });
     log('info', 'evaluate', { reqId: req.reqId, tabId: req.params.tabId, userId, resultType: typeof result });
     res.json({ ok: true, result });
   } catch (err) {
+    if (req.body?.secret === true || req.body?.paymentOperation !== undefined || req.body?.frameId !== undefined || req.body?.merchantOrigin !== undefined || req.body?.frameOrigin !== undefined) {
+      return res.status(409).json({ error: 'Protected evaluation refused or failed; rediscover before retrying.', code: 'payment_frame_binding' });
+    }
     log('error', 'evaluate failed', { reqId: req.reqId, tabId: req.params.tabId, error: err.message });
     handleRouteError(err, req, res);
   }
