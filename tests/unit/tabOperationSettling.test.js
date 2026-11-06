@@ -6,6 +6,32 @@ import { applySharedTabHandoff } from '../../lib/shared-tab-handoff.js';
 import { handleTabTimeout } from '../../lib/tab-timeout.js';
 
 const source = fs.readFileSync(new URL('../../server.js', import.meta.url), 'utf8');
+// Source-sliced fixtures must fail at the marker, not inside the VM, when
+// server.js is renamed/reordered. Every slice below goes through this guard.
+function countOccurrences(text, marker) {
+  let count = 0, at = text.indexOf(marker);
+  while (at !== -1) { count++; at = text.indexOf(marker, at + marker.length); }
+  return count;
+}
+function sliceBetweenMarkers(text, startMarker, endMarker, { sourceName = 'server.js', endExtra = 0, uniqueEnd = false } = {}) {
+  const fail = detail => { throw new Error(`sliceBetweenMarkers: ${detail} in ${sourceName}`); };
+  const startCount = countOccurrences(text, startMarker);
+  if (startCount === 0) fail(`start marker ${JSON.stringify(startMarker)} not found`);
+  if (startCount > 1) fail(`start marker ${JSON.stringify(startMarker)} is not unique (${startCount} occurrences)`);
+  if (uniqueEnd) {
+    const endCount = countOccurrences(text, endMarker);
+    if (endCount > 1) fail(`end marker ${JSON.stringify(endMarker)} is not unique (${endCount} occurrences)`);
+  }
+  const start = text.indexOf(startMarker);
+  const end = text.indexOf(endMarker, start + startMarker.length);
+  if (end === -1) {
+    const anywhere = text.indexOf(endMarker);
+    if (anywhere !== -1 && anywhere < start) fail(`end marker ${JSON.stringify(endMarker)} precedes start marker ${JSON.stringify(startMarker)}`);
+    fail(`end marker ${JSON.stringify(endMarker)} not found after start marker ${JSON.stringify(startMarker)}`);
+  }
+  if (end <= start) fail(`end marker ${JSON.stringify(endMarker)} precedes start marker ${JSON.stringify(startMarker)}`);
+  return text.slice(start, end + endExtra);
+}
 const turn = () => new Promise(resolve => setImmediate(resolve));
 function deferred() {
   let resolve, reject;
@@ -21,7 +47,7 @@ function fixture() {
     findTabOwner: id => owners.get(id), isTabLockQueueTimeout: () => false,
     handleTimedOutTab: jest.fn(async () => ({ destroyed: false })),
   };
-  vm.runInNewContext(source.slice(source.indexOf('class TabLock {'), source.indexOf('function findTabOwner(tabId)')) +
+  vm.runInNewContext(sliceBetweenMarkers(source, 'class TabLock {', 'function findTabOwner(tabId)', { uniqueEnd: true }) +
     ';globalThis.run = withTabLock; globalThis.timeout = withTimeout; globalThis.human = humanControlledTabs; globalThis.locks = tabLocks;', box);
   box.owners = owners;
   box.enableRecovery = () => {
@@ -34,7 +60,7 @@ function fixture() {
         return true;
       }),
     });
-    vm.runInNewContext(source.slice(source.indexOf('async function handleTimedOutTab('), source.indexOf('function requestTimeoutMs(')), box);
+    vm.runInNewContext(sliceBetweenMarkers(source, 'async function handleTimedOutTab(', 'function requestTimeoutMs(', { uniqueEnd: true }), box);
     for (const owner of owners.values()) {
       owner.session = {};
       owner.tabState.page = { evaluate: jest.fn(async () => { throw new Error('unresponsive'); }) };
@@ -124,8 +150,7 @@ test('the actual handoff route cannot report human control before stale work fin
     applySharedTabHandoff, log() {},
     handleRouteError: (error, _req, res) => res.status(error.statusCode).json({ code: error.code }),
   });
-  const start = source.indexOf("app.post('/tabs/:tabId/handoff'");
-  vm.runInNewContext(source.slice(start, source.indexOf('\n});', start) + 5), f);
+  vm.runInNewContext(sliceBetweenMarkers(source, "app.post('/tabs/:tabId/handoff'", '\n});', { endExtra: 5 }), f);
   const handoff = async () => {
     const res = { statusCode: 200, status(code) { this.statusCode = code; return this; }, json(body) { this.body = body; } };
     await handler({ params: { tabId: 'A' }, body: { userId: 'identity', handoff: 'human' } }, res);
@@ -250,8 +275,7 @@ test('retiring cleanup refuses new work and preserves a replacement during page 
     refreshActiveTabsGauge() {}, tabsDestroyedTotal: { labels: () => ({ inc() {} }) },
     pluginEvents: { emit() {} },
   });
-  const start = source.indexOf('async function destroyUnresponsiveTab(');
-  vm.runInNewContext(source.slice(start, source.indexOf('\n/**', start)) + ';globalThis.destroy = destroyUnresponsiveTab;', f);
+  vm.runInNewContext(sliceBetweenMarkers(source, 'async function destroyUnresponsiveTab(', '\n/**') + ';globalThis.destroy = destroyUnresponsiveTab;', f);
   await expect(f.run('A', () => old.promise, 1)).rejects.toMatchObject({ code: 'operation_timeout' });
   const destroying = f.destroy(session, 'A', 'test', 'identity');
   old.resolve();
@@ -300,4 +324,32 @@ test('late settlement and detached work cannot release a replacement tab lock', 
   expect(release).not.toHaveBeenCalled();
   replacement.resolve();
   await running;
+});
+
+describe('sliceBetweenMarkers fixture guard', () => {
+  const fixtureSource = 'START body END';
+
+  test('missing start marker fails explicitly, naming the marker and source', () => {
+    expect(() => sliceBetweenMarkers(fixtureSource, 'MISSING_START', 'END', { sourceName: 'fixture-source' }))
+      .toThrow('sliceBetweenMarkers: start marker "MISSING_START" not found in fixture-source');
+  });
+
+  test('missing end marker fails explicitly, naming the marker and source', () => {
+    expect(() => sliceBetweenMarkers(fixtureSource, 'START', 'MISSING_END', { sourceName: 'fixture-source' }))
+      .toThrow('sliceBetweenMarkers: end marker "MISSING_END" not found after start marker "START" in fixture-source');
+  });
+
+  test('reversed markers fail explicitly instead of slicing an empty/wrong span', () => {
+    expect(() => sliceBetweenMarkers('END body START', 'START', 'END', { sourceName: 'fixture-source' }))
+      .toThrow('sliceBetweenMarkers: end marker "END" precedes start marker "START" in fixture-source');
+  });
+
+  test('a duplicate start marker fails explicitly where uniqueness is assumed', () => {
+    expect(() => sliceBetweenMarkers('START START END', 'START', 'END', { sourceName: 'fixture-source' }))
+      .toThrow('sliceBetweenMarkers: start marker "START" is not unique (2 occurrences) in fixture-source');
+  });
+
+  test('a valid span slices exactly between the markers', () => {
+    expect(sliceBetweenMarkers(fixtureSource, 'START', 'END')).toBe('START body ');
+  });
 });
