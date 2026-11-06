@@ -307,7 +307,8 @@ app.use(createSharedIdentityRequestTracker({
 // Agent requests, not browser focus or passive page events, determine hidden-tab
 // recency. Record before the handler so long-running actions count as active.
 app.use((req, res, next) => {
-  const tabId = req.path.match(/^\/tabs\/([^/]+)/)?.[1];
+  const tabId = req.path.match(/^\/tabs\/([^/]+)/)?.[1]
+    || (['/navigate', '/snapshot', '/act'].includes(req.path) ? req.body?.targetId || req.query?.targetId : null);
   if (tabId && tabId !== 'group') {
     for (const session of sessions.values()) {
       const found = findTab(session, tabId);
@@ -2289,13 +2290,15 @@ async function recycleOldestTab(session, reqId, userId) {
 // A shared agent tab may be closed only when nothing could be using it right
 // now. Rechecked immediately before close so a request that arrived since
 // candidate selection is never cut off.
-function sharedTabClosable(session, tabId, tab, latestTabId) {
+function sharedTabClosable(session, tabId, tab, latestTabId, { checkVisibility = true } = {}) {
   if (session.sharedIdentity) {
     const found = findTab(session, tabId);
     if (session._closing || tab.retiring || found?.listItemId === '__shared_identity__' || tab.handoff === 'human') return false;
-    if (session.visibility?.isPageVisible?.(tab.page)) return false;
-    // Legacy headed contexts have no per-page visibility readback. Fail closed.
-    if ((session.headed || session.visibility?.visible.size) && !session.visibility?.isPageVisible) return false;
+    if (checkVisibility) {
+      if (session.visibility?.isPageVisible?.(tab.page)) return false;
+      // Legacy headed contexts have no per-page visibility readback. Fail closed.
+      if ((session.headed || session.visibility?.visible.size) && !session.visibility?.isPageVisible) return false;
+    }
   }
   return tabClosable({ session, tabId, tab, latestTabId, tabLocks, humanControlledTabs });
 }
@@ -2339,18 +2342,26 @@ function tabLimitError(session) {
 
 async function recycleIdleSharedTab(session, reqId, userId) {
   // 0 disables idle-tab cleanup entirely, including cap eviction.
-  if (!CONFIG.hiddenTabIdleMin) return null;
+  if (!CONFIG.sharedTabIdleMin) return null;
+  userId = normalizeUserId(userId);
+  if (sessions.get(userId) !== session || identityTransitions.has(userId)
+    || (typeof sharedIdentityWindow !== 'undefined' && sharedIdentityWindow?.unavailable?.(userId))) return null;
   try { await session.visibility?.refresh?.(); } catch { return null; }
-  if (session.headed || session.visibility?.visible.size) {
-    if (!await sharedIdentityIdlePolicy.shouldReleaseHeaded(CONFIG.hiddenTabIdleMin)) return null;
-  }
+  // Headed does not mean user-visible: parked/off-screen and app-hidden pages
+  // use agent idleness, independent of keyboard/mouse use elsewhere. The final
+  // per-page closability check still protects every visible or handed-off page.
+  if (sessions.get(userId) !== session || identityTransitions.has(userId)
+    || (typeof sharedIdentityWindow !== 'undefined' && sharedIdentityWindow?.unavailable?.(userId))) return null;
   const latestTabId = latestSharedTabId(session);
   const candidates = [...session.tabGroups.values()].flatMap(group => [...group])
-    .filter(([tabId, tab]) => sharedIdentityIdlePolicy.agentIdle(tab.lastAgentActivityAt, CONFIG.hiddenTabIdleMin)
-      && sharedTabClosable(session, tabId, tab, latestTabId))
+    .filter(([tabId, tab]) => sharedIdentityIdlePolicy.agentIdle(tab.lastAgentActivityAt, CONFIG.sharedTabIdleMin)
+      && sharedTabClosable(session, tabId, tab, latestTabId, { checkVisibility: false }))
     .sort((a, b) => a[1].lastAgentActivityAt - b[1].lastAgentActivityAt);
   for (const [tabId, tab] of candidates) {
-    if (!sharedIdentityIdlePolicy.agentIdle(tab.lastAgentActivityAt, CONFIG.hiddenTabIdleMin)
+    try { await session.visibility?.refresh?.(tab.page); } catch { continue; }
+    if (sessions.get(userId) !== session || identityTransitions.has(userId)
+      || (typeof sharedIdentityWindow !== 'undefined' && sharedIdentityWindow?.unavailable?.(userId))) return null;
+    if (!sharedIdentityIdlePolicy.agentIdle(tab.lastAgentActivityAt, CONFIG.sharedTabIdleMin)
       || !sharedTabClosable(session, tabId, tab, latestSharedTabId(session))) continue;
     if (await closeSharedTab(session, tabId, tab, { userId, reason: 'idle_cap', reqId })) {
       tabsRecycledTotal.inc();
@@ -3663,7 +3674,7 @@ function sharedSessionExpiryEligible(key, session) {
 }
 
 async function cleanIdleSharedSessions() {
-  const tabThreshold = CONFIG.hiddenTabIdleMin * 60_000;
+  const tabThreshold = CONFIG.sharedTabIdleMin * 60_000;
   // Native HID is required for releasing a visible window. Hidden contexts do
   // not represent human input, and are governed by agent activity instead.
   // A headed window the agent is still driving is not released mid-task.
@@ -3686,12 +3697,12 @@ async function cleanIdleSharedSessions() {
       for (const [tabId, tab] of tabs) {
         if (sessions.get(key) !== original || identityTransitions.has(key)
           || (typeof sharedIdentityWindow !== 'undefined' && sharedIdentityWindow?.unavailable?.(key))) break;
-        if (!sharedIdentityIdlePolicy.agentIdle(tab.lastAgentActivityAt, CONFIG.hiddenTabIdleMin)) continue;
-        try { await original.visibility?.refresh?.(); } catch { break; }
-        if ((original.headed || original.visibility?.visible.size)
-          && !await sharedIdentityIdlePolicy.shouldReleaseHeaded(CONFIG.hiddenTabIdleMin)) break;
-        if (sessions.get(key) !== original || identityTransitions.has(key)) break;
-        if (!sharedIdentityIdlePolicy.agentIdle(tab.lastAgentActivityAt, CONFIG.hiddenTabIdleMin)
+        if (!sharedIdentityIdlePolicy.agentIdle(tab.lastAgentActivityAt, CONFIG.sharedTabIdleMin)
+          || !sharedTabClosable(original, tabId, tab, latestSharedTabId(original), { checkVisibility: false })) continue;
+        try { await original.visibility?.refresh?.(tab.page); } catch { continue; }
+        if (sessions.get(key) !== original || identityTransitions.has(key)
+          || (typeof sharedIdentityWindow !== 'undefined' && sharedIdentityWindow?.unavailable?.(key))) break;
+        if (!sharedIdentityIdlePolicy.agentIdle(tab.lastAgentActivityAt, CONFIG.sharedTabIdleMin)
           || sharedIdentityRequests.get(key) || !sharedTabClosable(original, tabId, tab, latestSharedTabId(original))) continue;
         if (await closeSharedTab(original, tabId, tab, { userId: key, reason: 'shared_idle' })) tabsReapedTotal.inc();
       }

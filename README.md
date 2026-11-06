@@ -740,12 +740,27 @@ are created in independently parked windows, including while a handoff is shown.
 Human-created popup and Cmd+N windows inherit an active handoff's visibility;
 they are not sent to the parking display during authentication or checkout.
 Parked contexts stay alive until explicit session deletion, shutdown, or a real
-browser failure; hidden-tab reaping still follows the configured idle policy.
+browser failure. Idle agent tabs and managed popups that are verified hidden or
+parked release their slots after five minutes by default, on the next 60-second
+sweep; at the tab cap the oldest eligible idle page is reclaimed immediately.
+Managed popups are associated with their parked window when they are
+registered, with one bounded locate retry inside cleanup, so a parked popup is
+reclaimable on the same terms in parking mode too. A popup whose window or
+native parked proof cannot be established within that bound stays protected
+until a later pass can prove it; cleanup never closes on unknown visibility.
+Desktop keyboard/mouse use in unrelated apps does not postpone this cleanup.
+`CAMOFOX_HIDDEN_TAB_IDLE_MIN` overrides the agent-idle threshold (`0` disables
+cleanup); ordinary non-shared sessions retain their 30-minute default. The most
+recent agent tab, visible or handed-off windows, active/queued operations,
+creation leases and downloads remain protected. Unknown visibility fails closed.
+The separate headed-window idle-release policy retains its desktop HID gate.
 
 The launch omits Playwright's `-foreground` argument. A private loopback bridge
 and temporary WebExtension move windows; the identity indicator and persistent
 profile extensions keep their existing launch paths. API-created pages are
-associated with their window at creation. A UI-created page is located once
+associated with their window at creation; managed popups are associated when
+the popup is registered, against the window its creation classification
+already parked. A UI-created page is located once
 using a temporary title marker with short retries for SPAs that rewrite titles,
 then the latest app title is restored. The tab's current window is resolved on
 every subsequent command. Commands expire and are acknowledged; late creates
