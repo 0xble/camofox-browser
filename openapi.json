@@ -1356,7 +1356,7 @@
             "description": "Tab was retired by timeout recovery or is no longer available (code=tab_destroyed, retryable=true, recovery=create_new_tab); create a new tab instead of retrying this tab."
           },
           "503": {
-            "description": "For code=tab_busy, a previous operation is still settling (retryable=true, recovery=retry); retry the same tab after it settles."
+            "description": "For code=operation_timeout, the action exceeded its budget and may still be running; timeout classification takes precedence over page-change recovery. For code=tab_busy, a previous operation is still settling. Both are retryable=true, recovery=retry; retry the same tab after it settles."
           }
         }
       }
@@ -1592,7 +1592,7 @@
             "description": "Tab was retired by timeout recovery or is no longer available (code=tab_destroyed, retryable=true, recovery=create_new_tab); create a new tab instead of retrying this tab."
           },
           "503": {
-            "description": "For code=tab_busy, a previous operation is still settling (retryable=true, recovery=retry); retry the same tab after it settles."
+            "description": "For code=operation_timeout, the action exceeded its budget and may still be running; timeout classification takes precedence over page-change recovery. For code=tab_busy, a previous operation is still settling. Both are retryable=true, recovery=retry; retry the same tab after it settles."
           }
         }
       }

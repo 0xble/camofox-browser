@@ -81,7 +81,7 @@ import { snapshotOwnedBrowserProcesses, survivingOwnedBrowserProcesses, liveBrow
 import { killWindowsProcessTree, refreshWindowsProcesses } from './lib/windows-processes.js';
 import {
   safePageUrl, urlDomain, hashIdentifier,
-  isDeadContextError, isPageCrashedError, isTimeoutError,
+  isDeadContextError, isPageCrashedError, isTimeoutError, isNavigationRaceError,
   isTabLockQueueTimeout, isTabDestroyedError,
   browserErrorStatus, browserErrorCode, browserErrorRecovery, isRetryableBrowserError,
 } from './lib/browser-errors.js';
@@ -4925,7 +4925,7 @@ app.post('/tabs/:tabId/wait', async (req, res) => {
  *             schema:
  *               $ref: '#/components/schemas/Error'
  *       410: { description: "Tab was retired by timeout recovery or is no longer available (code=tab_destroyed, retryable=true, recovery=create_new_tab); create a new tab instead of retrying this tab." }
- *       503: { description: "For code=tab_busy, a previous operation is still settling (retryable=true, recovery=retry); retry the same tab after it settles." }
+ *       503: { description: "For code=operation_timeout, the action exceeded its budget and may still be running; timeout classification takes precedence over page-change recovery. For code=tab_busy, a previous operation is still settling. Both are retryable=true, recovery=retry; retry the same tab after it settles." }
  */
 app.post('/tabs/:tabId/click', async (req, res) => {
   const tabId = req.params.tabId;
@@ -5108,14 +5108,20 @@ app.post('/tabs/:tabId/click', async (req, res) => {
     res.json(result);
   } catch (err) {
     log('error', 'click failed', { reqId: req.reqId, tabId, error: err.message });
-    if (err.code !== 'operation_timeout' && err.code !== 'tab_destroyed' && err.message?.includes('timed out')) {
+    // A timeout is not evidence of navigation, and its work may still hold the tab lock.
+    if (err.code === 'operation_timeout' || err.code === 'tab_destroyed' || isTimeoutError(err) || err.message?.includes('timed out')) {
+      if (!err.code) err.code = 'operation_timeout';
+      return handleRouteError(err, req, res);
+    }
+    if (isNavigationRaceError(err)) {
       try {
-        const session = sessions.get(normalizeUserId(req.body.userId));
-        const found = session && findTab(session, tabId);
-        if (found?.tabState?.page && !found.tabState.page.isClosed()) {
-          found.tabState.refs = await refreshTabRefs(found.tabState, { reason: 'click_timeout' });
+        const recovery = await withTabLock(tabId, async () => {
+          const session = sessions.get(normalizeUserId(req.body.userId));
+          const found = session && findTab(session, tabId);
+          if (!found?.tabState?.page || found.tabState.page.isClosed()) return null;
+          found.tabState.refs = await refreshTabRefs(found.tabState, { reason: 'click_page_changed' });
           found.tabState.lastSnapshot = null;
-          return res.status(409).json({
+          return {
             error: 'Page changed during click. Call snapshot to see the current state and retry with current refs.',
             code: 'page_changed',
             retryable: true,
@@ -5123,10 +5129,12 @@ app.post('/tabs/:tabId/click', async (req, res) => {
             hint: 'The page may have changed. Call snapshot to see the current state and retry.',
             url: safePageUrl(found.tabState.page),
             refsCount: found.tabState.refs.size,
-          });
-        }
+          };
+        });
+        if (recovery) return res.status(409).json(recovery);
       } catch (refreshErr) {
-        log('warn', 'post-timeout refresh failed', { error: refreshErr.message });
+        log('warn', 'post-page-change refresh failed', { error: refreshErr.message });
+        return handleRouteError(refreshErr, req, res);
       }
     }
     handleRouteError(err, req, res);
@@ -5472,7 +5480,7 @@ app.post('/tabs/:tabId/upload', parseUploadBody, async (req, res) => {
  *             schema:
  *               $ref: '#/components/schemas/Error'
  *       410: { description: "Tab was retired by timeout recovery or is no longer available (code=tab_destroyed, retryable=true, recovery=create_new_tab); create a new tab instead of retrying this tab." }
- *       503: { description: "For code=tab_busy, a previous operation is still settling (retryable=true, recovery=retry); retry the same tab after it settles." }
+ *       503: { description: "For code=operation_timeout, the action exceeded its budget and may still be running; timeout classification takes precedence over page-change recovery. For code=tab_busy, a previous operation is still settling. Both are retryable=true, recovery=retry; retry the same tab after it settles." }
  */
 app.post('/tabs/:tabId/type', async (req, res) => {
   const tabId = req.params.tabId;
@@ -5536,14 +5544,20 @@ app.post('/tabs/:tabId/type', async (req, res) => {
     res.json({ ok: true });
   } catch (err) {
     log('error', 'type failed', { reqId: req.reqId, error: err.message });
-    if (err.message?.includes('timed out') || err.message?.includes('not an <input>')) {
+    // A timeout is not evidence of navigation, and its work may still hold the tab lock.
+    if (err.code === 'operation_timeout' || err.code === 'tab_destroyed' || isTimeoutError(err) || err.message?.includes('timed out')) {
+      if (!err.code) err.code = 'operation_timeout';
+      return handleRouteError(err, req, res);
+    }
+    if (isNavigationRaceError(err) || err.message?.includes('not an <input>')) {
       try {
-        const session = sessions.get(normalizeUserId(req.body.userId));
-        const found = session && findTab(session, tabId);
-        if (found?.tabState?.page && !found.tabState.page.isClosed()) {
-          found.tabState.refs = await refreshTabRefs(found.tabState, { reason: 'type_timeout' });
+        const recovery = await withTabLock(tabId, async () => {
+          const session = sessions.get(normalizeUserId(req.body.userId));
+          const found = session && findTab(session, tabId);
+          if (!found?.tabState?.page || found.tabState.page.isClosed()) return null;
+          found.tabState.refs = await refreshTabRefs(found.tabState, { reason: 'type_page_changed' });
           found.tabState.lastSnapshot = null;
-          return res.status(409).json({
+          return {
             error: 'Page changed during type. Call snapshot to see the current state and retry with current refs.',
             code: 'page_changed',
             retryable: true,
@@ -5551,10 +5565,12 @@ app.post('/tabs/:tabId/type', async (req, res) => {
             hint: 'The page may have changed. Call snapshot to see the current state and retry.',
             url: safePageUrl(found.tabState.page),
             refsCount: found.tabState.refs.size,
-          });
-        }
+          };
+        });
+        if (recovery) return res.status(409).json(recovery);
       } catch (refreshErr) {
-        log('warn', 'post-timeout refresh failed', { error: refreshErr.message });
+        log('warn', 'post-page-change refresh failed', { error: refreshErr.message });
+        return handleRouteError(refreshErr, req, res);
       }
     }
     handleRouteError(err, req, res);
