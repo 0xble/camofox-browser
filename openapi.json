@@ -710,8 +710,11 @@
           "409": {
             "description": "Tab is not a shared identity tab, is no longer available, or native handoff is unavailable (code handoff_unavailable, retryable false; no control transfer)."
           },
+          "410": {
+            "description": "Tab was retired by timeout recovery or is no longer available (code=tab_destroyed, retryable=true, recovery=create_new_tab); create a new tab instead of retrying this tab."
+          },
           "503": {
-            "description": "Retryable tab_busy while a previous operation is still settling. No control transfer occurred."
+            "description": "For code=tab_busy, a previous operation is still settling (retryable=true, recovery=retry); retry the same tab after it settles. No control transfer occurred."
           }
         }
       }
@@ -807,6 +810,9 @@
               }
             }
           },
+          "410": {
+            "description": "Tab was retired by timeout recovery or is no longer available (code=tab_destroyed, retryable=true, recovery=create_new_tab); create a new tab instead of retrying this tab."
+          },
           "429": {
             "description": "No safely recyclable idle agent tab; origin-only diagnostics identify tabs owned by the requesting identity.",
             "content": {
@@ -855,7 +861,7 @@
             }
           },
           "503": {
-            "description": "Page creation unavailable or request deadline exceeded. Shared identity tabs are preserved; abandoned new pages are closed.",
+            "description": "Page creation unavailable or request deadline exceeded. Shared identity tabs are preserved; abandoned new pages are closed. For code=tab_busy, a previous operation is still settling (retryable=true, recovery=retry); retry the same tab after it settles.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1031,6 +1037,12 @@
                 }
               }
             }
+          },
+          "410": {
+            "description": "Tab was retired by timeout recovery or is no longer available (code=tab_destroyed, retryable=true, recovery=create_new_tab); create a new tab instead of retrying this tab."
+          },
+          "503": {
+            "description": "For code=tab_busy, a previous operation is still settling (retryable=true, recovery=retry); retry the same tab after it settles."
           }
         }
       }
@@ -1150,7 +1162,7 @@
             }
           },
           "410": {
-            "description": "code=tab_destroyed, recovery=create_new_tab after repeated timeouts and a failed liveness probe.",
+            "description": "Tab was retired by timeout recovery or is no longer available (code=tab_destroyed, retryable=true, recovery=create_new_tab); create a new tab instead of retrying this tab.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1160,7 +1172,7 @@
             }
           },
           "503": {
-            "description": "Retryable. code=refs_unavailable when the page could not be captured and the previous refs no longer resolve. code=tab_busy while a previous operation is still settling.",
+            "description": "Retryable. code=refs_unavailable when the page could not be captured and the previous refs no longer resolve. For code=tab_busy, a previous operation is still settling (retryable=true, recovery=retry); retry the same tab after it settles.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1339,6 +1351,12 @@
                 }
               }
             }
+          },
+          "410": {
+            "description": "Tab was retired by timeout recovery or is no longer available (code=tab_destroyed, retryable=true, recovery=create_new_tab); create a new tab instead of retrying this tab."
+          },
+          "503": {
+            "description": "For code=tab_busy, a previous operation is still settling (retryable=true, recovery=retry); retry the same tab after it settles."
           }
         }
       }
@@ -1464,8 +1482,14 @@
           "404": {
             "description": "Tab not found."
           },
+          "410": {
+            "description": "Tab was retired by timeout recovery or is no longer available (code=tab_destroyed, retryable=true, recovery=create_new_tab); create a new tab instead of retrying this tab."
+          },
           "413": {
             "description": "Inline decoded files exceed 20MiB, or JSON exceeds 28MiB."
+          },
+          "503": {
+            "description": "For code=tab_busy, a previous operation is still settling (retryable=true, recovery=retry); retry the same tab after it settles."
           }
         }
       }
@@ -1563,6 +1587,12 @@
                 }
               }
             }
+          },
+          "410": {
+            "description": "Tab was retired by timeout recovery or is no longer available (code=tab_destroyed, retryable=true, recovery=create_new_tab); create a new tab instead of retrying this tab."
+          },
+          "503": {
+            "description": "For code=tab_busy, a previous operation is still settling (retryable=true, recovery=retry); retry the same tab after it settles."
           }
         }
       }
@@ -1642,6 +1672,12 @@
                 }
               }
             }
+          },
+          "410": {
+            "description": "Tab was retired by timeout recovery or is no longer available (code=tab_destroyed, retryable=true, recovery=create_new_tab); create a new tab instead of retrying this tab."
+          },
+          "503": {
+            "description": "For code=tab_busy, a previous operation is still settling (retryable=true, recovery=retry); retry the same tab after it settles."
           }
         }
       }
@@ -1710,6 +1746,12 @@
                 }
               }
             }
+          },
+          "410": {
+            "description": "Tab was retired by timeout recovery or is no longer available (code=tab_destroyed, retryable=true, recovery=create_new_tab); create a new tab instead of retrying this tab."
+          },
+          "503": {
+            "description": "For code=tab_busy, a previous operation is still settling (retryable=true, recovery=retry); retry the same tab after it settles."
           }
         }
       }
@@ -1781,6 +1823,12 @@
                 }
               }
             }
+          },
+          "410": {
+            "description": "Tab was retired by timeout recovery or is no longer available (code=tab_destroyed, retryable=true, recovery=create_new_tab); create a new tab instead of retrying this tab."
+          },
+          "503": {
+            "description": "For code=tab_busy, a previous operation is still settling (retryable=true, recovery=retry); retry the same tab after it settles."
           }
         }
       }
@@ -1932,6 +1980,12 @@
                 }
               }
             }
+          },
+          "410": {
+            "description": "Tab was retired by timeout recovery or is no longer available (code=tab_destroyed, retryable=true, recovery=create_new_tab); create a new tab instead of retrying this tab."
+          },
+          "503": {
+            "description": "For code=tab_busy, a previous operation is still settling (retryable=true, recovery=retry); retry the same tab after it settles."
           }
         }
       }
@@ -1998,6 +2052,12 @@
                 }
               }
             }
+          },
+          "410": {
+            "description": "Tab was retired by timeout recovery or is no longer available (code=tab_destroyed, retryable=true, recovery=create_new_tab); create a new tab instead of retrying this tab."
+          },
+          "503": {
+            "description": "For code=tab_busy, a previous operation is still settling (retryable=true, recovery=retry); retry the same tab after it settles."
           }
         }
       }
@@ -2064,6 +2124,12 @@
                 }
               }
             }
+          },
+          "410": {
+            "description": "Tab was retired by timeout recovery or is no longer available (code=tab_destroyed, retryable=true, recovery=create_new_tab); create a new tab instead of retrying this tab."
+          },
+          "503": {
+            "description": "For code=tab_busy, a previous operation is still settling (retryable=true, recovery=retry); retry the same tab after it settles."
           }
         }
       }
@@ -2131,6 +2197,12 @@
                 }
               }
             }
+          },
+          "410": {
+            "description": "Tab was retired by timeout recovery or is no longer available (code=tab_destroyed, retryable=true, recovery=create_new_tab); create a new tab instead of retrying this tab."
+          },
+          "503": {
+            "description": "For code=tab_busy, a previous operation is still settling (retryable=true, recovery=retry); retry the same tab after it settles."
           }
         }
       }
@@ -2564,8 +2636,11 @@
               }
             }
           },
+          "410": {
+            "description": "Tab was retired by timeout recovery or is no longer available (code=tab_destroyed, retryable=true, recovery=create_new_tab); create a new tab instead of retrying this tab."
+          },
           "503": {
-            "description": "Browser session expired; caller should retry to get a fresh session.",
+            "description": "Browser session expired; caller should retry to get a fresh session. For code=tab_busy, a previous operation is still settling (retryable=true, recovery=retry); retry the same tab after it settles.",
             "content": {
               "application/json": {
                 "schema": {
@@ -3259,6 +3334,12 @@
                 }
               }
             }
+          },
+          "410": {
+            "description": "Tab was retired by timeout recovery or is no longer available (code=tab_destroyed, retryable=true, recovery=create_new_tab); create a new tab instead of retrying this tab."
+          },
+          "503": {
+            "description": "For code=tab_busy, a previous operation is still settling (retryable=true, recovery=retry); retry the same tab after it settles."
           }
         }
       }
@@ -3412,6 +3493,12 @@
                 }
               }
             }
+          },
+          "410": {
+            "description": "Tab was retired by timeout recovery or is no longer available (code=tab_destroyed, retryable=true, recovery=create_new_tab); create a new tab instead of retrying this tab."
+          },
+          "503": {
+            "description": "For code=tab_busy, a previous operation is still settling (retryable=true, recovery=retry); retry the same tab after it settles."
           }
         }
       }
@@ -3583,6 +3670,12 @@
                 }
               }
             }
+          },
+          "410": {
+            "description": "Tab was retired by timeout recovery or is no longer available (code=tab_destroyed, retryable=true, recovery=create_new_tab); create a new tab instead of retrying this tab."
+          },
+          "503": {
+            "description": "For code=tab_busy, a previous operation is still settling (retryable=true, recovery=retry); retry the same tab after it settles."
           }
         }
       }
