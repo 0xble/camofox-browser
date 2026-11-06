@@ -1355,8 +1355,11 @@
           "410": {
             "description": "Tab was retired by timeout recovery or is no longer available (code=tab_destroyed, retryable=true, recovery=create_new_tab); create a new tab instead of retrying this tab."
           },
+          "422": {
+            "description": "Locator wait timeouts remain element_not_actionable (retryable=true, recovery=snapshot_then_retry); take a fresh snapshot and retry with current refs."
+          },
           "503": {
-            "description": "For code=tab_busy, a previous operation is still settling (retryable=true, recovery=retry); retry the same tab after it settles."
+            "description": "For code=operation_timeout, the action exceeded its budget and may still be running; handler/native timeout classification takes precedence over page-change recovery, not locator wait timeouts. For code=tab_busy, a previous operation is still settling. Both are retryable=true, recovery=retry; retry the same tab after it settles."
           }
         }
       }
@@ -1591,8 +1594,11 @@
           "410": {
             "description": "Tab was retired by timeout recovery or is no longer available (code=tab_destroyed, retryable=true, recovery=create_new_tab); create a new tab instead of retrying this tab."
           },
+          "422": {
+            "description": "Locator wait timeouts remain element_not_actionable (retryable=true, recovery=snapshot_then_retry); take a fresh snapshot and retry with current refs."
+          },
           "503": {
-            "description": "For code=tab_busy, a previous operation is still settling (retryable=true, recovery=retry); retry the same tab after it settles."
+            "description": "For code=operation_timeout, the action exceeded its budget and may still be running; handler/native timeout classification takes precedence over page-change recovery, not locator wait timeouts. For code=tab_busy, a previous operation is still settling. Both are retryable=true, recovery=retry; retry the same tab after it settles."
           }
         }
       }
