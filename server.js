@@ -1957,6 +1957,18 @@ async function getSession(userId, { trace = false, headed = false, parkedOpen = 
       checkAcquisition();
       transitionCheck();
       sessions.set(key, created);
+      if (!sharedIdentity) {
+        // A retired opener can lose its popup listeners; once it closes,
+        // Playwright also reports a null opener. Account for context pages in
+        // an unclaimed group until an explicit task or live opener claims them.
+        context.on('page', (page) => {
+          if (page.isClosed() || isQuarantinedPage(page) || sessions.get(key) !== created || created._closing) return;
+          const { created: added } = registerPage(created, key, page, '__popups__');
+          if (added) refreshActiveTabsGauge();
+          // API creation or a live opener announces the final ID/ownership;
+          // provisional accounting must not publish another creation event.
+        });
+      }
       if (sharedIdentity) {
         // Pages opened by the visible Firefox UI are real user tabs, not leaked
         // automation pages. Register them so handoff can find them and normal

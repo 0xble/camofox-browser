@@ -200,6 +200,35 @@ server liveness. A missing display alone does not fail liveness.
 
 `GET /tabs` exposes `openerTabId` from an observed Playwright popup event and resolves it against the same session's registry. Keep this local client-integration adaptation until upstream provides equivalent metadata, session affinity, and stale-ID handling. The registry regression suite and `tests/e2e/popupLineage.test.js` own the behavioral proof. The related upstream popup report [jo-inc/camofox-browser#7742](https://github.com/jo-inc/camofox-browser/issues/7742) concerns viewport sizing, not lineage, and is not an equivalent replacement. No upstream contribution is included in this delivery.
 
+### Retired-opener popup accounting
+
+A rejected late opener event is not proof that the popup page closed. Shared
+contexts already account for context `page` events in `__shared_identity__`;
+ordinary contexts now account for them in the unclaimed `__popups__` group.
+An explicit API registration or observed live opener may claim an unclaimed
+page without adding a second tab ID or download listener. Ordinary provisional
+entries disappear on successful temporary-page close; a failed close retains
+accounting. Provisional context sightings do not announce an API creation or a
+soon-to-be-folded ID; API creation and live-opener popup events still announce
+once under the final ID. Context sightings never invent an opener reference,
+reuse a retired task group, or restore stale
+page affinity. Keep the original session-object and closing guards: old-context
+pages cannot enter a replacement session and remain its context's teardown duty.
+Observe at the context boundary because failed safe close removes opener
+listeners, and Playwright reports a null opener once that opener has closed.
+
+`retiredPopupAccounting.test.js` drives actual session/destruction functions and
+the registry with synthetic pages: pending/settled delayed close, rejected close,
+both close deadlines expiring, popup-first/context-first order, ordinary/shared
+contexts with and without visibility, replacement IDs and sessions, and explicit
+claiming of provisional API pages. These are synthetic witnesses, not evidence
+of historical live incidence. No identity lock, queue, origin-matching change,
+or live-service change is part of this adaptation. Upstream master
+`39c82094013480b373df6600d44c7f036f58356e` and popup/safePageClose issue/PR searches
+have no equivalent retired-opener accounting contract; #2470 concerns force-close
+and orphan reaping, while #15252 concerns closed-popup session recovery. Retire
+this adaptation only when upstream passes these witnesses and the lineage suite.
+
 ### Native park verification
 
 Camoufox spoofs `browser.windows.get` geometry, so park and create acknowledgments must be backed by native bounds (`listNativeWindows` in `lib/park-display-launcher.js`). Windows are selected by the browser's owner PID, resolved from this server's process tree and the profile path, plus layer 0 and on-screen state. Never select by `kCGWindowName`. macOS omits other processes' window titles unless the TCC-responsible process holds Screen Recording. Under launchd, the server's node binary is its own responsible process, and the managed node had no grant. A 2026-10-13 probe showed this: with responsibility disclaimed, the managed node saw 0 of 16 window titles and `CGPreflightScreenCaptureAccess` returned false. Owner PID and bounds remained available. Readback failures are retried inside the same bounded loop and then reported per window after startup, without relaunching an established context. On first launch, an exhausted native readback sends `readyError` and fails attachment, so the fallback can close and relaunch the newly attempted context before caller tabs exist. Ordinary startup window-classification failures remain isolated per window, and command polling starts.
