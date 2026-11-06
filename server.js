@@ -3833,7 +3833,8 @@ app.post('/browser/identities/:userId/focus', async (req, res) => {
  *       400: { description: Invalid handoff payload. }
  *       404: { description: Tab not found. }
  *       409: { description: 'Tab is not a shared identity tab, is no longer available, or native handoff is unavailable (code handoff_unavailable, retryable false; no control transfer).' }
- *       503: { description: "Retryable tab_busy while a previous operation is still settling. No control transfer occurred." }
+ *       503: { description: "For code=tab_busy, a previous operation is still settling (retryable=true, recovery=retry); retry the same tab after it settles. No control transfer occurred." }
+ *       410: { description: "Tab was retired by timeout recovery or is no longer available (code=tab_destroyed, retryable=true, recovery=create_new_tab); create a new tab instead of retrying this tab." }
  */
 app.post('/tabs/:tabId/handoff', async (req, res) => {
   const requestedUserId = req.body?.userId;
@@ -3945,11 +3946,12 @@ app.post('/tabs/:tabId/handoff', async (req, res) => {
  *             schema:
  *               $ref: '#/components/schemas/Error'
  *       503:
- *         description: Page creation unavailable or request deadline exceeded. Shared identity tabs are preserved; abandoned new pages are closed.
+ *         description: Page creation unavailable or request deadline exceeded. Shared identity tabs are preserved; abandoned new pages are closed. For code=tab_busy, a previous operation is still settling (retryable=true, recovery=retry); retry the same tab after it settles.
  *         content:
  *           application/json:
  *             schema:
  *               $ref: '#/components/schemas/Error'
+ *       410: { description: "Tab was retired by timeout recovery or is no longer available (code=tab_destroyed, retryable=true, recovery=create_new_tab); create a new tab instead of retrying this tab." }
  */
 app.post('/tabs', async (req, res) => {
   try {
@@ -4190,6 +4192,8 @@ app.post('/tabs', async (req, res) => {
  *           application/json:
  *             schema:
  *               $ref: '#/components/schemas/Error'
+ *       410: { description: "Tab was retired by timeout recovery or is no longer available (code=tab_destroyed, retryable=true, recovery=create_new_tab); create a new tab instead of retrying this tab." }
+ *       503: { description: "For code=tab_busy, a previous operation is still settling (retryable=true, recovery=retry); retry the same tab after it settles." }
  */
 app.post('/tabs/:tabId/navigate', async (req, res) => {
   const tabId = req.params.tabId;
@@ -4637,13 +4641,13 @@ app.post('/tabs/:tabId/navigate', async (req, res) => {
  *             schema:
  *               $ref: '#/components/schemas/Error'
  *       410:
- *         description: code=tab_destroyed, recovery=create_new_tab after repeated timeouts and a failed liveness probe.
+ *         description: Tab was retired by timeout recovery or is no longer available (code=tab_destroyed, retryable=true, recovery=create_new_tab); create a new tab instead of retrying this tab.
  *         content:
  *           application/json:
  *             schema:
  *               $ref: '#/components/schemas/Error'
  *       503:
- *         description: Retryable. code=refs_unavailable when the page could not be captured and the previous refs no longer resolve. code=tab_busy while a previous operation is still settling.
+ *         description: Retryable. code=refs_unavailable when the page could not be captured and the previous refs no longer resolve. For code=tab_busy, a previous operation is still settling (retryable=true, recovery=retry); retry the same tab after it settles.
  *         content:
  *           application/json:
  *             schema:
@@ -4909,6 +4913,8 @@ app.post('/tabs/:tabId/wait', async (req, res) => {
  *           application/json:
  *             schema:
  *               $ref: '#/components/schemas/Error'
+ *       410: { description: "Tab was retired by timeout recovery or is no longer available (code=tab_destroyed, retryable=true, recovery=create_new_tab); create a new tab instead of retrying this tab." }
+ *       503: { description: "For code=tab_busy, a previous operation is still settling (retryable=true, recovery=retry); retry the same tab after it settles." }
  */
 app.post('/tabs/:tabId/click', async (req, res) => {
   const tabId = req.params.tabId;
@@ -5229,6 +5235,8 @@ function parseUploadBody(req, res, next) {
  *         description: "Inline decoded files exceed 20MiB, or JSON exceeds 28MiB."
  *       404:
  *         description: "Tab not found."
+ *       410: { description: "Tab was retired by timeout recovery or is no longer available (code=tab_destroyed, retryable=true, recovery=create_new_tab); create a new tab instead of retrying this tab." }
+ *       503: { description: "For code=tab_busy, a previous operation is still settling (retryable=true, recovery=retry); retry the same tab after it settles." }
  */
 app.post('/tabs/:tabId/upload', parseUploadBody, async (req, res) => {
   const tabId = req.params.tabId;
@@ -5452,6 +5460,8 @@ app.post('/tabs/:tabId/upload', parseUploadBody, async (req, res) => {
  *           application/json:
  *             schema:
  *               $ref: '#/components/schemas/Error'
+ *       410: { description: "Tab was retired by timeout recovery or is no longer available (code=tab_destroyed, retryable=true, recovery=create_new_tab); create a new tab instead of retrying this tab." }
+ *       503: { description: "For code=tab_busy, a previous operation is still settling (retryable=true, recovery=retry); retry the same tab after it settles." }
  */
 app.post('/tabs/:tabId/type', async (req, res) => {
   const tabId = req.params.tabId;
@@ -5588,6 +5598,8 @@ app.post('/tabs/:tabId/type', async (req, res) => {
  *           application/json:
  *             schema:
  *               $ref: '#/components/schemas/Error'
+ *       410: { description: "Tab was retired by timeout recovery or is no longer available (code=tab_destroyed, retryable=true, recovery=create_new_tab); create a new tab instead of retrying this tab." }
+ *       503: { description: "For code=tab_busy, a previous operation is still settling (retryable=true, recovery=retry); retry the same tab after it settles." }
  */
 // Select a native form option by its visible label or HTML value.
 app.post('/tabs/:tabId/select', async (req, res) => {
@@ -5669,6 +5681,8 @@ app.post('/tabs/:tabId/select', async (req, res) => {
  *           application/json:
  *             schema:
  *               $ref: '#/components/schemas/Error'
+ *       410: { description: "Tab was retired by timeout recovery or is no longer available (code=tab_destroyed, retryable=true, recovery=create_new_tab); create a new tab instead of retrying this tab." }
+ *       503: { description: "For code=tab_busy, a previous operation is still settling (retryable=true, recovery=retry); retry the same tab after it settles." }
  */
 app.post('/tabs/:tabId/press', async (req, res) => {
   const tabId = req.params.tabId;
@@ -5741,6 +5755,8 @@ app.post('/tabs/:tabId/press', async (req, res) => {
  *           application/json:
  *             schema:
  *               $ref: '#/components/schemas/Error'
+ *       410: { description: "Tab was retired by timeout recovery or is no longer available (code=tab_destroyed, retryable=true, recovery=create_new_tab); create a new tab instead of retrying this tab." }
+ *       503: { description: "For code=tab_busy, a previous operation is still settling (retryable=true, recovery=retry); retry the same tab after it settles." }
  */
 app.post('/tabs/:tabId/scroll', async (req, res) => {
   try {
@@ -5892,6 +5908,8 @@ app.post('/tabs/:tabId/viewport', async (req, res) => {
  *           application/json:
  *             schema:
  *               $ref: '#/components/schemas/Error'
+ *       410: { description: "Tab was retired by timeout recovery or is no longer available (code=tab_destroyed, retryable=true, recovery=create_new_tab); create a new tab instead of retrying this tab." }
+ *       503: { description: "For code=tab_busy, a previous operation is still settling (retryable=true, recovery=retry); retry the same tab after it settles." }
  */
 app.post('/tabs/:tabId/back', async (req, res) => {
   const tabId = req.params.tabId;
@@ -5970,6 +5988,8 @@ app.post('/tabs/:tabId/back', async (req, res) => {
  *           application/json:
  *             schema:
  *               $ref: '#/components/schemas/Error'
+ *       410: { description: "Tab was retired by timeout recovery or is no longer available (code=tab_destroyed, retryable=true, recovery=create_new_tab); create a new tab instead of retrying this tab." }
+ *       503: { description: "For code=tab_busy, a previous operation is still settling (retryable=true, recovery=retry); retry the same tab after it settles." }
  */
 app.post('/tabs/:tabId/forward', async (req, res) => {
   const tabId = req.params.tabId;
@@ -6038,6 +6058,8 @@ app.post('/tabs/:tabId/forward', async (req, res) => {
  *           application/json:
  *             schema:
  *               $ref: '#/components/schemas/Error'
+ *       410: { description: "Tab was retired by timeout recovery or is no longer available (code=tab_destroyed, retryable=true, recovery=create_new_tab); create a new tab instead of retrying this tab." }
+ *       503: { description: "For code=tab_busy, a previous operation is still settling (retryable=true, recovery=retry); retry the same tab after it settles." }
  */
 app.post('/tabs/:tabId/refresh', async (req, res) => {
   const tabId = req.params.tabId;
@@ -6108,6 +6130,8 @@ app.post('/tabs/:tabId/refresh', async (req, res) => {
  *           application/json:
  *             schema:
  *               $ref: '#/components/schemas/Error'
+ *       410: { description: "Tab was retired by timeout recovery or is no longer available (code=tab_destroyed, retryable=true, recovery=create_new_tab); create a new tab instead of retrying this tab." }
+ *       503: { description: "For code=tab_busy, a previous operation is still settling (retryable=true, recovery=retry); retry the same tab after it settles." }
  */
 app.get('/tabs/:tabId/links', async (req, res) => {
   try {
@@ -6573,11 +6597,12 @@ app.get('/tabs/:tabId/stats', async (req, res) => {
  *             schema:
  *               $ref: '#/components/schemas/Error'
  *       503:
- *         description: Browser session expired; caller should retry to get a fresh session.
+ *         description: Browser session expired; caller should retry to get a fresh session. For code=tab_busy, a previous operation is still settling (retryable=true, recovery=retry); retry the same tab after it settles.
  *         content:
  *           application/json:
  *             schema:
  *               $ref: '#/components/schemas/Error'
+ *       410: { description: "Tab was retired by timeout recovery or is no longer available (code=tab_destroyed, retryable=true, recovery=create_new_tab); create a new tab instead of retrying this tab." }
  */
 app.post('/tabs/:tabId/evaluate', express.json({ limit: CONFIG.evaluateMaxBodySize }), async (req, res) => {
   try {
@@ -7502,6 +7527,8 @@ app.get('/tabs', async (req, res) => {
  *           application/json:
  *             schema:
  *               $ref: '#/components/schemas/Error'
+ *       410: { description: "Tab was retired by timeout recovery or is no longer available (code=tab_destroyed, retryable=true, recovery=create_new_tab); create a new tab instead of retrying this tab." }
+ *       503: { description: "For code=tab_busy, a previous operation is still settling (retryable=true, recovery=retry); retry the same tab after it settles." }
  */
 app.post('/tabs/open', async (req, res) => {
   try {
@@ -7711,6 +7738,8 @@ app.post('/stop', async (req, res) => {
  *           application/json:
  *             schema:
  *               $ref: '#/components/schemas/Error'
+ *       410: { description: "Tab was retired by timeout recovery or is no longer available (code=tab_destroyed, retryable=true, recovery=create_new_tab); create a new tab instead of retrying this tab." }
+ *       503: { description: "For code=tab_busy, a previous operation is still settling (retryable=true, recovery=retry); retry the same tab after it settles." }
  */
 app.post('/navigate', async (req, res) => {
   try {
@@ -7979,6 +8008,8 @@ app.get('/snapshot', async (req, res) => {
  *           application/json:
  *             schema:
  *               $ref: '#/components/schemas/Error'
+ *       410: { description: "Tab was retired by timeout recovery or is no longer available (code=tab_destroyed, retryable=true, recovery=create_new_tab); create a new tab instead of retrying this tab." }
+ *       503: { description: "For code=tab_busy, a previous operation is still settling (retryable=true, recovery=retry); retry the same tab after it settles." }
  */
 app.post('/act', async (req, res) => {
   try {

@@ -43,7 +43,46 @@ function parseServerRoutes(source) {
 
 const serverRoutes = parseServerRoutes(serverSrc);
 
+// Bound each search to a complete route so shared helper definitions between
+// handlers cannot be mistaken for calls made by the preceding route.
+const lockedHandlers = [...serverSrc.matchAll(
+  /^app\.(get|post|put|patch|delete)\(\s*['"`]([^'"`]+)['"`][\s\S]*?^\}\);/gm,
+)].filter(([handler]) => /\bwithTabLock\s*\(/.test(handler));
+const lockedRoutes = lockedHandlers.map(([, method, path]) => [method, path.replace(/:(\w+)/g, '{$1}')]);
+
 describe('OpenAPI spec', () => {
+  test('discovers locked tab routes including creation and legacy handlers', () => {
+    const lockCalls = source => [...source.matchAll(/\bwithTabLock\s*\(/g)].length;
+    // Account for every call, excluding the single shared function definition.
+    expect(lockedHandlers.reduce((count, [handler]) => count + lockCalls(handler), 0)).toBe(lockCalls(serverSrc) - 1);
+    expect(lockedRoutes.length).toBeGreaterThanOrEqual(18);
+    expect(lockedRoutes).toEqual(expect.arrayContaining([
+      ['post', '/tabs'],
+      ['post', '/tabs/open'],
+      ['post', '/tabs/{tabId}/handoff'],
+      ['get', '/tabs/{tabId}/snapshot'],
+      ['post', '/navigate'],
+      ['post', '/act'],
+    ]));
+  });
+
+  test.each(lockedRoutes)('%s %s documents busy versus retired tab recovery', (method, path) => {
+    const responses = spec.paths[path][method].responses;
+    expect(responses['503']?.description).toContain('code=tab_busy');
+    expect(responses['503'].description).toContain('recovery=retry');
+    expect(responses['503'].description).toContain('retry the same tab after it settles');
+    expect(responses['410']?.description).toContain('code=tab_destroyed');
+    expect(responses['410'].description).toContain('recovery=create_new_tab');
+    expect(responses['410'].description).toContain('create a new tab instead of retrying this tab');
+  });
+
+  test('locked routes preserve their other documented 503 meanings', () => {
+    expect(spec.paths['/tabs'].post.responses['503'].description).toContain('Page creation unavailable');
+    expect(spec.paths['/tabs/{tabId}/snapshot'].get.responses['503'].description).toContain('code=refs_unavailable');
+    expect(spec.paths['/tabs/{tabId}/evaluate'].post.responses['503'].description).toContain('Browser session expired');
+    expect(spec.paths['/tabs/{tabId}/handoff'].post.responses['503'].description).toContain('No control transfer occurred');
+  });
+
   test.each(['open', 'focus'])('identity %s documents non-retryable native handoff unavailability', action => {
     const description = spec.paths[`/browser/identities/{userId}/${action}`].post.responses['409'].description;
     expect(description).toContain('handoff_unavailable');
