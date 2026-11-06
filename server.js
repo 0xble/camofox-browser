@@ -4925,7 +4925,8 @@ app.post('/tabs/:tabId/wait', async (req, res) => {
  *             schema:
  *               $ref: '#/components/schemas/Error'
  *       410: { description: "Tab was retired by timeout recovery or is no longer available (code=tab_destroyed, retryable=true, recovery=create_new_tab); create a new tab instead of retrying this tab." }
- *       503: { description: "For code=operation_timeout, the action exceeded its budget and may still be running; timeout classification takes precedence over page-change recovery. For code=tab_busy, a previous operation is still settling. Both are retryable=true, recovery=retry; retry the same tab after it settles." }
+ *       422: { description: "Locator wait timeouts remain element_not_actionable (retryable=true, recovery=snapshot_then_retry); take a fresh snapshot and retry with current refs." }
+ *       503: { description: "For code=operation_timeout, the action exceeded its budget and may still be running; handler/native timeout classification takes precedence over page-change recovery, not locator wait timeouts. For code=tab_busy, a previous operation is still settling. Both are retryable=true, recovery=retry; retry the same tab after it settles." }
  */
 app.post('/tabs/:tabId/click', async (req, res) => {
   const tabId = req.params.tabId;
@@ -5108,10 +5109,12 @@ app.post('/tabs/:tabId/click', async (req, res) => {
     res.json(result);
   } catch (err) {
     log('error', 'click failed', { reqId: req.reqId, tabId, error: err.message });
-    // A timeout is not evidence of navigation, and its work may still hold the tab lock.
-    if (err.code === 'operation_timeout' || err.code === 'tab_destroyed' || isTimeoutError(err) || err.message?.includes('timed out')) {
-      if (!err.code) err.code = 'operation_timeout';
-      return handleRouteError(err, req, res);
+    // Handler/native timeouts may still hold the tab lock; locator wait
+    // timeouts must keep the browser-error classifier's snapshot recovery.
+    if (err.code === 'operation_timeout' || err.code === 'tab_destroyed' ||
+        err.message?.includes('timed out after') || /native mouse (?:move|down|up) timed out\b/.test(err.message || '')) {
+      const timeoutErr = err.code ? err : Object.assign(new Error(err.message), err, { code: 'operation_timeout' });
+      return handleRouteError(timeoutErr, req, res);
     }
     if (isNavigationRaceError(err)) {
       try {
@@ -5480,7 +5483,8 @@ app.post('/tabs/:tabId/upload', parseUploadBody, async (req, res) => {
  *             schema:
  *               $ref: '#/components/schemas/Error'
  *       410: { description: "Tab was retired by timeout recovery or is no longer available (code=tab_destroyed, retryable=true, recovery=create_new_tab); create a new tab instead of retrying this tab." }
- *       503: { description: "For code=operation_timeout, the action exceeded its budget and may still be running; timeout classification takes precedence over page-change recovery. For code=tab_busy, a previous operation is still settling. Both are retryable=true, recovery=retry; retry the same tab after it settles." }
+ *       422: { description: "Locator wait timeouts remain element_not_actionable (retryable=true, recovery=snapshot_then_retry); take a fresh snapshot and retry with current refs." }
+ *       503: { description: "For code=operation_timeout, the action exceeded its budget and may still be running; handler/native timeout classification takes precedence over page-change recovery, not locator wait timeouts. For code=tab_busy, a previous operation is still settling. Both are retryable=true, recovery=retry; retry the same tab after it settles." }
  */
 app.post('/tabs/:tabId/type', async (req, res) => {
   const tabId = req.params.tabId;
@@ -5544,10 +5548,12 @@ app.post('/tabs/:tabId/type', async (req, res) => {
     res.json({ ok: true });
   } catch (err) {
     log('error', 'type failed', { reqId: req.reqId, error: err.message });
-    // A timeout is not evidence of navigation, and its work may still hold the tab lock.
-    if (err.code === 'operation_timeout' || err.code === 'tab_destroyed' || isTimeoutError(err) || err.message?.includes('timed out')) {
-      if (!err.code) err.code = 'operation_timeout';
-      return handleRouteError(err, req, res);
+    // Handler/native timeouts may still hold the tab lock; locator wait
+    // timeouts must keep the browser-error classifier's snapshot recovery.
+    if (err.code === 'operation_timeout' || err.code === 'tab_destroyed' ||
+        err.message?.includes('timed out after') || /native mouse (?:move|down|up) timed out\b/.test(err.message || '')) {
+      const timeoutErr = err.code ? err : Object.assign(new Error(err.message), err, { code: 'operation_timeout' });
+      return handleRouteError(timeoutErr, req, res);
     }
     if (isNavigationRaceError(err) || err.message?.includes('not an <input>')) {
       try {

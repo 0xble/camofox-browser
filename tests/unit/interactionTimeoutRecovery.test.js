@@ -26,7 +26,7 @@ function deferred() {
   return { promise, resolve };
 }
 
-async function fixture({ keyboard, click, mouse, fill, refresh } = {}) {
+async function fixture({ keyboard, click, mouse, fill, focus, refresh } = {}) {
   const app = express();
   app.use(express.json());
   const locator = {
@@ -37,7 +37,7 @@ async function fixture({ keyboard, click, mouse, fill, refresh } = {}) {
     isClosed: () => false, url: () => 'https://fixture.invalid/changed',
     keyboard: { type: keyboard || jest.fn(async () => {}), press: async () => {} },
     mouse: { move: async () => {}, down: async () => {}, up: async () => {}, ...mouse },
-    locator: () => locator, focus: async () => {}, waitForTimeout: async () => {},
+    locator: () => locator, focus: focus || (async () => {}), waitForTimeout: async () => {},
   };
   const tabState = { page, refs: new Map([['e1', {}]]), toolCalls: 0, visitedUrls: new Set(), lastSnapshot: 'old snapshot' };
   const session = {};
@@ -136,6 +136,26 @@ test.each(['move', 'down', 'up'])('nested native mouse %s timeout retains classi
   }
 });
 
+test.each([
+  ['type', 'fill', 'locator.fill'],
+  ['type', 'keyboard', 'page.focus'],
+  ['click', 'fill', 'locator.fill'],
+])('%s keeps Playwright %s locator timeouts actionable (%s)', async (action, mode, api) => {
+  const error = new Error(`${api}: Timeout 10000ms exceeded.\nCall log:\n  - waiting for locator('#missing')`);
+  const fail = async () => { throw error; };
+  // Click's own timeout has a mouse fallback. Fail its normal post-click ref
+  // refresh to exercise the same outer catch with the unmodified locator error.
+  const f = await fixture({ fill: fail, focus: fail, ...(action === 'click' ? { refresh: fail } : {}) });
+  try {
+    const response = await f.request(action, { mode });
+    expect(response).toMatchObject({ status: 422, body: { code: 'element_not_actionable', retryable: true, recovery: 'snapshot_then_retry' } });
+    expect(response.body.error).not.toContain('Work may still be running');
+    expect(error.code).toBeUndefined();
+    expect(f.refreshes.map(({ reason }) => reason)).toEqual(action === 'click' ? ['post_click'] : []);
+    expect(f.locks.get('A').settling).toBe(false);
+  } finally { await f.close(); }
+});
+
 test.each(['click', 'type'])('%s preserves genuine page-change recovery and refreshes refs under the tab lock', async action => {
   const pageChanged = async () => { throw new Error('Execution context was destroyed, most likely because of a navigation'); };
   const f = await fixture({ click: pageChanged, fill: pageChanged });
@@ -161,8 +181,11 @@ test.each(['click', 'type'])('%s preserves structured timeout and tab-destroyed 
   }
 });
 
-test.each(['click', 'type'])('%s treats an ambiguous timeout plus navigation wording as a timeout', async action => {
-  const timedOut = async () => { throw new Error('native input timed out; Execution context was destroyed'); };
+test.each(['click', 'type'].flatMap(action => [
+  [action, 'action timed out after 10000ms; Execution context was destroyed'],
+  ...['move', 'down', 'up'].map(step => [action, `native mouse ${step} timed out; Execution context was destroyed`]),
+]))('%s treats a handler/native timeout plus navigation wording as a timeout (%s)', async (action, message) => {
+  const timedOut = async () => { throw new Error(message); };
   const f = await fixture({ click: timedOut, fill: timedOut });
   try {
     const response = await f.request(action);
