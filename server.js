@@ -4238,6 +4238,12 @@ app.post('/tabs/:tabId/navigate', async (req, res) => {
       if (urlErr) throw new Error(urlErr);
       
       return await withTabLock(tabId, async () => {
+        const navigationLock = tabLocks.get(tabId);
+        const assertNavigationCurrent = () => {
+          if (navigationLock.retired || tabLocks.get(tabId) !== navigationLock) {
+            throw tabDestroyedError(new Error('Navigation tab was retired'));
+          }
+        };
         const currentSessionKey = found?.listItemId || resolvedSessionKey;
         const isGoogleSearch = isGoogleSearchUrl(targetUrl);
         const isAmazonSearch = macro === '@amazon_search';
@@ -4335,6 +4341,7 @@ app.post('/tabs/:tabId/navigate', async (req, res) => {
         // Keep the public tab ID stable by replacing only that page and retrying
         // this navigation once. Destination errors are never recovered as success.
         const replaceDeadTabPage = async () => {
+          assertNavigationCurrent();
           const previousTabState = tabState;
           quarantinePage(previousTabState.page, session);
           const createdPage = await createPageWithRecoveryForUser(userId, session);
@@ -4343,6 +4350,8 @@ app.post('/tabs/:tabId/navigate', async (req, res) => {
           const replacementLease = createdPage.lease;
           let replacementAttached = false;
           try {
+            // Page creation can outlive this tab's abandoned-work retirement.
+            assertNavigationCurrent();
             // The context `page` event may already have registered the
             // replacement under a new ID; registerPage folds it into this tab.
             tabState = registerPage(session, userId, replacementPage, currentSessionKey, { tabId }).tabState;
