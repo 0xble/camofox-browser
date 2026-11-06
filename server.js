@@ -4429,6 +4429,7 @@ app.post('/tabs/:tabId/navigate', async (req, res) => {
         };
 
         const recreateTabOnFreshContext = async () => {
+          assertNavigationCurrent();
           const previousRetryCount = tabState.googleRetryCount || 0;
           browserRestartsTotal.labels('google_search_block').inc();
           // Rotate at context level -- destroy this user's session and create
@@ -4436,18 +4437,39 @@ app.post('/tabs/:tabId/navigate', async (req, res) => {
           const key = normalizeUserId(userId);
           const oldSession = sessions.get(key);
           if (oldSession) {
-            await closeSession(key, oldSession, {
-              reason: 'google_blocked_context_rotate',
-              clearDownloads: true,
-              clearLocks: true,
-              preserveLockTabIds: new Set([tabId]),
-            });
+            const closingTabState = tabState;
+            closingTabState.preserveLockOnClose = true;
+            try {
+              await closeSession(key, oldSession, {
+                reason: 'google_blocked_context_rotate',
+                clearDownloads: true,
+                clearLocks: true,
+                preserveLockTabIds: new Set([tabId]),
+              });
+            } finally {
+              // Detached sessions must not release the reused ID on a late close.
+              if (sessions.get(key) !== oldSession) {
+                for (const group of oldSession.tabGroups.values()) {
+                  if (group.get(tabId) === closingTabState) group.delete(tabId);
+                }
+              }
+              delete closingTabState.preserveLockOnClose;
+            }
           }
           session = await getSession(userId);
+          assertNavigationCurrent();
           const { page, lease } = await createLeasedPage(session);
-          tabState = registerPage(session, userId, page, currentSessionKey, { tabId }).tabState;
-          tabState.googleRetryCount = previousRetryCount + 1;
-          releasePageLease(session, lease);
+          let replacementAttached = false;
+          try {
+            // Context rotation/page creation can outlive this tab generation.
+            assertNavigationCurrent();
+            tabState = registerPage(session, userId, page, currentSessionKey, { tabId }).tabState;
+            tabState.googleRetryCount = previousRetryCount + 1;
+            replacementAttached = true;
+          } finally {
+            releasePageLease(session, lease);
+            if (!replacementAttached) await safePageClose(page);
+          }
           refreshActiveTabsGauge();
         };
 
