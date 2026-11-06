@@ -183,3 +183,29 @@ close rather than assuming a fulfilled close means the page is gone.
 - **Rollback:** revert the repair commit. No persisted state changes.
 - **Retire when:** upstream guarantees cancellation or equivalent per-tab
   settling before allowing newer work or human handoff.
+
+#### Snapshot frame URL identity
+
+- **Behavior:** the shared `snapshotCandidateFrames()` classifier applies the
+  existing tracking/captcha patterns to the parsed hostname and pathname, plus
+  the frame name. Query, fragment and userinfo text cannot hide a legitimate
+  frame merely by mentioning a skipped resource. Empty, `about:blank` and
+  `about:srcdoc` frames remain excluded. Malformed URLs are excluded.
+- **Evidence:** a legitimate card iframe can include
+  `#fonts[0][src]=https://fonts.gstatic.com/...`; matching the whole URL hides
+  its controls and refs. The synthetic two-origin HTTP regression reproduces
+  this omission for the font fragment and unrelated provider query/fragment
+  metadata, then verifies snapshot visibility and ref-based type/click results.
+- **Surfaces:** `server.js` (`snapshotCandidateFrames`, shared by ref building
+  and snapshot serialization), `tests/unit/snapshotFrames.test.js`,
+  `tests/e2e/snapshotFrameFilter.test.js`.
+- **Regression:** `NODE_OPTIONS=--experimental-vm-modules npx jest --runInBand tests/unit/snapshotFrames.test.js`;
+  `NODE_OPTIONS=--experimental-vm-modules npx jest --config jest.config.e2e.cjs --runInBand tests/e2e/snapshotFrameFilter.test.js`.
+  All fixture content is synthetic and loopback-only; no payment is submitted.
+- **Upstream checked:** `jo-inc/camofox-browser` master
+  `39c82094013480b373df6600d44c7f036f58356e` still matches whole frame URLs.
+  Merged PR #5591 establishes the captcha exclusions; preserve them rather than
+  adding a provider-specific allowlist.
+- **Rollback:** revert this repair. No configuration or persisted state changes.
+- **Retire when:** upstream distinguishes frame URL identity from embedded
+  resource metadata and the same snapshot/ref regressions pass.
