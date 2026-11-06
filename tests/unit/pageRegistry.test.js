@@ -198,9 +198,11 @@ describe('observed popup lineage', () => {
     f.expectOneIdPerPage();
   });
 
-  test('folds follow the exact opener page and preserve a folded child lineage', () => {
+  test.each([true, false])('folds follow the exact opener page and preserve a folded child lineage (shared=%s)', shared => {
     const f = fixture();
-    const opener = f.newPage();
+    f.session.sharedIdentity = shared;
+    const opener = fakePage();
+    f.registry.registerPage(f.session, f.userId, opener, SHARED_IDENTITY_GROUP);
     const popup = fakePage();
     opener.emit('popup', popup);
     const child = findTabByPage(f.session, popup).tabState;
@@ -209,6 +211,62 @@ describe('observed popup lineage', () => {
     f.registry.registerPage(f.session, f.userId, popup, 'task-a', { tabId: 'folded-child' });
     expect(getOpenerTabId(f.session, findTabByPage(f.session, popup).tabState)).toBe('folded-opener');
     f.expectOneIdPerPage();
+  });
+
+  test.each([true, false])('closing an opener clears only its direct children while live chains stay usable (shared=%s)', async shared => {
+    const f = fixture();
+    f.session.sharedIdentity = shared;
+    const opener = fakePage();
+    const { tabId } = f.registry.registerPage(f.session, f.userId, opener, 'task-a');
+    const popup = fakePage('https://example.test/popup');
+    const sibling = fakePage();
+    opener.emit('popup', popup);
+    opener.emit('popup', sibling);
+    const child = findTabByPage(f.session, popup);
+    const siblingState = findTabByPage(f.session, sibling).tabState;
+    const nested = fakePage();
+    popup.emit('popup', nested);
+    const nestedState = findTabByPage(f.session, nested).tabState;
+    expect(child.tabState.openerPage).toBe(opener);
+    expect(siblingState.openerPage).toBe(opener);
+    expect(getOpenerTabId(f.session, child.tabState)).toBe(tabId);
+
+    await opener.close();
+
+    // Inspect the reference before any lineage read can lazily clear it.
+    expect(child.tabState.openerPage).toBeNull();
+    expect(siblingState.openerPage).toBeNull();
+    expect(popup.isClosed()).toBe(false);
+    expect(sibling.isClosed()).toBe(false);
+    expect(findTabByPage(f.session, popup).tabState).toBe(child.tabState);
+    expect(popup.url()).toBe('https://example.test/popup');
+    expect(getOpenerTabId(f.session, child.tabState)).toBeNull();
+    expect(nestedState.openerPage).toBe(popup);
+    expect(getOpenerTabId(f.session, nestedState)).toBe(child.tabId);
+    const later = fakePage();
+    popup.emit('popup', later);
+    expect(getOpenerTabId(f.session, findTabByPage(f.session, later).tabState)).toBe(child.tabId);
+    await popup.close();
+    expect(nestedState.openerPage).toBeNull();
+    expect(findTabByPage(f.session, later).tabState.openerPage).toBeNull();
+    expect(nested.isClosed()).toBe(false);
+    f.expectOneIdPerPage();
+  });
+
+  test.each([true, false])('a folded opener still clears its live child on close (shared=%s)', async shared => {
+    const f = fixture();
+    f.session.sharedIdentity = shared;
+    const opener = fakePage();
+    f.registry.registerPage(f.session, f.userId, opener, 'task-a');
+    const popup = fakePage();
+    opener.emit('popup', popup);
+    const child = findTabByPage(f.session, popup).tabState;
+    f.registry.registerPage(f.session, f.userId, opener, 'task-b', { tabId: 'folded-opener' });
+    expect(getOpenerTabId(f.session, child)).toBe('folded-opener');
+    await opener.close();
+    expect(child.openerPage).toBeNull();
+    expect(getOpenerTabId(f.session, child)).toBeNull();
+    expect(popup.isClosed()).toBe(false);
   });
 
   test.each([true, false])('closed openers cannot lend their ID to replacement pages (shared=%s)', async shared => {
@@ -244,11 +302,51 @@ describe('observed popup lineage', () => {
     expect(findTabByPage(f.session, late)).toBeNull();
   });
 
-  test('a late popup event cannot enter a replacement session for the same user', () => {
+  test.each([true, false])('a replaced live opener clears its old children only when that exact page closes (shared=%s)', async shared => {
     const f = fixture();
-    const opener = f.newPage();
-    const replacement = { sharedIdentity: true, tabGroups: new Map() };
+    f.session.sharedIdentity = shared;
+    const opener = fakePage();
+    const { tabId } = f.registry.registerPage(f.session, f.userId, opener, 'task-a');
+    const popup = fakePage();
+    opener.emit('popup', popup);
+    const child = findTabByPage(f.session, popup).tabState;
+    const replacement = fakePage();
+    f.registry.registerPage(f.session, f.userId, replacement, 'task-a', { tabId });
+    expect(getOpenerTabId(f.session, child)).toBeNull();
+    const replacementPopup = fakePage();
+    replacement.emit('popup', replacementPopup);
+    const replacementChild = findTabByPage(f.session, replacementPopup).tabState;
+    expect(getOpenerTabId(f.session, replacementChild)).toBe(tabId);
+
+    await opener.close();
+
+    expect(child.openerPage).toBeNull();
+    expect(getOpenerTabId(f.session, child)).toBeNull();
+    expect(replacementChild.openerPage).toBe(replacement);
+    expect(getOpenerTabId(f.session, replacementChild)).toBe(tabId);
+    expect(findTabByPage(f.session, replacement).tabId).toBe(tabId);
+    expect(replacement.isClosed()).toBe(false);
+    const late = fakePage();
+    opener.emit('popup', late);
+    expect(findTabByPage(f.session, late)).toBeNull();
+    f.expectOneIdPerPage();
+  });
+
+  test.each([true, false])('a late popup or close event cannot enter a replacement session for the same user (shared=%s)', async shared => {
+    const f = fixture();
+    f.session.sharedIdentity = shared;
+    const opener = fakePage();
+    const { tabId } = f.registry.registerPage(f.session, f.userId, opener, 'task-a');
+    const childPage = fakePage();
+    opener.emit('popup', childPage);
+    const oldChild = findTabByPage(f.session, childPage).tabState;
+    const replacement = { sharedIdentity: shared, tabGroups: new Map() };
     f.sessions.set(f.userId, replacement);
+    const replacementOpener = fakePage();
+    f.registry.registerPage(replacement, f.userId, replacementOpener, 'task-a', { tabId });
+    const replacementPopup = fakePage();
+    replacementOpener.emit('popup', replacementPopup);
+    const replacementChild = findTabByPage(replacement, replacementPopup).tabState;
     const popup = fakePage();
     opener.emit('popup', popup);
     expect(findTabByPage(replacement, popup)).toBeNull();
@@ -258,6 +356,13 @@ describe('observed popup lineage', () => {
     f.session._closing = true;
     opener.emit('popup', popup);
     expect(findTabByPage(f.session, popup)).toBeNull();
+    expect(getOpenerTabId(replacement, oldChild)).toBeNull();
+    f.sessions.set(f.userId, replacement);
+    await opener.close();
+    expect(oldChild.openerPage).toBeNull();
+    expect(replacementChild.openerPage).toBe(replacementOpener);
+    expect(getOpenerTabId(replacement, replacementChild)).toBe(tabId);
+    expect(findTabByPage(replacement, replacementOpener).tabId).toBe(tabId);
   });
 });
 
