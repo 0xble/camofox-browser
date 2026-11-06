@@ -77,6 +77,41 @@ regression passes against the same failure mode, then retire the local repair.
   cleanup, or revert the repair commit.
 - **Retire when:** upstream closes idle tabs inside live sessions.
 
+#### Shared hidden/parked tabs and managed popups
+
+- **Behavior:** a shared tab's `lastAgentActivityAt` controls eligibility, not
+  whether its browser process is headed or the desktop keyboard/mouse is idle.
+  The 60 s sweep and cap admission both reclaim verified hidden/parked tabs
+  after five minutes by default, oldest eligible first at the cap.
+  `CAMOFOX_HIDDEN_TAB_IDLE_MIN` overrides that shared default, including `0`
+  to disable cleanup. Ordinary non-shared tabs retain their 30-minute default.
+  The most recent tab, visible/handed-off windows, unknown visibility, active
+  or queued locks, creation leases and downloads remain protected. Visibility,
+  activity and transition fences are rechecked after asynchronous native reads.
+  Parking refresh resolves the current Firefox window and reads its already
+  bound native number; it never binds, moves or resizes a window. Unbound,
+  missing, ambiguous or non-parked native geometry fails closed.
+  Managed popups use the same task registry and safety checks as their opener;
+  background page events and passive tab lists do not renew agent activity.
+  Visible-window release still uses the independent desktop HID policy.
+- **Root cause:** both shared cleanup paths required 30 minutes of system-wide
+  HID inactivity merely because a context was headed, even when its windows
+  were parked. Continuous desktop use indefinitely deferred otherwise idle
+  tabs and popups; the orphan reaper only handles untracked pages.
+- **Surfaces:** `server.js` (`recycleIdleSharedTab`, `cleanIdleSharedSessions`),
+  `lib/config.js`, `lib/shared-identity-visibility.js`,
+  `tests/unit/sharedIdleVisibility.test.js`, `tests/unit/headedSharedTabRecycling.test.js`,
+  `tests/unit/idleConfig.test.js`, `tests/e2e/sharedIdleTabs.test.js`.
+- **Regression:** `node --test tests/unit/headedSharedTabRecycling.test.js`;
+  `npm run test:unit`; `npm run test:plugins`; relevant disposable-server e2e
+  suites `sharedIdleTabs`, `sharedPersistentLifecycle`, `sharedIdentityVisibility`.
+  Use scratch HOME/TMPDIR and `CAMOFOX_DISABLE_DEFAULT_ADDONS=1`.
+- **Rollback:** set `CAMOFOX_HIDDEN_TAB_IDLE_MIN=0` to disable idle-tab cleanup,
+  or revert this repair. No native-window binding, parking uniqueness,
+  exact-origin matching or identity-wide serialization changes.
+- **Retire when:** upstream supplies equivalent per-page visibility/activity
+  safety and these regressions pass.
+
 #### Idle Reclamation During Context Acquisition
 
 - **Behavior:** both idle-shutdown admission checks and the idle memory-pressure

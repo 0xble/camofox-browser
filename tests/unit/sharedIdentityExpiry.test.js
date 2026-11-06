@@ -38,7 +38,7 @@ function fixture({ parked = true } = {}) {
   const deps = {
     sessions: new Map([['fixture', session]]), sharedIdentities, quarantinePage,
     UNAVAILABLE_IDENTITY_CLOSE_REASONS: new Set(['shutdown', 'admin_stop', 'browser_restart', 'browser_disconnected']),
-    CONFIG: { hiddenTabIdleMin: 0, headedIdleReleaseMin: 0, hiddenSessionIdleMin: 120 },
+    CONFIG: { hiddenTabIdleMin: 0, sharedTabIdleMin: 0, headedIdleReleaseMin: 0, hiddenSessionIdleMin: 120 },
     sharedIdentityIdlePolicy: createSharedIdentityIdlePolicy({ readIdleSeconds: async () => 0, clock: () => 121 * 60_000 }),
     sharedIdentityRequests: new Map(), sessionCreations: new Map(), identityTransitions: new Map(),
     userConcurrency: new Map(), tabLocks: new Map(), humanControlledTabs: new Set(), hasActivePageLeases,
@@ -101,6 +101,7 @@ test.each([
 test('activity during idle-tab cleanup prevents session expiry', async () => {
   const f = fixture();
   f.deps.CONFIG.hiddenTabIdleMin = 30;
+  f.deps.CONFIG.sharedTabIdleMin = 30;
   f.deps.latestSharedTabId = () => null;
   f.deps.sharedTabClosable = () => true;
   f.deps.closeSharedTab = async () => { f.deps.humanControlledTabs.add('tab'); return false; };

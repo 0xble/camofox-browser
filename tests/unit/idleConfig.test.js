@@ -17,6 +17,7 @@ describe('shared idle release configuration', () => {
 
     expect(config.headedIdleReleaseMin).toBe(30);
     expect(config.hiddenTabIdleMin).toBe(30);
+    expect(config.sharedTabIdleMin).toBe(5);
     expect(config.hiddenSessionIdleMin).toBe(120);
     expect(config.serverEnv).toMatchObject({
       CAMOFOX_HEADED_IDLE_RELEASE_MIN: undefined,
@@ -33,8 +34,15 @@ describe('shared idle release configuration', () => {
     expect(loadConfig()).toMatchObject({
       headedIdleReleaseMin: 0,
       hiddenTabIdleMin: 45,
+      sharedTabIdleMin: 45,
       hiddenSessionIdleMin: 180,
     });
+  });
+
+  test('zero disables both shared and ordinary tab cleanup', () => {
+    process.env.CAMOFOX_HIDDEN_TAB_IDLE_MIN = '0';
+    expect(loadConfig()).toMatchObject({ hiddenTabIdleMin: 0, sharedTabIdleMin: 0 });
+    expect(loadConfig().serverEnv.CAMOFOX_HIDDEN_TAB_IDLE_MIN).toBe('0');
   });
 
   test('uses the documented default for invalid values', () => {
@@ -45,6 +53,7 @@ describe('shared idle release configuration', () => {
     expect(loadConfig()).toMatchObject({
       headedIdleReleaseMin: 30,
       hiddenTabIdleMin: 30,
+      sharedTabIdleMin: 5,
       hiddenSessionIdleMin: 120,
     });
   });

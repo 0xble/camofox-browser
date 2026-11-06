@@ -40,8 +40,8 @@ function fixture({ legacy = false, global = false, headed = true } = {}) {
   let handler;
   const deps = {
     app: { post: (_path, callback) => { handler = callback; } },
-    sessions, humanControlledTabs, tabLocks, tabClosable, latestSharedTabId: latestAgentTabId,
-    CONFIG: { hiddenTabIdleMin: 30, hiddenSessionIdleMin: 0, headedIdleReleaseMin: 0 },
+    sessions, humanControlledTabs, tabLocks, tabClosable, latestSharedTabId: latestAgentTabId, normalizeUserId: String,
+    CONFIG: { hiddenTabIdleMin: 30, sharedTabIdleMin: 30, hiddenSessionIdleMin: 0, headedIdleReleaseMin: 0 },
     sharedIdentityIdlePolicy: createSharedIdentityIdlePolicy({ readIdleSeconds: async () => 7200, clock: () => NOW }),
     identityTransitions: new Map(), sharedIdentityRequests: new Map(),
     identityBusy: () => false, closeSession: spy(async () => {}),
@@ -137,20 +137,20 @@ for (const legacy of [false, true]) test(`all busy returns coded 429 with redact
   assert.equal(f.idle.page.close.mock.callCount(), 0);
 });
 
-for (const seconds of [0, null]) test(`recent or unknown human activity prevents headed recycling (${seconds})`, async () => {
+for (const seconds of [0, null]) test(`recent or unknown human activity preserves user-visible pages (${seconds})`, async () => {
   const f = fixture();
   f.deps.sharedIdentityIdlePolicy = createSharedIdentityIdlePolicy({ readIdleSeconds: async () => seconds, clock: () => NOW });
+  f.session.visibility.isPageVisible.mock.mockImplementation(() => true);
   await f.run();
   assert.equal(f.res.statusCode, 429);
   assert.equal(f.old.page.close.mock.callCount(), 0);
 });
 
-test('rechecks agent activity and handoff after awaiting native human-idle readback', async () => {
+test('rechecks agent activity and handoff after awaiting native visibility readback', async () => {
   const f = fixture();
-  f.deps.sharedIdentityIdlePolicy.shouldReleaseHeaded = async () => {
+  f.session.visibility.refresh = async () => {
     f.old.lastAgentActivityAt = NOW;
     f.deps.humanControlledTabs.add('idle');
-    return true;
   };
   await f.run();
   assert.equal(f.res.statusCode, 429);
@@ -181,6 +181,7 @@ test('unknown native visibility prevents cap eviction and idle reaping', async (
 test('disabled cleanup retains the cap and returns diagnostics', async () => {
   const f = fixture();
   f.deps.CONFIG.hiddenTabIdleMin = 0;
+  f.deps.CONFIG.sharedTabIdleMin = 0;
   await f.run();
   assert.equal(f.res.statusCode, 429);
   assert.equal(f.res.body.code, 'tab_limit_reached');
@@ -237,4 +238,62 @@ test('idle reaper also reclaims abandoned agent tabs in headed identities', asyn
   assert.equal(f.old.page.close.mock.callCount(), 1);
   assert.equal(f.idle.page.close.mock.callCount(), 1);
   assert.equal(f.latest.page.close.mock.callCount(), 0);
+});
+for (const seconds of [0, null]) for (const sweep of [false, true])
+test(`verified parked pages and managed popups ignore unrelated desktop HID (seconds=${seconds}, sweep=${sweep})`, async () => {
+  const f = fixture();
+  f.old.openerPage = f.latest.page; // Managed popup remains an ordinary task-owned tab.
+  f.deps.sharedIdentityIdlePolicy = createSharedIdentityIdlePolicy({ readIdleSeconds: async () => seconds, clock: () => NOW });
+  if (sweep) await f.deps.cleanIdleSharedSessions();
+  else await f.run();
+  assert.equal(f.old.page.close.mock.callCount(), 1);
+  assert.equal(f.latest.page.close.mock.callCount(), 0);
+  if (!sweep) assert.equal(f.res.statusCode, 200);
+});
+
+for (const sweep of [false, true]) test(`shared agent idle threshold reclaims at five minutes, not thirty (sweep=${sweep})`, async () => {
+  const f = fixture();
+  f.deps.CONFIG.sharedTabIdleMin = 5;
+  f.old.lastAgentActivityAt = NOW - 5 * 60_000;
+  f.idle.lastAgentActivityAt = NOW - 5 * 60_000 + 1;
+  if (sweep) await f.deps.cleanIdleSharedSessions();
+  else await f.run();
+  assert.equal(f.old.page.close.mock.callCount(), 1);
+  assert.equal(f.idle.page.close.mock.callCount(), 0, 'a tab even one millisecond below the threshold stays open');
+  assert.equal(f.latest.page.close.mock.callCount(), 0);
+});
+
+for (const sweep of [false, true]) test(`visible human windows are never reaped even after desktop HID idle (sweep=${sweep})`, async () => {
+  const f = fixture();
+  f.session.visibility.isPageVisible.mock.mockImplementation(() => true);
+  if (sweep) await f.deps.cleanIdleSharedSessions();
+  else await f.run();
+  assert.equal(f.old.page.close.mock.callCount(), 0);
+  assert.equal(f.idle.page.close.mock.callCount(), 0);
+});
+
+for (const protect of [
+  ['closing session', f => { f.session._closing = true; }],
+  ['retiring tab', f => { f.old.retiring = true; }],
+  ['human handoff', f => { f.old.handoff = 'human'; }],
+  ['queued operation', f => { f.deps.tabLocks.set('old', { active: 0, queue: [{}] }); }],
+]) for (const sweep of [false, true]) test(`does not inspect a page with ${protect[0]} (sweep=${sweep})`, async () => {
+  const f = fixture();
+  protect[1](f);
+  const inspected = [];
+  f.session.visibility.refresh = async page => { if (page) inspected.push(page); };
+  if (sweep) await f.deps.cleanIdleSharedSessions();
+  else await f.run();
+  assert.equal(inspected.includes(f.old.page), false);
+  assert.equal(f.old.page.close.mock.callCount(), 0);
+});
+
+for (const sweep of [false, true]) test(`visibility refresh starting a handoff fences cleanup (sweep=${sweep})`, async () => {
+  const f = fixture();
+  f.session.visibility.refresh = async () => { f.deps.identityTransitions.set('shared', true); };
+  if (sweep) await f.deps.cleanIdleSharedSessions();
+  else await f.run();
+  assert.equal(f.deps.identityTransitions.get('shared'), true);
+  assert.equal(f.old.page.close.mock.callCount(), 0);
+  assert.equal(f.idle.page.close.mock.callCount(), 0);
 });

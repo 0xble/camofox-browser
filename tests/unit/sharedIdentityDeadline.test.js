@@ -280,7 +280,7 @@ describe('shared identity open deadline', () => {
     const f = fixture({ headed: false });
     f.session.tabGroups.set('group', new Map([['old', { page: {}, lastAgentActivityAt: 0 }]]));
     const closeSharedTab = jest.fn(async () => true);
-    f.deps.CONFIG = { hiddenTabIdleMin: 1, headedIdleReleaseMin: 0 };
+    f.deps.CONFIG = { hiddenTabIdleMin: 1, sharedTabIdleMin: 1, headedIdleReleaseMin: 0 };
     f.deps.sharedIdentityIdlePolicy = { agentIdle: () => true };
     f.deps.latestSharedTabId = () => 'other';
     f.deps.sharedTabClosable = () => true;
@@ -297,6 +297,8 @@ describe('shared identity open deadline', () => {
     expect(closeSharedTab).not.toHaveBeenCalled();
     settle();
     await jest.advanceTimersByTimeAsync(0);
+    await sweep();
+    expect(closeSharedTab).toHaveBeenCalledTimes(1);
   });
 
   test('an existing parked session does not gate sibling tabs while getSession is pending', async () => {
