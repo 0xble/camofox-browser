@@ -52,6 +52,10 @@ in the normal Jest unit suite, and `tests/e2e/sharedPersistentLifecycle.test.js`
 on macOS with parking disabled. Exercise first acquisition, lazy open, repeated
 release/reopen, sibling form input, native refusal, and protected human siblings.
 
+### Headed fingerprint geometry
+
+`shared-identity-launch.js` passes BrowserForge's camelCase `screen.maxWidth/maxHeight` bounded to main and (when present) parking displays. The applied `CAMOU_CONFIG_N` chunks after launch hooks supply `window.outerWidth/outerHeight` for xulstore and the visibility controller; never stretch the native window to a monitor. BrowserForge can return an outer window larger than its constrained screen, especially on a small virtual monitor. Fit the sampled aspect ratio through Camoufox's `window` option and regenerate, bounded to eight attempts; do not clamp only the native bounds or impose one global size. Headless/warm-up launches are unchanged. Topology refresh retains the selected size; legacy parking signatures remain small unique decrements of that size. A Camoufox window can refuse even a one-pixel resize, so headed fingerprint-sized parking binds by the same reversible motion proof as main-display handoff, keeping every physical resize request at the applied outer size. Ambiguous motion stays fail-closed. Main-display proofs retain the motion challenge and exact CGWindow binding below.
+
 ### Native main-display app-hidden handoff
 
 - AppKit `hidden=false`/`active=true` proves application state, not physical
@@ -102,6 +106,27 @@ release/reopen, sibling form input, native refusal, and protected human siblings
   This is fork-owned CAMOFOX-002 behavior. Retire when upstream supplies the
   same preserving native-verified lifecycle. Roll back by reverting this change
   and separately replacing contexts only when authorized; live tabs stay owned.
+
+### Sized parking proof
+
+Sized parking cannot reuse the same three-point motion for concurrent creates:
+all equal-sized native windows would pass the same direction/return test. Each
+unbound parking window instead reserves a distinct second excursion and samples
+`base → 48 → base → code → base`. One measured positive affine x transform must
+explain all five observations of exactly one CGWindow; changing native number
+sets, duplicate candidates, ignored updates, resizing, or incorrect excursion
+ratios fail closed. Codes are allocated synchronously without a shared-identity
+lock, queue, or serialization, and are reusable after binding by native number.
+Show-only keeps the stricter existing three-point proof unchanged. All requested
+parking excursions are checked against the current topology to avoid any overlap
+with human main, including full-display windows; no challenge changes dimensions.
+
+Display discovery failure is a launch degradation, not an agent-acquisition
+failure: skip screen constraints and the profile geometry seed, warn, and retain
+the app-hidden controller's explicit unavailable-handoff capability. Known-display
+invalid applied geometry still fails before browser launch. Fitted window
+regeneration sets minimum sampled screen dimensions as well as physical maxima;
+the final applied config must fit its own sampled screen too.
 
 ### Bounded identity open
 

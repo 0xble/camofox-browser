@@ -88,9 +88,9 @@ describe('native readback in the add-on (Camoufox-spoofed windows.get)', () => {
   let root, visibility, context, windows, intervals, nextId, browser, readback, onCreated, currentDisplay;
   // Camoufox spoofs windows.get: it always reports the requested park geometry.
   // `native` is what CGWindowList would report.
-  async function setup({ failReads = 0, showOnly = false, geometryReadMs = 0 } = {}) {
+  async function setup({ failReads = 0, showOnly = false, geometryReadMs = 0, windowSize = null, topology = display } = {}) {
     let now = Date.now();
-    currentDisplay = showOnly ? { main: display.main, park: null } : display;
+    currentDisplay = showOnly ? { main: topology.main, park: null } : topology;
     root = await fs.mkdtemp(path.join(os.tmpdir(), 'park-native-'));
     context = new EventEmitter(); context.livePages = []; context.pages = () => context.livePages;
     windows = new Map(); intervals = []; nextId = 1;
@@ -122,6 +122,7 @@ describe('native readback in the add-on (Camoufox-spoofed windows.get)', () => {
       }), update: async () => {} },
     };
     visibility = await createSharedIdentityVisibility(currentDisplay, { showOnly, nativeReadback: readback, rootDir: root, timeoutMs: geometryReadMs ? 10000 : 2000, discoverDisplay: async () => currentDisplay });
+    if (windowSize) visibility.setWindowSize(windowSize);
     const script = await fs.readFile(path.join(visibility.addon, 'background.js'), 'utf8');
     vm.runInNewContext(script, { browser, fetch, setTimeout,
       Date: geometryReadMs ? class extends Date { static now() { return now; } } : Date,
@@ -310,6 +311,149 @@ describe('native readback in the add-on (Camoufox-spoofed windows.get)', () => {
     expect(browser.windows.update).not.toHaveBeenCalled();
     expect(browser.windows.remove).not.toHaveBeenCalled();
   });
+  test('fixed-size parked windows bind by distinct native numbers without resizing below the fingerprint', async () => {
+    const size = { width: 1100, height: 760 };
+    await setup({ windowSize: size });
+    // Like Camoufox, native windows ignore every physical size change. Only
+    // the resolved Firefox window's requested position is applied.
+    const create = browser.windows.create;
+    browser.windows.create = async bounds => {
+      const result = await create(bounds);
+      Object.assign(windows.get(result.id).native, size);
+      return result;
+    };
+    const update = browser.windows.update.getMockImplementation();
+    browser.windows.update.mockImplementation(async (id, bounds) => {
+      const result = await update(id, bounds);
+      Object.assign(windows.get(id).native, size);
+      return result;
+    });
+    const a = await visibility.newPage(context), b = await visibility.newPage(context);
+    const parked = [windows.get(1).native, windows.get(2).native];
+    for (const w of parked) {
+      expect(w).toMatchObject(size);
+      expect(nativelyParked(w, display)).toBe(true);
+    }
+    await visibility.open(a);
+    expect(windows.get(1).native).toMatchObject({ ...size, focused: true });
+    await visibility.open(b);
+    expect(windows.get(2).native).toMatchObject({ ...size, focused: true });
+    await visibility.release({ page: b });
+    expect(windows.get(2).native).toEqual(parked[1]);
+    for (const [, bounds] of browser.windows.update.mock.calls) expect(bounds).toMatchObject(size);
+    await visibility.release({ page: a });
+    expect(windows.get(1).native).toMatchObject({ ...size, focused: false });
+    expect(nativelyParked(windows.get(1).native, display)).toBe(true);
+    expect(context.pages()).toEqual([a, b]);
+  });
+  test.each([2, 3])('concurrent creates with fixed fingerprint size (%s windows) bind distinct CGWindows', async count => {
+    const size = { width: 1100, height: 760 };
+    await setup({ windowSize: size });
+    const create = browser.windows.create;
+    browser.windows.create = async bounds => {
+      const result = await create(bounds); Object.assign(windows.get(result.id).native, size); return result;
+    };
+    const update = browser.windows.update.getMockImplementation();
+    browser.windows.update.mockImplementation(async (id, bounds) => {
+      const result = await update(id, bounds); Object.assign(windows.get(id).native, size); return result;
+    });
+    const pages = await Promise.all(Array.from({ length: count }, () => visibility.newPage(context)));
+    expect(new Set(pages).size).toBe(count);
+    for (const [index, page] of pages.entries()) page.input = `unsaved concurrent ${index}`;
+    await visibility.open(pages[0]);
+    await visibility.release({ page: pages[0] });
+    expect(pages.map(page => page.input)).toEqual(pages.map((_, i) => `unsaved concurrent ${i}`));
+    expect(context.pages()).toEqual(pages);
+    const script = await fs.readFile(path.join(visibility.addon, 'background.js'), 'utf8');
+    const endpoint = script.match(/const endpoint="([^"]+)"/)[1];
+    const bound = await Promise.all([...windows.keys()].map(async windowId => {
+      const result = await (await fetch(endpoint + '/geometry', { method: 'POST', body: JSON.stringify({ windowId }) })).json();
+      expect(result.parked).toBe(true); expect(result.number).toBe(windowId + 1000); return result.number;
+    }));
+    expect(new Set(bound).size).toBe(count);
+    for (const [, bounds] of browser.windows.update.mock.calls) expect(bounds).toMatchObject(size);
+  });
+
+  test('an ignored sized target cannot bind a concurrently moving sibling', async () => {
+    const size = { width: 1100, height: 760 };
+    await setup({ windowSize: size });
+    const update = browser.windows.update.getMockImplementation();
+    browser.windows.update.mockImplementation(async (id, bounds) => {
+      if (id === 1) return {}; // windows.get still claims the requested bounds.
+      return update(id, bounds);
+    });
+    const results = await Promise.allSettled([visibility.newPage(context), visibility.newPage(context), visibility.newPage(context)]);
+    expect(results[0]).toMatchObject({ status: 'rejected', reason: expect.any(Error) });
+    expect(results.slice(1).every(r => r.status === 'fulfilled')).toBe(true);
+    expect(windows.has(1)).toBe(false);
+    expect(windows.size).toBe(2);
+  });
+
+  test.each(['vertical drift', 'non-returning motion'])('non-target %s never gives an ignored sized target a false binding', async kind => {
+    await setup({ windowSize: { width: 1100, height: 760 } });
+    windows.set(50, { id: 50, tabs: [], state: 'normal', native: { ...onMain } });
+    const sibling = windows.get(50);
+    browser.windows.update.mockImplementation(async (_id, bounds) => {
+      // An unrelated native window moves without the target taking any update.
+      // A horizontal excursion alone is insufficient with vertical/native drift.
+      sibling.native = { ...bounds };
+      if (kind === 'vertical drift') sibling.native.top += browser.windows.update.mock.calls.length;
+      else sibling.native.left += browser.windows.update.mock.calls.length * 15;
+      return {};
+    });
+    await expect(visibility.newPage(context)).rejects.toThrow('native window identity');
+    expect(windows.has(1)).toBe(false);
+    expect(windows.has(50)).toBe(true);
+  });
+
+  test('ambiguous identical coded native trajectories are never accepted', async () => {
+    await setup({ windowSize: { width: 1100, height: 760 } });
+    windows.set(50, { id: 50, tabs: [], state: 'normal', native: { ...onMain } });
+    const update = browser.windows.update.getMockImplementation();
+    browser.windows.update.mockImplementation(async (id, bounds) => {
+      const result = await update(id, bounds);
+      windows.get(50).native = { ...windows.get(id).native };
+      return result;
+    });
+    await expect(visibility.newPage(context)).rejects.toThrow('native window identity');
+    expect(windows.has(1)).toBe(false);
+    expect(windows.has(50)).toBe(true);
+  });
+
+  test.each([
+    ['right', { left: 2048, top: 0, width: 1280, height: 960 }],
+    ['left', { left: -1280, top: 0, width: 1280, height: 960 }],
+    ['above', { left: 0, top: -960, width: 1280, height: 960 }],
+    ['below', { left: 0, top: 1152, width: 1280, height: 960 }],
+  ])('every tight-window challenge stays off main with parking %s', async (_name, park) => {
+    const topology = { main: display.main, park }, size = { width: park.width, height: park.height };
+    await setup({ windowSize: size, topology });
+    await Promise.all([visibility.newPage(context), visibility.newPage(context), visibility.newPage(context)]);
+    for (const [, bounds] of browser.windows.update.mock.calls) {
+      expect(bounds).toMatchObject(size);
+      const overlap = Math.max(0, Math.min(bounds.left + bounds.width, display.main.width) - Math.max(bounds.left, 0))
+        * Math.max(0, Math.min(bounds.top + bounds.height, display.main.height) - Math.max(bounds.top, 0));
+      expect(overlap).toBe(0);
+    }
+    for (const w of windows.values()) expect(nativelyParked(w.native, topology)).toBe(true);
+  });
+
+  test('show-only motion challenge and final show request keep fingerprint outer dimensions', async () => {
+    const size = { width: 1100, height: 760 };
+    await setup({ showOnly: true, windowSize: size });
+    windows.set(1, { id: 1, tabs: [{ id: 1, windowId: 1 }], native: { ...onMain } });
+    windows.set(2, { id: 2, tabs: [{ id: 2, windowId: 2 }], native: { ...onMain } });
+    const document = { title: 'original' };
+    browser.tabs.query = async ({ title }) => title === document.title ? [{ id: 1, windowId: 1 }] : [];
+    const page = { evaluate: async (fn, args) => vm.runInNewContext(`(${fn})(args)`, { document, args }) };
+    expect(await visibility.open(page)).toMatchObject({ onMain: true, number: 1001 });
+    expect(browser.windows.update.mock.calls.length).toBeGreaterThanOrEqual(4);
+    for (const [id, bounds] of browser.windows.update.mock.calls) {
+      expect(id).toBe(1);
+      expect(bounds).toMatchObject(size);
+    }
+    expect(windows.get(2).native).toEqual(onMain);
+  });
   test('parking show recovers a transient initial native read failure', async () => {
     await setup();
     const p = await visibility.newPage(context);
@@ -470,8 +614,8 @@ describe('native readback in the add-on (Camoufox-spoofed windows.get)', () => {
     await expect(visibility.newPage(context)).rejects.toThrow('did not park');
     expect(windows.has(1)).toBe(false);
   });
-  test('an inherited UI window already on main is bound from its window event, not an arbitrary main window', async () => {
-    await setup();
+  test.each([null, { width: 1100, height: 760 }])('an inherited UI window already on main is bound from its window event, not an arbitrary main window (size=%p)', async windowSize => {
+    await setup({ windowSize });
     const script = await fs.readFile(path.join(visibility.addon, 'background.js'), 'utf8');
     const endpoint = script.match(/const endpoint="([^\"]+)"/)[1];
     const inherited = { id: 60, tabs: [{ id: 60, windowId: 60, url: 'https://ui.test' }], state: 'normal', native: { ...onMain } };
@@ -482,7 +626,7 @@ describe('native readback in the add-on (Camoufox-spoofed windows.get)', () => {
 
     await onCreated(inherited);
     expect(visibility.visible.has(60)).toBe(true);
-    expect(inherited.native).toMatchObject(onMain);
+    expect(inherited.native).toMatchObject({ ...onMain, ...windowSize });
     expect(unrelated.native).toEqual(onMain);
 
     const response = await fetch(endpoint + '/geometry', {

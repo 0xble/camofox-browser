@@ -1,5 +1,6 @@
 import { jest } from '@jest/globals';
 import fs from 'node:fs/promises';
+import { testMainDisplay, withWindowConfig } from '../helpers/sharedLaunchGeometry.js';
 import os from 'node:os';
 import path from 'node:path';
 import { SharedIdentityManager, cookieCheckpointPath } from '../../lib/shared-identity.js';
@@ -26,7 +27,7 @@ describe('shared identity headed transition', () => {
       const context = fakeContext(); contexts.push({ context, options }); return context;
     }) };
     launcher = jest.fn((profile, { headed = false } = {}) => launchSharedIdentityContext(profile, {
-      headed, firefox, launchOptions: async options => ({ ...options }), os: { platform: () => 'darwin' },
+      headed, firefox, discoverMainDisplay: testMainDisplay, launchOptions: async options => withWindowConfig(options), os: { platform: () => 'darwin' },
       getHostOS: () => 'macos', config: {}, events: { emitAsync: async () => {} },
     }));
     const getSession = jest.fn(async (userId, { headed = false } = {}) => {

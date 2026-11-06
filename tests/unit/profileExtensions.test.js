@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, jest, test } from '@jest/globals';
 import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
+import { testMainDisplay, withWindowConfig } from '../helpers/sharedLaunchGeometry.js';
 import os from 'node:os';
 import path from 'node:path';
 import {
@@ -254,7 +255,7 @@ describe('launchSharedIdentityContext', () => {
     }) };
     await launchSharedIdentityContext(profile, {
       extensions: [{ id: 'a@test', ...a }],
-      firefox, launchOptions: async options => ({ ...options }), os: { platform: () => 'darwin' },
+      firefox, discoverMainDisplay: testMainDisplay, launchOptions: async options => withWindowConfig(options), os: { platform: () => 'darwin' },
       getHostOS: () => 'macos', config: {}, events: { emitAsync: async () => {} },
     });
     expect(order).toEqual([['launch', ['a@test.xpi']], ['launch', ['a@test.xpi']]]);
@@ -262,7 +263,8 @@ describe('launchSharedIdentityContext', () => {
 
   const launchDeps = captured => ({
     firefox: { launchPersistentContext: jest.fn(async () => ({ close: async () => {} })) },
-    launchOptions: async options => { captured.push(options); return { ...options }; },
+    discoverMainDisplay: testMainDisplay,
+    launchOptions: async options => { captured.push(options); return withWindowConfig(options); },
     os: { platform: () => 'darwin' }, getHostOS: () => 'macos', config: {},
     events: { emitAsync: async () => {} },
   });

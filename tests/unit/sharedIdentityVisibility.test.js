@@ -1,6 +1,7 @@
 import { isQuarantinedPage } from '../../lib/page-registry.js';
 import { jest } from '@jest/globals';
 import fs from 'node:fs/promises';
+import { testMainDisplay, withWindowConfig } from '../helpers/sharedLaunchGeometry.js';
 import os from 'node:os';
 import path from 'node:path';
 import vm from 'node:vm';
@@ -65,7 +66,7 @@ describe('virtual display selection and launch', () => {
     const firefox = { launchPersistentContext: jest.fn(async () => ({})) };
     try {
       await launchSharedIdentityContext(root, { headed: true, visibility: { addon: '/fake/parking-addon' }, firefox,
-        launchOptions: async value => value, os: { platform: () => 'darwin' }, getHostOS: () => 'macos',
+        discoverMainDisplay: testMainDisplay, launchOptions: async value => withWindowConfig(value), os: { platform: () => 'darwin' }, getHostOS: () => 'macos',
         config: {}, events: { emitAsync: async () => {} } });
       expect(firefox.launchPersistentContext).toHaveBeenCalledTimes(1);
       expect(firefox.launchPersistentContext.mock.calls[0][1]).toMatchObject({ headless: false,
