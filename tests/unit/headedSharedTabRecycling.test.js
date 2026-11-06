@@ -2,6 +2,10 @@ import assert from 'node:assert/strict';
 const test = globalThis.test ?? (await import('node:test')).test;
 import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import { createSharedIdentityVisibility } from '../../lib/shared-identity-visibility.js';
 import { tabClosable, latestAgentTabId } from '../../lib/idle-tabs.js';
 import { createSharedIdentityIdlePolicy } from '../../lib/shared-identity-idle.js';
 import { acquirePageLease, setLeasedPage, releasePageLease } from '../../lib/page-lease.js';
@@ -178,6 +182,16 @@ test('unknown native visibility prevents cap eviction and idle reaping', async (
   assert.equal(f.old.page.close.mock.callCount(), 0);
 });
 
+for (const sweep of [false, true]) test(`one failed page readback does not block its idle sibling (sweep=${sweep})`, async () => {
+  const f = fixture();
+  f.session.visibility.refresh = async page => { if (page === f.old.page) throw Error('page readback timed out'); };
+  if (sweep) await f.deps.cleanIdleSharedSessions();
+  else await f.run();
+  assert.equal(f.old.page.close.mock.callCount(), 0);
+  assert.equal(f.idle.page.close.mock.callCount(), 1);
+  if (!sweep) assert.equal(f.res.statusCode, 200);
+});
+
 test('disabled cleanup retains the cap and returns diagnostics', async () => {
   const f = fixture();
   f.deps.CONFIG.hiddenTabIdleMin = 0;
@@ -296,4 +310,60 @@ for (const sweep of [false, true]) test(`visibility refresh starting a handoff f
   assert.equal(f.deps.identityTransitions.get('shared'), true);
   assert.equal(f.old.page.close.mock.callCount(), 0);
   assert.equal(f.idle.page.close.mock.callCount(), 0);
+});
+
+for (const sweep of [false, true]) test(`unknown popup with hung evaluate cannot block cleanup or cap admission (sweep=${sweep})`, async () => {
+  const f = fixture();
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'camofox-hung-popup-'));
+  const display = { main: { left: 0, top: 0, width: 2048, height: 1152 },
+    park: { left: -3360, top: -2100, width: 3360, height: 2100 } };
+  let windows = [], poller;
+  const visibility = await createSharedIdentityVisibility(display, {
+    rootDir: root, timeoutMs: 250, nativeReadback: async () => windows,
+  });
+  try {
+    const background = await fs.readFile(path.join(visibility.addon, 'background.js'), 'utf8');
+    const endpoint = JSON.parse(background.match(/const endpoint=("[^"]+")/)[1]);
+    const post = async (body, suffix = '') => (await fetch(`${endpoint}${suffix}`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
+    })).json();
+    // Simulate extension IPC, not a browser: only the idle sibling is known.
+    // The popup's page.evaluate would never settle if cleanup tried marking it.
+    f.old.page.evaluate = spy(() => new Promise(() => {}));
+    const creating = visibility.newPage({ pages: () => [f.idle.page] });
+    const create = (await (await fetch(endpoint)).json()).commands.find(c => c.action === 'create');
+    assert.ok(create);
+    f.idle.page.url = () => create.url;
+    await post({ id: create.id, windowId: 7, tabId: 70 });
+    await creating;
+    const reservation = await post({ windowId: 7 }, '/geometry');
+    windows = [{ number: 77, ...reservation.bounds }];
+    assert.equal((await post({ windowId: 7 }, '/geometry')).number, 77);
+    f.session.visibility = visibility;
+    let stopped = false;
+    poller = (async () => {
+      while (!stopped) {
+        const state = await (await fetch(endpoint)).json();
+        for (const command of state.commands) if (command.action === 'locate')
+          await post({ id: command.id, windowId: 7, tabId: 70, parked: true });
+        await new Promise(resolve => setTimeout(resolve, 1));
+      }
+    })();
+    try {
+      let timer;
+      const completed = sweep ? f.deps.cleanIdleSharedSessions() : f.run();
+      await Promise.race([completed, new Promise((_, reject) => {
+        timer = setTimeout(() => reject(Error('cleanup stalled on the hung popup')), 750);
+      })]).finally(() => clearTimeout(timer));
+      assert.equal(f.old.page.close.mock.callCount(), 0);
+      assert.equal(f.old.page.evaluate.mock.callCount(), 0, 'cleanup must not evaluate an unbound page');
+      assert.equal(visibility.isPageVisible(f.old.page), true, 'unknown popup stays protected');
+      assert.equal(f.idle.page.close.mock.callCount(), 1, 'unknown popup must not block its idle sibling');
+      assert.equal(f.latest.page.close.mock.callCount(), 0);
+      if (!sweep) assert.equal(f.res.statusCode, 200);
+    } finally { stopped = true; await poller; }
+  } finally {
+    await visibility.close();
+    await fs.rm(root, { recursive: true, force: true });
+  }
 });

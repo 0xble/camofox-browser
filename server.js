@@ -2355,7 +2355,6 @@ async function recycleIdleSharedTab(session, reqId, userId) {
   const latestTabId = latestSharedTabId(session);
   const candidates = [...session.tabGroups.values()].flatMap(group => [...group])
     .filter(([tabId, tab]) => sharedIdentityIdlePolicy.agentIdle(tab.lastAgentActivityAt, CONFIG.sharedTabIdleMin)
-      && tab.owner !== 'ui'
       && sharedTabClosable(session, tabId, tab, latestTabId, { checkVisibility: false }))
     .sort((a, b) => a[1].lastAgentActivityAt - b[1].lastAgentActivityAt);
   for (const [tabId, tab] of candidates) {
@@ -3699,9 +3698,8 @@ async function cleanIdleSharedSessions() {
         if (sessions.get(key) !== original || identityTransitions.has(key)
           || (typeof sharedIdentityWindow !== 'undefined' && sharedIdentityWindow?.unavailable?.(key))) break;
         if (!sharedIdentityIdlePolicy.agentIdle(tab.lastAgentActivityAt, CONFIG.sharedTabIdleMin)
-          || tab.owner === 'ui'
           || !sharedTabClosable(original, tabId, tab, latestSharedTabId(original), { checkVisibility: false })) continue;
-        try { await original.visibility?.refresh?.(tab.page); } catch { break; }
+        try { await original.visibility?.refresh?.(tab.page); } catch { continue; }
         if (sessions.get(key) !== original || identityTransitions.has(key)
           || (typeof sharedIdentityWindow !== 'undefined' && sharedIdentityWindow?.unavailable?.(key))) break;
         if (!sharedIdentityIdlePolicy.agentIdle(tab.lastAgentActivityAt, CONFIG.sharedTabIdleMin)

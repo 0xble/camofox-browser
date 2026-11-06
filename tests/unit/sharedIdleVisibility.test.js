@@ -82,6 +82,13 @@ describe('parking cleanup native visibility reconciliation', () => {
     await respond('locate', () => visibility.refresh(page));
     expect(visibility.isPageVisible(page)).toBe(false);
   });
+  test.each(['topology', 'windowSize'])('%s invalidation stays protected until an explicit visibility command rebinds', async mode => {
+    if (mode === 'topology') visibility.updateDisplay({ ...display, park: { ...display.park, width: 3359 } });
+    else visibility.setWindowSize({ width: 1200, height: 900 });
+    await respond('locate', () => visibility.refresh(page));
+    expect(visibility.isPageVisible(page)).toBe(true);
+    expect(commands.map(command => command.action)).toEqual(['create', 'locate']);
+  });
   test('native read failure aborts cleanup rather than trusting cached parked geometry', async () => {
     nativeReadback.mockRejectedValueOnce(Error('readback unavailable'));
     await expect(respond('locate', () => visibility.refresh(page))).rejects.toThrow('readback unavailable');
