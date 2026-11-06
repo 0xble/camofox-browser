@@ -217,6 +217,18 @@ pages cannot enter a replacement session and remain its context's teardown duty.
 Observe at the context boundary because failed safe close removes opener
 listeners, and Playwright reports a null opener once that opener has closed.
 
+Close-time lineage cleanup is unconditional and scoped to exact page identity in
+its captured session, separately from registry removal. A context-accounted popup
+claimed by a live opener keeps its own registration when that opener closes but
+loses its opener reference immediately. If the opener closes before its popup
+event, the surviving provisional page remains unclaimed with no invented lineage.
+An unclaimed ordinary popup can itself have children: closing it removes only its
+provisional entry and clears direct-child references, leaving live children
+accounted for. ID reuse or later claiming cannot restore the closed affinity.
+During context rotation, `preserveLockOnClose` still keeps the initiating shared
+owner findable for timeout retirement; it never suppresses child-reference
+cleanup. The navigation retirement fence remains unchanged.
+
 `retiredPopupAccounting.test.js` drives actual session/destruction functions and
 the registry with synthetic pages: pending/settled delayed close, rejected close,
 both close deadlines expiring, popup-first/context-first order, ordinary/shared

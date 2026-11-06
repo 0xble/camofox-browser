@@ -149,6 +149,94 @@ for (const mode of ['delayed', 'delayed-settled', 'failed', 'timeout']) {
   }
 }
 
+for (const kind of ['ordinary', 'shared', 'shared-visible']) {
+  for (const openerClosesFirst of [false, true]) {
+    it(`provisional popup survives opener close without stale lineage (${kind}, opener-first=${openerClosesFirst})`, async () => {
+      const shared = kind !== 'ordinary';
+      const f = await fixture(shared, kind === 'shared-visible');
+      const popup = page(f.opener);
+      f.context.emit('page', popup);
+      await turn();
+      const provisional = findTabByPage(f.session, popup);
+      assert.equal(provisional.listItemId, shared ? SHARED_IDENTITY_GROUP : '__popups__');
+      assert.equal(provisional.tabState.openerPage, undefined);
+
+      // Context accounting alone cannot infer ownership. A later popup event
+      // may claim it only while the exact opener is still live.
+      if (openerClosesFirst) await f.opener.close();
+      f.opener.emit('popup', popup);
+      if (!openerClosesFirst) {
+        assert.equal(provisional.tabState.openerPage, f.opener);
+        assert.equal(getOpenerTabId(f.session, provisional.tabState), f.tabId);
+        await f.opener.close();
+        // Inspect eagerly, before any lineage read could hide a retained ref.
+        assert.equal(provisional.tabState.openerPage, null);
+      } else {
+        assert.equal(provisional.tabState.openerPage, undefined);
+      }
+      const surviving = findTabByPage(f.session, popup);
+      assert.equal(surviving.tabState, provisional.tabState);
+      assert.equal(surviving.tabId, provisional.tabId);
+      assert.equal(surviving.listItemId, openerClosesFirst ? provisional.listItemId : 'original-task');
+      assert.equal(popup.isClosed(), false);
+      assert.equal(getOpenerTabId(f.session, surviving.tabState), null);
+      assert.equal(f.downloads.filter(p => p === popup).length, 1);
+      assert.equal(f.created.filter(event => event.page === popup).length, shared || !openerClosesFirst ? 1 : 0);
+
+      // Neither ID reuse nor an explicit claim may restore closed affinity.
+      const replacement = page();
+      f.registry.registerPage(f.session, 'owner', replacement, 'replacement-task', { tabId: f.tabId });
+      f.registry.registerPage(f.session, 'owner', popup, 'claimed-task');
+      assert.equal(getOpenerTabId(f.session, surviving.tabState), null);
+      assert.notEqual(surviving.tabState.openerPage, replacement);
+      const nested = page(popup);
+      popup.emit('popup', nested);
+      assert.equal(getOpenerTabId(f.session, findTabByPage(f.session, nested).tabState), provisional.tabId);
+    });
+  }
+}
+
+it('closing an unclaimed ordinary popup clears its unclaimed child without losing child accounting', async () => {
+  const f = await fixture(false);
+  const popup = page();
+  f.context.emit('page', popup);
+  const provisional = findTabByPage(f.session, popup);
+  const childPage = page(popup);
+  f.context.emit('page', childPage);
+  popup.emit('popup', childPage);
+  const child = findTabByPage(f.session, childPage);
+  assert.equal(child.listItemId, '__popups__');
+  assert.equal(child.tabState.openerPage, popup);
+  assert.equal(getOpenerTabId(f.session, child.tabState), provisional.tabId);
+  await popup.close();
+  assert.equal(child.tabState.openerPage, null);
+  assert.equal(findTabByPage(f.session, popup), null);
+  assert.equal(findTabByPage(f.session, childPage).tabState, child.tabState);
+  assert.equal(childPage.isClosed(), false);
+  const replacement = page();
+  f.registry.registerPage(f.session, 'owner', replacement, 'replacement-task', { tabId: provisional.tabId });
+  assert.equal(getOpenerTabId(f.session, child.tabState), null);
+  await childPage.close();
+  assert.equal(findTabByPage(f.session, childPage), null);
+  assert.equal(findTabByPage(f.session, replacement).tabId, provisional.tabId);
+});
+
+it('shared close preserves a rotating owner but still clears a provisionally accounted child opener', async () => {
+  const f = await fixture(true);
+  const popup = page(f.opener);
+  f.context.emit('page', popup);
+  f.opener.emit('popup', popup);
+  const child = findTabByPage(f.session, popup).tabState;
+  const owner = findTabByPage(f.session, f.opener).tabState;
+  owner.preserveLockOnClose = true;
+  await f.opener.close();
+  assert.equal(child.openerPage, null);
+  assert.equal(findTabByPage(f.session, f.opener).tabState, owner);
+  assert.equal(findTabByPage(f.session, popup).tabState, child);
+  assert.equal(getOpenerTabId(f.session, child), null);
+  assert.equal(popup.isClosed(), false);
+});
+
 it('ordinary context sightings remain unclaimed until explicit registration, without invented lineage', async () => {
   const f = await fixture(false);
   const unrelated = page();
