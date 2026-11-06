@@ -60,19 +60,26 @@ async function startServer(port = 0, extraEnv = {}) {
 }
 
 async function stopServer() {
-  if (serverProcess) {
+  const proc = serverProcess;
+  if (proc) {
     return new Promise((resolve) => {
-      serverProcess.on('close', () => {
-        serverProcess = null;
-        serverPort = null;
+      const done = () => {
+        // Only clear the globals if a newer server has not already replaced
+        // this one; sequential suites reuse this module-level singleton.
+        if (serverProcess === proc) {
+          serverProcess = null;
+          serverPort = null;
+        }
         resolve();
-      });
+      };
+      if (proc.exitCode !== null || proc.signalCode !== null) return done();
+      proc.on('close', done);
 
-      serverProcess.kill('SIGTERM');
+      proc.kill('SIGTERM');
 
       setTimeout(() => {
-        if (serverProcess) {
-          serverProcess.kill('SIGKILL');
+        if (proc.exitCode === null && proc.signalCode === null) {
+          proc.kill('SIGKILL');
         }
       }, 5000);
     });

@@ -174,12 +174,23 @@ through `/browser/identities/:userId/open` and `/release`, both with its `tabId`
 this reuses the exact fail-closed native motion proof and retains sibling tabs
 without replacing the context. Do not run this automatically during cleanup.
 
-Cleanup also skips pages not yet known to the parking controller (including
-unbound popups). It never title-marks them with `page.evaluate`, which can hang.
-They stay protected until an explicit open/release establishes their binding. A
-failed per-page refresh skips only that page; it must not prevent cleanup of
+Managed popups are located at registration: the page-registry popup handler
+calls the parking controller's bounded, fire-and-forget `locatePage`
+(deadline `min(timeoutMs, 3s)`). The add-on's `windows.onCreated`
+classification has already parked the popup window and established its exact
+fail-closed native binding; the locate only links the Playwright page to that
+window, so cleanup can apply the usual parked proof. If a page is still
+unknown when cleanup reaches it, `refresh(page)` makes one bounded locate
+attempt with the same deadline, deduped per page through the shared locate.
+A hung `page.evaluate`, a timeout, or an ambiguous title match leaves the
+page cleanup-uncertain (protected) and never blocks the sweep, cap
+admission, or sibling tabs; a locate that finishes after its deadline still
+binds the page for the next pass. Cleanup itself still never binds, moves,
+or resizes a window, and the topology/`setWindowSize` invalidation above is
+unchanged. A failed per-page refresh skips only that page; it must not prevent cleanup of
 other idle tabs. The sweep guard is released in `finally` on completion/error.
-Regression: `headedSharedTabRecycling.test.js` and `sharedIdleVisibility.test.js`.
+Regression: `headedSharedTabRecycling.test.js`, `sharedIdleVisibility.test.js`,
+and the popup-registration cases in `pageRegistry.test.js`.
 
 `/health.visibility` reports mode, parking eligibility, same-context session count,
 restart-required legacy session count, and failed-window count separately from

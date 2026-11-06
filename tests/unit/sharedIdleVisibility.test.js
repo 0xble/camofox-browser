@@ -29,6 +29,45 @@ describe('parking cleanup native visibility reconciliation', () => {
     }
     throw Error(`no ${action} command`);
   }
+  // A page the parking controller did not create: a managed popup. Its
+  // evaluate implements the title marker the locate command relies on.
+  function fakePopupPage({ hang = false } = {}) {
+    let title = 'Popup target';
+    return {
+      url: () => 'https://popup.test/target',
+      isClosed: () => false,
+      evaluate: jest.fn(async (_fn, arg) => {
+        if (hang) return new Promise(() => {});
+        if (typeof arg === 'string') { const old = title; title = arg; return old; }
+        if (arg?.marker && title === arg.marker) title = arg.previous;
+        return undefined;
+      }),
+      get title() { return title; },
+    };
+  }
+  // Simulate the add-on's windows.onCreated classification: parking the new
+  // popup window already established its exact native binding server-side.
+  async function bindNativeWindow(windowId, number) {
+    const reservation = await post({ windowId }, '/geometry');
+    nativeWindows = [...nativeWindows.filter(w => w.number !== number), { number, ...reservation.bounds }];
+    expect((await post({ windowId }, '/geometry')).number).toBe(number);
+  }
+  // Ack every locate command (marker and tabId forms) until start() settles.
+  async function ackLocates(start, reply) {
+    const pending = start();
+    pending.catch(() => {});
+    let settled = false;
+    pending.finally(() => { settled = true; });
+    for (let attempt = 0; attempt < 1000 && !settled; attempt++) {
+      const state = await (await fetch(endpoint)).json();
+      for (const command of state.commands.filter(item => item.action === 'locate')) {
+        commands.push(command);
+        await post({ id: command.id, ...reply });
+      }
+      if (!settled) await new Promise(resolve => setTimeout(resolve, 1));
+    }
+    return pending;
+  }
   beforeEach(async () => {
     root = await fs.mkdtemp(path.join(os.tmpdir(), 'camofox-native-idle-'));
     nativeWindows = []; commands = [];
@@ -93,4 +132,44 @@ describe('parking cleanup native visibility reconciliation', () => {
     nativeReadback.mockRejectedValueOnce(Error('readback unavailable'));
     await expect(respond('locate', () => visibility.refresh(page))).rejects.toThrow('readback unavailable');
   });
+  test('a managed popup located at registration is provably parked for cleanup without another evaluate', async () => {
+    const popup = fakePopupPage();
+    await bindNativeWindow(9, 99);
+    // Registration path: page-registry asks the controller to locate popups.
+    await ackLocates(() => visibility.locatePage(popup), { windowId: 9, tabId: 90 });
+    expect(popup.title).toBe('Popup target'); // title marker restored
+    const evaluates = popup.evaluate.mock.calls.length;
+    expect(evaluates).toBeGreaterThan(0);
+    await ackLocates(() => visibility.refresh(popup), { windowId: 9, tabId: 90 });
+    expect(visibility.isPageVisible(popup)).toBe(false);
+    expect(popup.evaluate.mock.calls.length).toBe(evaluates); // cleanup used the bound tabId only
+  });
+  test('cleanup makes one bounded locate for an unbound popup and then proves it parked', async () => {
+    const popup = fakePopupPage();
+    await bindNativeWindow(9, 99);
+    await ackLocates(() => visibility.refresh(popup), { windowId: 9, tabId: 90 });
+    expect(visibility.isPageVisible(popup)).toBe(false);
+    expect(popup.evaluate).toHaveBeenCalled();
+    expect(popup.title).toBe('Popup target');
+    // The fallback locate bound the page: the next refresh needs no evaluate.
+    const evaluates = popup.evaluate.mock.calls.length;
+    await ackLocates(() => visibility.refresh(popup), { windowId: 9, tabId: 90 });
+    expect(visibility.isPageVisible(popup)).toBe(false);
+    expect(popup.evaluate.mock.calls.length).toBe(evaluates);
+  });
+  test('a located popup whose exact native window is on the main display stays protected', async () => {
+    const popup = fakePopupPage();
+    await bindNativeWindow(9, 99);
+    nativeWindows = nativeWindows.map(w => w.number === 99 ? { ...w, left: 40, top: 40 } : w);
+    await ackLocates(() => visibility.refresh(popup), { windowId: 9, tabId: 90 });
+    expect(visibility.isPageVisible(popup)).toBe(true);
+  });
+  test('a hung popup evaluate fails the bounded locate closed instead of blocking cleanup', async () => {
+    const popup = fakePopupPage({ hang: true });
+    const started = Date.now();
+    await visibility.refresh(popup); // locate deadline is min(timeoutMs=2000, 3000)
+    expect(Date.now() - started).toBeLessThan(5000);
+    expect(visibility.isPageVisible(popup)).toBe(true);
+    expect(popup.evaluate).toHaveBeenCalledTimes(1);
+  }, 15000);
 });

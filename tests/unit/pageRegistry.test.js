@@ -261,6 +261,34 @@ describe('observed popup lineage', () => {
   });
 });
 
+describe('popup visibility binding at registration', () => {
+  test('popup registration asks the visibility controller to locate only the popup page', () => {
+    const f = fixture();
+    const locatePage = jest.fn(async () => true);
+    f.session.visibility = { locatePage };
+    const opener = f.newPage();
+    f.registry.registerPage(f.session, f.userId, opener, 'task-a');
+    const popup = fakePage('https://example.test/popup');
+    opener.emit('popup', popup);
+    expect(locatePage).toHaveBeenCalledTimes(1);
+    expect(locatePage).toHaveBeenCalledWith(popup);
+    // Ordinary context pages are not located at registration.
+    f.newPage();
+    expect(locatePage).toHaveBeenCalledTimes(1);
+    f.expectOneIdPerPage();
+  });
+
+  test('a rejecting locatePage never blocks popup registration', () => {
+    const f = fixture();
+    f.session.visibility = { locatePage: async () => { throw Error('locate failed'); } };
+    const opener = f.newPage();
+    const popup = fakePage('https://example.test/popup');
+    expect(() => opener.emit('popup', popup)).not.toThrow();
+    expect(findTabByPage(f.session, popup)).not.toBeNull();
+    f.expectOneIdPerPage();
+  });
+});
+
 describe('GET /tabs lists each page once', () => {
   const source = readFileSync(new URL('../../server.js', import.meta.url), 'utf8');
   const start = source.indexOf("app.get('/tabs', async");

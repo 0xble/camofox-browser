@@ -89,7 +89,11 @@ regression passes against the same failure mode, then retire the local repair.
   or queued locks, creation leases and downloads remain protected. Visibility,
   activity and transition fences are rechecked after asynchronous native reads.
   Parking refresh resolves the current Firefox window and reads its already
-  bound native number; it never binds, moves or resizes a window. Unbound,
+  bound native number; it never binds, moves or resizes a window. Managed
+  popups are located against their classification-parked window at
+  registration (bounded, fire-and-forget), with one bounded, per-page-deduped
+  locate retry inside cleanup; a hung evaluate, timeout or ambiguity fails
+  closed for that page only. Unbound,
   missing, ambiguous or non-parked native geometry fails closed.
   Managed popups use the same task registry and safety checks as their opener;
   background page events and passive tab lists do not renew agent activity.

@@ -328,7 +328,8 @@ for (const sweep of [false, true]) test(`unknown popup with hung evaluate cannot
       method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
     })).json();
     // Simulate extension IPC, not a browser: only the idle sibling is known.
-    // The popup's page.evaluate would never settle if cleanup tried marking it.
+    // The popup's page.evaluate never settles; cleanup may attempt one
+    // bounded locate on it but must fail closed well within any real wait.
     f.old.page.evaluate = spy(() => new Promise(() => {}));
     const creating = visibility.newPage({ pages: () => [f.idle.page] });
     const create = (await (await fetch(endpoint)).json()).commands.find(c => c.action === 'create');
@@ -353,14 +354,78 @@ for (const sweep of [false, true]) test(`unknown popup with hung evaluate cannot
       let timer;
       const completed = sweep ? f.deps.cleanIdleSharedSessions() : f.run();
       await Promise.race([completed, new Promise((_, reject) => {
-        timer = setTimeout(() => reject(Error('cleanup stalled on the hung popup')), 750);
+        timer = setTimeout(() => reject(Error('cleanup stalled on the hung popup')), 2000);
       })]).finally(() => clearTimeout(timer));
       assert.equal(f.old.page.close.mock.callCount(), 0);
-      assert.equal(f.old.page.evaluate.mock.callCount(), 0, 'cleanup must not evaluate an unbound page');
+      assert.equal(f.old.page.evaluate.mock.callCount(), 1, 'cleanup makes at most one bounded locate attempt on an unbound page');
       assert.equal(visibility.isPageVisible(f.old.page), true, 'unknown popup stays protected');
       assert.equal(f.idle.page.close.mock.callCount(), 1, 'unknown popup must not block its idle sibling');
       assert.equal(f.latest.page.close.mock.callCount(), 0);
       if (!sweep) assert.equal(f.res.statusCode, 200);
+    } finally { stopped = true; await poller; }
+  } finally {
+    await visibility.close();
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+for (const sweep of [false, true]) test(`parking-mode managed popup bound at registration is reclaimable (sweep=${sweep})`, async () => {
+  const f = fixture();
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'camofox-bound-popup-'));
+  const display = { main: { left: 0, top: 0, width: 2048, height: 1152 },
+    park: { left: -3360, top: -2100, width: 3360, height: 2100 } };
+  let windows = [], poller;
+  const visibility = await createSharedIdentityVisibility(display, {
+    rootDir: root, timeoutMs: 1000, nativeReadback: async () => windows,
+  });
+  try {
+    const background = await fs.readFile(path.join(visibility.addon, 'background.js'), 'utf8');
+    const endpoint = JSON.parse(background.match(/const endpoint=("[^"]+")/)[1]);
+    const post = async (body, suffix = '') => (await fetch(`${endpoint}${suffix}`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
+    })).json();
+    // f.old is the managed popup: its evaluate implements the title marker
+    // the registration locate relies on. Its window was parked and natively
+    // bound by the add-on's classification when Firefox created it.
+    f.old.openerPage = f.latest.page;
+    let title = 'Popup target';
+    f.old.page.evaluate = async (_fn, arg) => {
+      if (typeof arg === 'string') { const oldTitle = title; title = arg; return oldTitle; }
+      if (arg?.marker && title === arg.marker) title = arg.previous;
+    };
+    const creating = visibility.newPage({ pages: () => [f.idle.page] });
+    const create = (await (await fetch(endpoint)).json()).commands.find(c => c.action === 'create');
+    assert.ok(create);
+    f.idle.page.url = () => create.url;
+    await post({ id: create.id, windowId: 7, tabId: 70 });
+    await creating;
+    const sibling = await post({ windowId: 7 }, '/geometry');
+    windows = [{ number: 77, ...sibling.bounds }];
+    assert.equal((await post({ windowId: 7 }, '/geometry')).number, 77);
+    const popupWindow = await post({ windowId: 9 }, '/geometry');
+    windows = [...windows, { number: 99, ...popupWindow.bounds }];
+    assert.equal((await post({ windowId: 9 }, '/geometry')).number, 99);
+    f.session.visibility = visibility;
+    let stopped = false;
+    poller = (async () => {
+      while (!stopped) {
+        const state = await (await fetch(endpoint)).json();
+        for (const command of state.commands) if (command.action === 'locate')
+          await post({ id: command.id, ...(command.marker || command.tabId === 90
+            ? { windowId: 9, tabId: 90 } : { windowId: 7, tabId: 70 }) });
+        await new Promise(resolve => setTimeout(resolve, 1));
+      }
+    })();
+    try {
+      // Registration-time binding through the existing locate/park proof.
+      assert.equal(await visibility.locatePage(f.old.page), true);
+      assert.equal(title, 'Popup target');
+      if (sweep) await f.deps.cleanIdleSharedSessions();
+      else await f.run();
+      assert.equal(f.old.page.close.mock.callCount(), 1, 'bound parked popup must be reclaimable');
+      assert.equal(f.latest.page.close.mock.callCount(), 0);
+      if (sweep) assert.equal(f.idle.page.close.mock.callCount(), 1);
+      else assert.equal(f.res.statusCode, 200);
     } finally { stopped = true; await poller; }
   } finally {
     await visibility.close();
