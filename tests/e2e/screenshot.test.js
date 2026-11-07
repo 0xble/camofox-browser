@@ -1,4 +1,5 @@
 import { createClient } from '../helpers/client.js';
+import { withFreshServer } from '../helpers/startServer.js';
 import { getSharedEnv } from './sharedEnv.js';
 
 describe('Screenshot', () => {
@@ -136,11 +137,10 @@ describe('Screenshot', () => {
   });
 
   test('screenshot of non-existent tab returns 410 JSON error', async () => {
-    const client = createClient(serverUrl);
-
-    try {
+    await withFreshServer(async freshServerUrl => {
+      const client = createClient(freshServerUrl);
       const res = await fetch(
-        `${serverUrl}/tabs/00000000-0000-0000-0000-000000000000/screenshot?userId=${client.userId}`
+        `${freshServerUrl}/tabs/00000000-0000-0000-0000-000000000000/screenshot?userId=${client.userId}`
       );
 
       expect(res.status).toBe(410);
@@ -148,9 +148,15 @@ describe('Screenshot', () => {
 
       const data = await res.json();
       expect(data.error).toBeDefined();
-    } finally {
-      await client.cleanup();
-    }
+      expect(data.code).toBe('browser_restarted');
+
+      const invalidRes = await fetch(
+        `${freshServerUrl}/tabs/non-existent-tab/screenshot?userId=${client.userId}`
+      );
+      expect(invalidRes.status).toBe(404);
+      expect(invalidRes.headers.get('content-type')).toContain('application/json');
+      expect(await invalidRes.json()).toEqual({ error: 'Tab not found' });
+    });
   });
 
   test('screenshot works after navigation', async () => {

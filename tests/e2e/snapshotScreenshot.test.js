@@ -1,4 +1,5 @@
 import { createClient } from '../helpers/client.js';
+import { withFreshServer } from '../helpers/startServer.js';
 import { PNG } from 'pngjs';
 import { getSharedEnv } from './sharedEnv.js';
 
@@ -195,14 +196,14 @@ describe('Snapshot with includeScreenshot', () => {
   });
 
   test('non-existent tab returns 410 even with includeScreenshot', async () => {
-    const client = createClient(serverUrl);
-
-    try {
+    await withFreshServer(async freshServerUrl => {
+      const client = createClient(freshServerUrl);
       await expect(
         client.getSnapshot('00000000-0000-0000-0000-000000000000', { includeScreenshot: true })
-      ).rejects.toMatchObject({ status: 410 });
-    } finally {
-      await client.cleanup();
-    }
+      ).rejects.toMatchObject({ status: 410, data: { code: 'browser_restarted' } });
+      await expect(
+        client.getSnapshot('non-existent-tab', { includeScreenshot: true })
+      ).rejects.toMatchObject({ status: 404, data: { error: 'Tab not found' } });
+    });
   });
 });

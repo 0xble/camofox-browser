@@ -61,16 +61,21 @@ describe('virtual display selection and launch', () => {
     expect(execute.mock.calls[0][2]).toMatchObject({ timeout: 5000, env: { PATH: '/usr/bin:/bin', HOME: os.homedir() } });
     expect(Object.keys(execute.mock.calls[0][2].env)).toEqual(['PATH', 'HOME']);
   });
-  test('headed shared launch suppresses foreground and keeps the existing indicator/extension launch path', async () => {
+  test('headed shared launch suppresses foreground and installs its generated helper once', async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'park-launch-'));
-    const firefox = { launchPersistentContext: jest.fn(async () => ({})) };
+    const firefox = { launchPersistentContext: jest.fn(async () => new EventEmitter()) };
+    const install = jest.fn(async () => []);
+    const prepareRuntimeAddons = jest.fn(async () => ({ args: [], firefoxUserPrefs: {}, install, close: async () => {} }));
     try {
-      await launchSharedIdentityContext(root, { headed: true, visibility: { addon: '/fake/parking-addon' }, firefox,
+      await launchSharedIdentityContext(root, { headed: true, visibility: { addon: '/fake/parking-addon' }, firefox, prepareRuntimeAddons,
         discoverMainDisplay: testMainDisplay, launchOptions: async value => withWindowConfig(value), os: { platform: () => 'darwin' }, getHostOS: () => 'macos',
         config: {}, events: { emitAsync: async () => {} } });
       expect(firefox.launchPersistentContext).toHaveBeenCalledTimes(1);
       expect(firefox.launchPersistentContext.mock.calls[0][1]).toMatchObject({ headless: false,
-        ignoreDefaultArgs: ['-foreground'], addons: ['/fake/parking-addon'], config: { allowAddonNewtab: true } });
+        ignoreDefaultArgs: ['-foreground'], config: { allowAddonNewtab: true } });
+      expect(firefox.launchPersistentContext.mock.calls[0][1].addons).toBeUndefined();
+      expect(prepareRuntimeAddons).toHaveBeenCalledWith(['/fake/parking-addon'], { platform: 'darwin', profilePath: root });
+      expect(install).toHaveBeenCalledTimes(1);
     } finally { await fs.rm(root, { recursive: true, force: true }); }
   });
   test('initial profile geometry is parked without overwriting unrelated UI state', async () => {

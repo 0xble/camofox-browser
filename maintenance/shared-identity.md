@@ -56,6 +56,32 @@ release/reopen, sibling form input, native refusal, and protected human siblings
 
 `shared-identity-launch.js` passes BrowserForge's camelCase `screen.maxWidth/maxHeight` bounded to main and (when present) parking displays. The applied `CAMOU_CONFIG_N` chunks after launch hooks supply `window.outerWidth/outerHeight` for xulstore and the visibility controller; never stretch the native window to a monitor. BrowserForge can return an outer window larger than its constrained screen, especially on a small virtual monitor. Fit the sampled aspect ratio through Camoufox's `window` option and regenerate, bounded to eight attempts; do not clamp only the native bounds or impose one global size. Headless/warm-up launches are unchanged. Topology refresh retains the selected size; legacy parking signatures remain small unique decrements of that size. A Camoufox window can refuse even a one-pixel resize, so headed fingerprint-sized parking binds by the same reversible motion proof as main-display handoff, keeping every physical resize request at the applied outer size. Ambiguous motion stays fail-closed. Main-display proofs retain the motion challenge and exact CGWindow binding below.
 
+### Generated Runtime Helpers
+
+Camoufox beta.41's per-window config-addon installation creates overlapping
+visibility-controller backgrounds. Exclude generated visibility and headed
+identity-indicator helpers from the Camoufox addon input. Install the complete
+helper collection once per headed persistent context through Firefox's shipped
+RDP addons actor before returning the context. Never install them during
+headless warmup. Preserve ordinary/default addons and signed profile extensions.
+The installer appends only its 3 RDP enable/no-prompt prefs to profile `user.js`
+before headed launch, because Playwright applies `firefoxUserPrefs` after Firefox
+has processed command-line startup. Cleanup restores the existing file's bytes,
+inode, permissions, ownership and access/modification times, or removes the file
+if it was absent. Cleanup failure rejects the launch and closes the context.
+Use a short private launch-owned Unix-listener directory, bounded framed-protocol
+installation, disconnect and unlink before return, and close the actual context
+on failure while preserving uncertain profile ownership. Unsupported Unix-listener
+platforms fail explicitly. No new identity locks, queues or create serialization.
+Native matching and rejected acknowledgement rollback remain unchanged.
+
+Regression: `runtimeAddons.test.js`, `runtimeAddonLaunch.test.js`, existing
+identity/geometry/visibility suites, and the signed disposable native harness.
+The latter requires 1 background throughout serial plus 2-/3-way concurrent
+creation, 6 surviving pages, unique exact native bindings, screenshots, retained
+inputs/PID/siblings, main placement and release. See
+[installation discriminator and verification](../docs/verification/native-window-binding.md#installation-lifetime).
+
 ### Native main-display app-hidden handoff
 
 - AppKit `hidden=false`/`active=true` proves application state, not physical

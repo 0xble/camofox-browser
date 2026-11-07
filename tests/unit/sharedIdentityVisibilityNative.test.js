@@ -88,7 +88,7 @@ describe('native readback in the add-on (Camoufox-spoofed windows.get)', () => {
   let root, visibility, context, windows, intervals, nextId, browser, readback, onCreated, currentDisplay;
   // Camoufox spoofs windows.get: it always reports the requested park geometry.
   // `native` is what CGWindowList would report.
-  async function setup({ failReads = 0, showOnly = false, geometryReadMs = 0, windowSize = null, topology = display } = {}) {
+  async function setup({ failReads = 0, showOnly = false, geometryReadMs = 0, windowSize = null, topology = display, diagnostics = null } = {}) {
     let now = Date.now();
     currentDisplay = showOnly ? { main: topology.main, park: null } : topology;
     root = await fs.mkdtemp(path.join(os.tmpdir(), 'park-native-'));
@@ -121,7 +121,7 @@ describe('native readback in the add-on (Camoufox-spoofed windows.get)', () => {
         return null;
       }), update: async () => {} },
     };
-    visibility = await createSharedIdentityVisibility(currentDisplay, { showOnly, nativeReadback: readback, rootDir: root, timeoutMs: geometryReadMs ? 10000 : 2000, discoverDisplay: async () => currentDisplay });
+    visibility = await createSharedIdentityVisibility(currentDisplay, { showOnly, nativeReadback: readback, rootDir: root, timeoutMs: geometryReadMs ? 10000 : 2000, discoverDisplay: async () => currentDisplay, diagnostics });
     if (windowSize) visibility.setWindowSize(windowSize);
     const script = await fs.readFile(path.join(visibility.addon, 'background.js'), 'utf8');
     vm.runInNewContext(script, { browser, fetch, setTimeout,
@@ -130,6 +130,33 @@ describe('native readback in the add-on (Camoufox-spoofed windows.get)', () => {
     await visibility.attach(context);
   }
   afterEach(async () => { for (const id of intervals) clearInterval(id); await visibility?.close(); await fs.rm(root, { recursive: true, force: true }); });
+  test('opt-in bounded diagnostics observe one worker and one execution per concurrent create', async () => {
+    const records = [];
+    await setup({ diagnostics: record => records.push(record) });
+    await Promise.all(Array.from({ length: 3 }, () => visibility.newPage(context)));
+    const deadline = Date.now() + 1000;
+    while (records.filter(r => r.event === 'ack').length < 3 && Date.now() < deadline)
+      await new Promise(resolve => setTimeout(resolve, 5));
+    expect(records.filter(r => r.event === 'start')).toHaveLength(1);
+    const creates = records.filter(r => r.event === 'create');
+    expect(creates).toHaveLength(3);
+    expect(new Set(creates.map(r => r.commandId)).size).toBe(3);
+    expect(new Set(records.map(r => r.instance)).size).toBe(1);
+    expect(records.filter(r => r.event === 'ack').map(r => r.accepted)).toEqual([true, true, true]);
+    const script = await fs.readFile(path.join(visibility.addon, 'background.js'), 'utf8');
+    const endpoint = script.match(/const endpoint="([^"]+)"/)[1];
+    const before = records.length;
+    const invalid = await fetch(endpoint, { method: 'POST', body: JSON.stringify({ diagnostic: { event: 'invalid', instance: 'fixture' } }) });
+    expect(invalid.status).toBe(400);
+    expect(records).toHaveLength(before);
+    // The 256-record budget is independent of operational command completion.
+    for (let i = records.length + 1; i < 256; i++) {
+      await fetch(endpoint, { method: 'POST', body: JSON.stringify({ diagnostic: { event: 'start', instance: 'fixture' } }) });
+    }
+    const overflow = await fetch(endpoint, { method: 'POST', body: JSON.stringify({ diagnostic: { event: 'start', instance: 'fixture' } }) });
+    expect(overflow.status).toBe(400);
+    expect(visibility.capability().parking).toBe(true);
+  });
   // The startup snapshot must also pass for windows Camoufox restored at launch.
   test.each([
     ['removed', [{ name: 'Studio', x: 0, y: 0, width: 2048, height: 1152 }]],

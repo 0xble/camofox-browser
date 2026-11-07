@@ -1,4 +1,5 @@
 import { createClient } from '../helpers/client.js';
+import { withFreshServer } from '../helpers/startServer.js';
 import { getSharedEnv } from './sharedEnv.js';
 
 describe('Snapshot and Links', () => {
@@ -160,14 +161,16 @@ describe('Snapshot and Links', () => {
   });
   
   test('snapshot for non-existent tab returns 410', async () => {
-    const client = createClient(serverUrl);
-    
-    try {
+    await withFreshServer(async freshServerUrl => {
+      const client = createClient(freshServerUrl);
       await expect(client.getSnapshot('00000000-0000-0000-0000-000000000000')).rejects.toMatchObject({
-        status: 410
+        status: 410,
+        data: { code: 'browser_restarted' },
       });
-    } finally {
-      await client.cleanup();
-    }
+      await expect(client.getSnapshot('non-existent-tab')).rejects.toMatchObject({
+        status: 404,
+        data: { error: 'Tab not found' },
+      });
+    });
   });
 });
