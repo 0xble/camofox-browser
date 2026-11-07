@@ -31,15 +31,20 @@ semantics are unchanged.
 
 The temporary RDP listener uses a short launch-owned directory under TMPDIR,
 explicitly mode 0700. This matters because Firefox creates its Unix socket as
-0666. Socket paths over 103 bytes fail before launch. Only launch-scoped RDP
-enable/no-prompt preferences are added. There is no TCP listener, signature
-bypass or OS grant. These exact 3 prefs are appended to profile `user.js` before
-headed launch so Firefox sees them during command-line startup, before
-Playwright's later `Browser.enable` applies `firefoxUserPrefs`. Cleanup removes
-only the appended bytes, preserving an existing file and its metadata, or
-removes the launch-created file. Unrelated edits during launch are left intact
-and cause cleanup to fail. Cleanup failure closes the context and rejects the
-launch. Headless and warmup launches never prepare these startup prefs.
+0666. Socket paths over 103 bytes fail before launch. No TCP listener, signature
+bypass or OS grant is requested. Before headed launch, the installer appends
+`devtools.chrome.enabled=true`, `devtools.debugger.remote-enabled=true` and
+`devtools.debugger.prompt-connection=false` to profile `user.js`, so Firefox
+sees them before Playwright's later `Browser.enable` applies `firefoxUserPrefs`.
+Cleanup restores only `user.js`, preserving an existing file and its metadata,
+or removes the launch-created file. Firefox copies these preferences into
+`prefs.js`, which cleanup does not restore. They persist in the profile and can
+be inherited by later headless launches. In particular, the chrome-privileged
+Browser Console remains enabled. Unrelated `user.js` edits during launch are
+left intact and cause cleanup to fail. Cleanup failure closes the context and
+rejects the launch. A process kill or host crash before cleanup can leave the
+appended suffix in `user.js`. A later launch preserves that existing suffix.
+Headless and warmup launches never append these startup prefs themselves.
 A single deadline bounds connect, greeting, actor discovery
 and all helper installs. Split/multiple byte-framed packets, actor errors, EOF,
 browser exit and malformed responses are handled. The client disconnects and
@@ -47,9 +52,11 @@ the listener pathname and directory are removed before returning the context.
 Installer failure closes the created context. Uncertain closure preserves
 `profileOwnershipUnconfirmed` and the original failure.
 
-The macOS/Linux Unix listener is supported. Generated helpers on unsupported
-platforms fail explicitly before launch rather than silently returning an
-uncontrolled context.
+The macOS/Linux Unix listener is supported. Native Windows headed shared
+identities with a generated indicator or visibility helper now fail before
+browser launch. This regresses the previous Windows indicator path through
+Camoufox's addon input. Headless launches and headed launches without generated
+helpers retain their existing paths. No Windows runtime installer is provided.
 
 ## Geometry And Identity
 

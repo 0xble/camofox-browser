@@ -68,12 +68,21 @@ The installer appends only its 3 RDP enable/no-prompt prefs to profile `user.js`
 before headed launch, because Playwright applies `firefoxUserPrefs` after Firefox
 has processed command-line startup. Cleanup restores the existing file's bytes,
 inode, permissions, ownership and access/modification times, or removes the file
-if it was absent. Cleanup failure rejects the launch and closes the context.
+if it was absent. This restores `user.js`, not the whole profile. Firefox copies
+the 3 preferences into `prefs.js` and they persist after cleanup, including
+`devtools.chrome.enabled=true` for the chrome-privileged Browser Console. Later
+headless launches can inherit them. A process kill or host crash before cleanup
+can leave the appended `user.js` suffix, which later launches preserve as
+existing content. Cleanup failure rejects the launch and closes the context.
 Use a short private launch-owned Unix-listener directory, bounded framed-protocol
 installation, disconnect and unlink before return, and close the actual context
-on failure while preserving uncertain profile ownership. Unsupported Unix-listener
-platforms fail explicitly. No new identity locks, queues or create serialization.
-Native matching and rejected acknowledgement rollback remain unchanged.
+on failure while preserving uncertain profile ownership. Native Windows headed
+shared identities with a generated indicator or visibility helper now fail
+before browser launch, replacing the previous Windows indicator path through
+Camoufox's addon input. Headless launches and headed launches without generated
+helpers are unchanged. No Windows runtime installer is provided. No new identity
+locks, queues or create serialization. Native matching and rejected
+acknowledgement rollback remain unchanged.
 
 Regression: `runtimeAddons.test.js`, `runtimeAddonLaunch.test.js`, existing
 identity/geometry/visibility suites, and the signed disposable native harness.
