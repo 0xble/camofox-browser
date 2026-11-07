@@ -88,9 +88,10 @@ describe('headed shared identity fingerprint geometry', () => {
       const snapshot = await (await fetch(endpoint)).json();
       expect(snapshot.display.mainBounds).toMatchObject({ width: 1440, height: 920, focused: true });
       expect(snapshot.display.parkBounds).toMatchObject({ width: 1440, height: 920, focused: false });
-      return {};
+      return { once() {}, removeListener() {} };
     }) };
     await launchSharedIdentityContext(root, { headed: true, visibility, launchOptions, firefox,
+      prepareRuntimeAddons: async () => ({ args: [], firefoxUserPrefs: {}, install: async () => [], close: async () => {} }),
       os: { platform: () => 'darwin' }, getHostOS: () => 'macos', config: {},
       events: { emitAsync: async (_event, value) => { value.options.env = optionsWithSize({}, 1440, 920).env; } },
     });

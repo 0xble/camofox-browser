@@ -1,100 +1,123 @@
-# Native window binding verification
+# Native Window Binding Verification
 
-## Root cause
+## Installation Lifetime
 
-Baseline `0b632221d0b85d75b912dcbcac24ed71805b78a6` failed both native
-handoff cases with `native window identity could not be bound` on a disposable
-copy of the signed 158.0.1-beta.41 app. Absolute geometry compared two different
-coordinate spaces. The session was locked (`CGSSessionScreenIsLocked: true`),
-with `loginwindow` frontmost. WindowServer's locked-desktop transform affected
-CGWindow visual bounds, not AppKit or WebExtension requested coordinates.
+Camoufox beta.41 installs `config.addons` from each native window's
+`browser-init.js`. Installing the generated visibility controller that way
+creates overlapping background executions. A copied signed app trace showed
+multiple workers processing the same command, overlapping native challenges,
+and an accepted create followed by a rejected duplicate acknowledgement whose
+rollback closed the accepted page. This is an installation-lifetime defect.
+The trace does not establish that locking caused it.
 
-A **plain NSWindow**, with no Camoufox, fingerprint, Juggler, or web content,
-reproduced the same scale: AppKit frame 1280x900 yielded CGWindow 1153x811.
-AppKit x = 40, 140, 240, 40 produced native x = 138, 228, 318, 138.
-The measured displacement scale was exactly 0.9, stable across these samples
-and repeated browser launches. Main NSScreen was 2048x1152 with backingScale=2;
-DeskPad was 1280x960 with backingScale=1. The main-display x offset agrees with
-a 0.9 transform around the display center (102.4 points, then integer bounds).
-Pixel rounding accounts for dimensions one point larger than exact 0.9x.
-This is not a CSS/devicePixelRatio conversion. Native browser output below has
-devicePixelRatio=1 and the same 1280x900 -> 1153x811 mismatch after reopen.
+The parent compared the original installation route with a once-installed
+controller on disposable copies of the same signed app and fresh profiles,
+without changing display or lock state. The original route failed. The
+once-installed probe passed the 860x540 parking harness in 23.8 seconds with
+1 background, 6 unique create commands, 6 surviving pages producing real
+screenshots, and 6 distinct native numbers. Inputs seeded before subsequent
+window creates survived every open/release cycle. That probe demonstrates the
+installation discriminator, not acceptance of a later source revision or
+locked-desktop behavior.
 
-Do not hardcode 0.9: it is an observed desktop-state transform, not a guaranteed
-engine or platform constant. An exact-target out-and-back motion challenge
-binds the stable PID-owned CGWindow number without assuming its scale/origin.
+`shared-identity-launch.js` excludes generated helpers from the `launchOptions`
+addon input. Headed visibility and identity-indicator helpers share one
+once-per-context installation through Firefox's shipped RDP addons actor,
+after the persistent context launches and before it is returned. Ordinary
+Camoufox/default addons, signed profile extensions, extension warmup, fingerprint,
+locale and timezone retain their existing paths. Headless and warmup contexts
+never install generated helpers. The existing native matchers and rejection
+semantics are unchanged.
 
-### Independent AppKit probe
+The temporary RDP listener uses a short launch-owned directory under TMPDIR,
+explicitly mode 0700. This matters because Firefox creates its Unix socket as
+0666. Socket paths over 103 bytes fail before launch. No TCP listener, signature
+bypass or OS grant is requested. Before headed launch, the installer appends
+`devtools.chrome.enabled=true`, `devtools.debugger.remote-enabled=true` and
+`devtools.debugger.prompt-connection=false` to profile `user.js`, so Firefox
+sees them before Playwright's later `Browser.enable` applies `firefoxUserPrefs`.
+Cleanup restores only `user.js`, preserving an existing file and its metadata,
+or removes the launch-created file. Firefox copies these preferences into
+`prefs.js`, which cleanup does not restore. They persist in the profile and can
+be inherited by later headless launches. In particular, the chrome-privileged
+Browser Console remains enabled. Unrelated `user.js` edits during launch are
+left intact and cause cleanup to fail. Cleanup failure closes the context and
+rejects the launch. A process kill or host crash before cleanup can leave the
+appended suffix in `user.js`. A later launch preserves that existing suffix.
+Headless and warmup launches never append these startup prefs themselves.
+A single deadline bounds connect, greeting, actor discovery
+and all helper installs. Split/multiple byte-framed packets, actor errors, EOF,
+browser exit and malformed responses are handled. The client disconnects and
+the listener pathname and directory are removed before returning the context.
+Installer failure closes the created context. Uncertain closure preserves
+`profileOwnershipUnconfirmed` and the original failure.
 
-Run this source with `osascript -l JavaScript` from a scratch file. It creates,
-moves, inspects and terminates only its own disposable window; it does not change
-the locked session or other apps. Capture the selected window by number, not title.
+The macOS/Linux Unix listener is supported. Native Windows headed shared
+identities with a generated indicator or visibility helper now fail before
+browser launch. This regresses the previous Windows indicator path through
+Camoufox's addon input. Headless launches and headed launches without generated
+helpers retain their existing paths. No Windows runtime installer is provided.
 
-```js
-ObjC.import('AppKit');ObjC.import('CoreGraphics');ObjC.bindFunction('CGWindowListCopyWindowInfo',['id',['uint32','uint32']]);
-const app=$.NSApplication.sharedApplication;app.setActivationPolicy(0);
-const win=$.NSWindow.alloc.initWithContentRectStyleMaskBackingDefer($.NSMakeRect(40,212,1280,900),15,2,false);
-win.title='Disposable Window Units Probe';win.orderFrontRegardless;app.activateIgnoringOtherApps(true);
-for(const x of [40,140,240,40]){win.setFrameDisplay($.NSMakeRect(x,190,1280,900),true);$.NSRunLoop.currentRunLoop.runUntilDate($.NSDate.dateWithTimeIntervalSinceNow(0.3));console.log(JSON.stringify({frame:win.frame,number:win.windowNumber,windows:(ObjC.deepUnwrap($.CGWindowListCopyWindowInfo(17,0))||[]).filter(w=>w.kCGWindowNumber===Number(win.windowNumber))}));}
-app.terminate(null);
-```
+## Geometry And Identity
 
-## Signed beta.41 native harness
+Native readback uses owner PID, native window number, layer and bounds, never
+native titles. Bind the exact Firefox window by reversible horizontal motion,
+then retain that exact native number for final main/parking checks. Three-sample
+app-hidden handoff requires no moving sibling. Five-sample sized parking uses
+unequal excursions to distinguish independent concurrent movers. Missing,
+new, duplicate or ambiguous native numbers fail closed. No singleton, title,
+sibling or approximate-size fallback supplies identity.
+
+AppKit/WebExtension coordinates and CGWindow visual bounds can differ. A
+historical disposable AppKit probe observed 1280x900 becoming 1153x811 and
+horizontal displacements scaled by 0.9 in that desktop state. The historical
+app-hidden signed-browser harness passed both main/off-main starts with retained
+inputs/PID and independent AppKit hide confirmation. Focus remained false while
+loginwindow owned global activation. Do not infer a fixed scale, lock causality
+for the later parking incident, or global focus from per-app frontmost order.
+
+A separate parent AppKit probe observed 860x572 yielding widths 774/775 during
+pure horizontal movement. That quantization has not been demonstrated in the
+browser incident. The once-install browser discriminator used stable 860x540
+native dimensions. Native width equality is therefore retained in this repair.
+CGWindow dimensions must not be asserted equal to the requested fingerprint.
+
+## Disposable Native Acceptance
+
+The native parking harness pins a coherent 860x540 fingerprint and seeds inputs
+before creating more windows. It exercises 1 serial, 2 concurrent and 3 concurrent
+creates, 6 unique exact native bindings, real screenshot bytes, retained PID,
+all sibling pages and inputs, native main placement and exact-number parking
+on release. Opt-in bounded diagnostics count background starts, create execution
+and command acknowledgements without rewriting generated source or changing
+operational acknowledgements. The harness requires 1 worker, 1 execution per
+create and no rejected/duplicate acknowledgements. CGWindow visual dimensions
+are recorded separately from requested AppKit/fingerprint dimensions. Cleanup
+is bounded and preserves the original failure. The existing app-hidden native
+cases retain their placement, frontmost, PID/input and independent hide checks.
 
 ```sh
-TMPDIR=/path/to/scratch \
-CAMOFOX_NATIVE_TEST_APP=/Applications/Camoufox-beta41-test.app \
+CAMOFOX_NATIVE_TEST_APP=/Applications/Camoufox.app CAMOFOX_NATIVE_TEST_PARK=1 \
 node --test tests/native/mainDisplayHandoff.mjs
 ```
 
-The harness copies the app and verifies `codesign --verify --deep --strict`
-before launching. It uses the shared production launch helper, random Camoufox
-fingerprint, en-US locale and America/Los_Angeles timezone (matching the live
-process's two non-secret identity settings). The server and live profiles are
-never used. Main/off-main starts each perform two show/release cycles.
-Assertions cover exact bound-number main placement, per-PID frontmost ordering,
-unchanged PID, target/sibling unsaved inputs, sibling preservation and independent
-AppKit `hidden:true` after every release.
+The harness copies and verifies the signed app, uses a fresh disposable profile
+and the production launch/locale/timezone helpers, and never contacts the live
+server or profiles. It uses only an existing display. It does not change lock,
+power, topology or permissions. Its socket directory is deliberately shorter
+than the signed-app/profile scratch path. Existing already-running contexts are
+not modified by source publication or temporary-helper installation.
 
-Global activation was **not** available while the Mac was locked. The API
-truthfully returned `focused:false`; native `frontmost:true` means the exact
-window is first among its own PID's windows, not above loginwindow. No unlock,
-permission grant or live service change was attempted.
+Protocol tests use a real local Unix socket and framed messages. Launch tests
+cover helper exclusion, default-addon preservation, readiness ordering, warmup
+and headless exclusion, installation failures, listener cleanup and uncertain
+context ownership:
 
-Captured output:
-
-```text
-{"launch":{"locale":"en-US","timezoneId":"America/Los_Angeles","fingerprint":{"screen.width":1440,"screen.height":900,"screen.availWidth":1440,"screen.availHeight":744,"window.outerWidth":1440,"window.outerHeight":744,"screen.colorDepth":30,"screen.pixelDepth":30,"window.screenX":0,"window.screenY":0,"window.history.length":2,"locale:region":"US","locale:language":"en","locale:script":"Latn"}}}
-{"pid":12191,"attempt":0,"shown":{"visible":true,"focused":false},"nativeProof":{"parked":false,"onMain":true,"frontmost":true,"bounds":{"left":40,"top":40,"width":1280,"height":900,"focused":true,"state":"normal"},"number":33102,"actual":{"number":33102,"left":138,"top":93,"width":1297,"height":671}},"main":{"left":0,"top":0,"width":2048,"height":1152},"windows":[{"number":33102,"left":138,"top":93,"width":1297,"height":671},{"number":33103,"left":145,"top":124,"width":1297,"height":670},{"number":33101,"left":106,"top":84,"width":1296,"height":671}],"css":{"outerWidth":1440,"outerHeight":744,"screenX":0,"screenY":0,"devicePixelRatio":1},"offMainFixture":false}
-{"pid":12191,"attempt":0,"released":{"hidden":true,"active":false,"activated":false}}
-{"pid":12191,"attempt":1,"shown":{"visible":true,"focused":false},"nativeProof":{"parked":false,"onMain":true,"frontmost":true,"bounds":{"left":40,"top":40,"width":1280,"height":900,"focused":true,"state":"normal"},"number":33102,"actual":{"number":33102,"left":138,"top":93,"width":1153,"height":811}},"main":{"left":0,"top":0,"width":2048,"height":1152},"windows":[{"number":33102,"left":138,"top":93,"width":1153,"height":811},{"number":33103,"left":145,"top":124,"width":1297,"height":670},{"number":33101,"left":106,"top":84,"width":1296,"height":671}],"css":{"outerWidth":1280,"outerHeight":900,"screenX":0,"screenY":0,"devicePixelRatio":1},"offMainFixture":false}
-{"pid":12191,"attempt":1,"released":{"hidden":true,"active":false,"activated":false}}
-✔ app-hidden handoff preserves inputs and PID (start off-main=false) (28603.621833ms)
-{"launch":{"locale":"en-US","timezoneId":"America/Los_Angeles","fingerprint":{"screen.availTop":30,"screen.width":3440,"screen.height":1440,"screen.availWidth":3440,"screen.availHeight":1410,"window.outerWidth":3440,"window.outerHeight":1410,"screen.colorDepth":30,"screen.pixelDepth":30,"window.screenX":0,"window.screenY":0,"window.history.length":3,"locale:region":"US","locale:language":"en","locale:script":"Latn"}}}
-{"pid":18527,"attempt":0,"shown":{"visible":true,"focused":false},"nativeProof":{"parked":false,"onMain":true,"frontmost":true,"bounds":{"left":40,"top":40,"width":1280,"height":900,"focused":true,"state":"normal"},"number":33109,"actual":{"number":33109,"left":138,"top":84,"width":3097,"height":1011}},"main":{"left":0,"top":0,"width":2048,"height":1152},"windows":[{"number":33109,"left":138,"top":84,"width":3097,"height":1011},{"number":33110,"left":120,"top":84,"width":3097,"height":1011},{"number":33108,"left":120,"top":84,"width":3097,"height":1011}],"css":{"outerWidth":3440,"outerHeight":1122,"screenX":0,"screenY":0,"devicePixelRatio":1},"offMainFixture":true}
-{"pid":18527,"attempt":0,"released":{"hidden":true,"active":false,"activated":false}}
-{"pid":18527,"attempt":1,"shown":{"visible":true,"focused":false},"nativeProof":{"parked":false,"onMain":true,"frontmost":true,"bounds":{"left":40,"top":40,"width":1280,"height":900,"focused":true,"state":"normal"},"number":33109,"actual":{"number":33109,"left":138,"top":93,"width":1153,"height":811}},"main":{"left":0,"top":0,"width":2048,"height":1152},"windows":[{"number":33109,"left":138,"top":93,"width":1153,"height":811},{"number":33110,"left":120,"top":84,"width":3097,"height":1011},{"number":33108,"left":102,"top":84,"width":1844,"height":1011}],"css":{"outerWidth":1280,"outerHeight":900,"screenX":0,"screenY":0,"devicePixelRatio":1},"offMainFixture":true}
-{"pid":18527,"attempt":1,"released":{"hidden":true,"active":false,"activated":false}}
-✔ app-hidden handoff preserves inputs and PID (start off-main=true) (29677.098667ms)
-ℹ tests 2
-ℹ suites 0
-ℹ pass 2
-ℹ fail 0
-ℹ cancelled 0
-ℹ skipped 0
-ℹ todo 0
-ℹ duration_ms 58668.161917
+```sh
+node --experimental-vm-modules node_modules/.bin/jest --runInBand \
+  tests/unit/runtimeAddons.test.js tests/unit/runtimeAddonLaunch.test.js
 ```
 
-## Local verification and review
-
-- `npm ci`: passed.
-- Full Jest unit command (`node --experimental-vm-modules node_modules/.bin/jest --testPathPatterns=tests/unit --forceExit`): 112 suites passed; 1550 tests passed, 2 skipped.
-- Focused native binding/addon suites: 81 tests passed.
-- `node --test tests/unit/sharedIdentityHidden.test.js`: 45 passed.
-- Native signed-app harness above: 2 passed, 0 failed.
-- Independent read-only review approved the final production/test candidate after
-  resolving sibling-scaling, bounded-readback, cancellation and transient-retry
-  findings. Review is not an unlocked-desktop focus claim.
-
-No deployment or live service/profile mutation is included.
+Qualification requires signed native acceptance, the full repository gate and
+exact-candidate review. Source verification does not imply installation,
+activation, no-ScreenRecording proof or lock-state causality.

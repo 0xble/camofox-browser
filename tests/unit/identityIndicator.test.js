@@ -3,6 +3,7 @@ import { testMainDisplay, withWindowConfig } from '../helpers/sharedLaunchGeomet
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { EventEmitter } from 'node:events';
 import {
   INDICATOR_PALETTE, contrastRatio, identityIndicator, indicatorAddonFiles, writeIndicatorAddon,
 } from '../../lib/identity-indicator.js';
@@ -81,15 +82,18 @@ describe('identity indicator table', () => {
 describe('indicator at launch', () => {
   let profile;
   const launched = [];
-  const firefox = { launchPersistentContext: jest.fn(async (_profile, options) => { launched.push(options); return { on() {}, close: async () => {} }; }) };
+  const firefox = { launchPersistentContext: jest.fn(async (_profile, options) => { launched.push(options); return new EventEmitter(); }) };
+  const install = jest.fn(async () => []);
+  const prepareRuntimeAddons = jest.fn(async () => ({ args: [], firefoxUserPrefs: {}, install, close: async () => {} }));
   const launch = (headed, indicator) => launchSharedIdentityContext(profile, {
-    headed, indicator, firefox, discoverMainDisplay: testMainDisplay, launchOptions: async options => withWindowConfig(options), os: { platform: () => 'darwin' },
+    headed, indicator, firefox, prepareRuntimeAddons, discoverMainDisplay: testMainDisplay, launchOptions: async options => withWindowConfig(options), os: { platform: () => 'darwin' },
     getHostOS: () => 'macos', config: {}, events: { emitAsync: async () => {} },
   });
 
   beforeEach(async () => {
     profile = await fs.mkdtemp(path.join(os.tmpdir(), 'indicator-profile-'));
     launched.length = 0;
+    prepareRuntimeAddons.mockClear(); install.mockClear();
   });
   afterEach(async () => fs.rm(profile, { recursive: true, force: true }));
 
@@ -97,8 +101,11 @@ describe('indicator at launch', () => {
     await launch(true, identityIndicator(aliases, id('a')));
     expect(launched).toHaveLength(1);
     expect(launched[0].headless).toBe(false);
-    expect(launched[0].addons).toHaveLength(1);
-    expect(await fs.readFile(path.join(launched[0].addons[0], 'background.js'), 'utf8')).toContain('#1d4ed8');
+    expect(launched[0].addons).toBeUndefined();
+    const addons = prepareRuntimeAddons.mock.calls[0][0];
+    expect(addons).toHaveLength(1);
+    expect(await fs.readFile(path.join(addons[0], 'background.js'), 'utf8')).toContain('#1d4ed8');
+    expect(install).toHaveBeenCalledTimes(1);
   });
 
   test('headless launch writes no profile geometry; unmapped headed launch has no indicator', async () => {
@@ -106,6 +113,7 @@ describe('indicator at launch', () => {
     expect(await fs.readdir(profile)).toEqual([]);
     await launch(true, null);
     expect(launched.map(options => options.addons)).toEqual([undefined, undefined]);
+    expect(prepareRuntimeAddons).not.toHaveBeenCalled();
     expect(await fs.readdir(profile)).toEqual(['xulstore.json']);
   });
 });

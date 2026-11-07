@@ -17,17 +17,59 @@ import { launchWithVisibilityFallback, createSharedIdentityVisibility, createNat
 import { findMainDisplay, findParkDisplay, listNativeWindows, windowBounds } from '../../lib/park-display-launcher.js';
 import { findBrowserPid, snapshotDarwinProcesses } from '../../lib/darwin-processes.js';
 
+async function bounded(work, label) {
+  let timer;
+  try {
+    return await Promise.race([work, new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error(label + ' timed out')), 5000);
+    })]);
+  } finally { clearTimeout(timer); }
+}
+
+async function closeFixture({ context, visibility, root, profilePath }, failure) {
+  const ownedPid = () => findBrowserPid(process.pid, snapshotDarwinProcesses() || [], profilePath);
+  try {
+    // Stop command polling before closing Firefox. Never let hung Juggler
+    // cleanup replace a binding failure with the test's outer timeout.
+    await bounded(Promise.resolve(visibility?.close()), 'visibility cleanup');
+    const closing = Promise.resolve(context?.close());
+    try { await bounded(closing, 'browser cleanup'); }
+    catch (error) {
+      const pid = ownedPid();
+      if (!pid) throw error;
+      // Only this test's descendant with this exact disposable profile.
+      process.kill(pid, 'SIGKILL');
+      await bounded(closing.catch(() => {}), 'killed browser cleanup');
+    }
+    // Launch can reject before assigning context when installer cleanup could
+    // not confirm ownership. Reconcile this fixture's exact descendant before
+    // removing its profile, even when no context was returned to the harness.
+    const remaining = ownedPid();
+    if (remaining) {
+      process.kill(remaining, 'SIGKILL');
+      await bounded((async () => {
+        while (ownedPid() === remaining) await new Promise(resolve => setTimeout(resolve, 25));
+      })(), 'disposable browser exit');
+    }
+    await fs.rm(root, { recursive: true, force: true });
+  } catch (error) {
+    console.error(JSON.stringify({ cleanupFailure: error.message, root }));
+    if (!failure) throw error;
+    failure.cleanupError = error;
+  }
+}
+
 for (const offMain of [false, true]) test(`app-hidden handoff preserves inputs and PID (start off-main=${offMain})`, {
   skip: os.platform() !== 'darwin' || !process.env.CAMOFOX_NATIVE_TEST_APP, timeout: 60000,
 }, async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'camofox-native-handoff-'));
   const profilePath = path.join(root, 'profile');
   const appPath = path.join(root, 'Camoufox.app');
-  await fs.cp(await fs.realpath(process.env.CAMOFOX_NATIVE_TEST_APP), appPath, { recursive: true, verbatimSymlinks: true });
-  execFileSync('/usr/bin/codesign', ['--verify', '--deep', '--strict', appPath]);
-  await fs.mkdir(profilePath);
-  let context, visibility, firstNative, nativeProof;
+  let context, visibility, firstNative, nativeProof, failure;
   try {
+    await fs.cp(await fs.realpath(process.env.CAMOFOX_NATIVE_TEST_APP), appPath, { recursive: true, verbatimSymlinks: true });
+    execFileSync('/usr/bin/codesign', ['--verify', '--deep', '--strict', appPath]);
+    await fs.mkdir(profilePath);
     const parking = await findParkDisplay();
     context = await launchWithVisibilityFallback({ display: null, profilePath,
       createBackgroundVisibility: profile => (visibility = createDarwinIdentityVisibility(profile, {
@@ -76,7 +118,8 @@ for (const offMain of [false, true]) test(`app-hidden handoff preserves inputs a
       const target = windows.find(window => window.number === nativeProof.number);
       assert.ok(target && nativelyOnMain(target, { main }), 'exact bound target is on main');
       const size = await page.evaluate(() => ({ width: outerWidth, height: outerHeight }));
-      assert.deepEqual({ width: target.width, height: target.height }, size, 'native outer size equals the applied Camoufox fingerprint');
+      assert.deepEqual({ width: nativeProof.bounds.width, height: nativeProof.bounds.height }, size,
+        'AppKit move requests retain the applied outer size, independently of CGWindow visual bounds');
       for (const before of firstNative.filter(window => window.number !== target.number)) {
         const siblingWindow = windows.find(window => window.number === before.number);
         assert.ok(siblingWindow, 'sibling native window is retained');
@@ -92,75 +135,142 @@ for (const offMain of [false, true]) test(`app-hidden handoff preserves inputs a
       assert.equal(released.hidden, true, 'release is independently confirmed hidden by AppKit');
       console.log(JSON.stringify({ pid, attempt, released }));
     }
-  } finally {
-    await context?.close();
-    await visibility?.close();
-    await fs.rm(root, { recursive: true, force: true });
-  }
+  } catch (error) { failure = error; console.error(JSON.stringify({ failure: error.message })); throw error; }
+  finally { await closeFixture({ context, visibility, root, profilePath }, failure); }
 });
 
 test('parking handoff uses fingerprint outer size and exact native bindings', {
-  skip: os.platform() !== 'darwin' || !process.env.CAMOFOX_NATIVE_TEST_APP || !process.env.CAMOFOX_NATIVE_TEST_PARK, timeout: 60000,
-}, async t => {
+  skip: os.platform() !== 'darwin' || !process.env.CAMOFOX_NATIVE_TEST_APP || !process.env.CAMOFOX_NATIVE_TEST_PARK, timeout: 180000,
+}, async () => {
   const display = await findParkDisplay();
-  if (!display) return t.skip('no existing virtual parking display');
+  assert.ok(display, 'native acceptance requires an existing visible parking display');
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'camofox-native-fingerprint-'));
   const profilePath = path.join(root, 'profile'), appPath = path.join(root, 'Camoufox.app');
-  await fs.cp(await fs.realpath(process.env.CAMOFOX_NATIVE_TEST_APP), appPath, { recursive: true, verbatimSymlinks: true });
-  execFileSync('/usr/bin/codesign', ['--verify', '--deep', '--strict', appPath]);
-  await fs.mkdir(profilePath);
-  let context, visibility;
+  let context, visibility, failure, phase = 'startup', readIndex = 0;
+  const diagnostics = [];
   try {
-    visibility = await createSharedIdentityVisibility(display, { profilePath, rootDir: path.join(root, 'addons'), discoverDisplay: findParkDisplay });
+    await fs.cp(await fs.realpath(process.env.CAMOFOX_NATIVE_TEST_APP), appPath, { recursive: true, verbatimSymlinks: true });
+    execFileSync('/usr/bin/codesign', ['--verify', '--deep', '--strict', appPath]);
+    await fs.mkdir(profilePath);
+    const read = createNativeWindowReadback(profilePath);
+    visibility = await createSharedIdentityVisibility(display, { profilePath, rootDir: path.join(root, 'addons'), discoverDisplay: findParkDisplay,
+      diagnostics: record => { diagnostics.push(record); console.log(JSON.stringify({ addonDiagnostic: record })); },
+      nativeReadback: async () => {
+        const windows = await read();
+        console.log(JSON.stringify({ nativeReadback: { phase, index: ++readIndex, windows } }));
+        return windows;
+      } });
     await prepareParkedProfile(profilePath, visibility.park);
     context = await launchSharedIdentityContext(profilePath, { headed: true, visibility, firefox,
-      launchOptions, os, getHostOS: () => 'macos', config: { disableDefaultAddons: true },
-      events: { emitAsync: async (_event, { options }) => { options.executablePath = path.join(appPath, 'Contents/MacOS/camoufox'); } },
+      launchOptions: options => launchOptions({ ...options,
+        screen: { ...options.screen, minWidth: 860, minHeight: 540 }, window: [860, 540] }),
+      os, getHostOS: () => 'macos',
+      config: { disableDefaultAddons: true, directIdentity: {
+        locale: process.env.CAMOFOX_LOCALE || 'en-US', timezoneId: process.env.CAMOFOX_TIMEZONE || 'America/Los_Angeles',
+      } },
+      events: { emitAsync: async (_event, { options }) => {
+        options.executablePath = path.join(appPath, 'Contents/MacOS/camoufox');
+        assert.deepEqual(fingerprintWindowSize(options), { width: 860, height: 540 });
+        console.log(JSON.stringify({ launch: { locale: options.locale, timezoneId: options.timezoneId, fingerprint: fingerprintWindowSize(options) } }));
+      } },
     });
+    const stored = JSON.parse(await fs.readFile(path.join(profilePath, 'xulstore.json'), 'utf8'))
+      ['chrome://browser/content/browser.xhtml']['main-window'];
+    assert.deepEqual([Number(stored.width), Number(stored.height)], [860, 540]);
     await visibility.attach(context);
-    const [page, sibling] = await Promise.all([visibility.newPage(context), visibility.newPage(context)]);
-    const extra = await Promise.all(Array.from({ length: 3 }, () => visibility.newPage(context)));
-    await page.setContent('<input value="target unsaved">');
-    await sibling.setContent('<input value="sibling unsaved">');
     const pid = findBrowserPid(process.pid, snapshotDarwinProcesses(), profilePath);
+    assert.ok(pid);
+    phase = 'serial create';
+    const page = await visibility.newPage(context);
+    await page.setContent('<input value="unsaved 0">');
+    phase = '2 concurrent creates';
+    const [sibling, second] = await Promise.all([visibility.newPage(context), visibility.newPage(context)]);
+    assert.equal(await page.locator('input').inputValue(), 'unsaved 0');
+    await sibling.setContent('<input value="unsaved 1">');
+    await second.setContent('<input value="unsaved 2">');
+    phase = '3 concurrent creates';
+    const extra = await Promise.all(Array.from({ length: 3 }, () => visibility.newPage(context)));
+    const pages = [page, sibling, second, ...extra];
+    for (const [index, p] of extra.entries()) await p.setContent(`<input value="unsaved ${index + 3}">`);
+    for (const [index, p] of pages.entries()) {
+      assert.equal(await p.locator('input').inputValue(), `unsaved ${index}`);
+      const screenshot = await p.screenshot();
+      assert.ok(screenshot.length > 100, 'each surviving page produces real screenshot bytes');
+      console.log(JSON.stringify({ screenshotBytes: screenshot.length, index }));
+    }
+    const script = await fs.readFile(path.join(visibility.addon, 'background.js'), 'utf8');
+    const endpoint = script.match(/const endpoint="([^"]+)"/)[1];
+    const geometry = async (windowId, action) => {
+      const response = await fetch(endpoint + '/geometry', { method: 'POST', body: JSON.stringify({ windowId, action }) });
+      assert.equal(response.ok, true);
+      return response.json();
+    };
     const codes = new Set();
-    for (const [index, p] of [page, sibling, ...extra].entries()) {
+    for (const [index, p] of pages.entries()) {
+      phase = `open/release ${index}`;
+      const before = await listNativeWindows(pid);
       await visibility.open(p);
       const opened = [...visibility.visible.values()].at(-1);
-      const script = await fs.readFile(path.join(visibility.addon, 'background.js'), 'utf8');
-      const endpoint = script.match(/const endpoint="([^"]+)"/)[1];
-      const proof = await (await fetch(endpoint + '/geometry', { method: 'POST', body: JSON.stringify({ windowId: opened.windowId, action: 'show' }) })).json();
+      const proof = await geometry(opened.windowId, 'show');
       assert.equal(proof.onMain, true);
       assert.ok(Number.isSafeInteger(proof.number));
       codes.add(proof.number);
+      const after = await listNativeWindows(pid);
+      for (const old of before.filter(w => w.number !== proof.number)) {
+        const retained = after.find(w => w.number === old.number);
+        assert.ok(retained, 'sibling native number is retained');
+        if (nativelyParked(old, display)) assert.ok(nativelyParked(retained, display), 'parked sibling stays off main');
+      }
+      const size = await p.evaluate(() => ({ width: outerWidth, height: outerHeight }));
+      assert.deepEqual(size, { width: 860, height: 540 });
+      assert.deepEqual({ width: proof.bounds.width, height: proof.bounds.height }, size);
       await visibility.release({ page: p });
+      const parked = await geometry(opened.windowId, 'park');
+      assert.equal(parked.number, proof.number, 'release preserves the exact bound number');
+      assert.equal(parked.parked, true);
+      assert.ok(nativelyParked(parked.actual, display));
+      assert.equal(findBrowserPid(process.pid, snapshotDarwinProcesses(), profilePath), pid);
+      for (const [i, live] of pages.entries()) {
+        assert.ok(context.pages().includes(live), 'all created pages survive handoff');
+        assert.equal(await live.locator('input').inputValue(), `unsaved ${i}`);
+      }
       console.log(JSON.stringify({ concurrentBinding: { index, number: proof.number } }));
     }
-    assert.equal(codes.size, 5, '2- and 3-way concurrent creates have distinct native bindings');
+    assert.equal(codes.size, 6, 'serial, 2- and 3-way concurrent creates have distinct native bindings');
     await visibility.open(page);
     const opened = [...visibility.visible.values()].at(-1);
-    const script = await fs.readFile(path.join(visibility.addon, 'background.js'), 'utf8');
-    const endpoint = script.match(/const endpoint="([^"]+)"/)[1];
-    const shown = await (await fetch(endpoint + '/geometry', { method: 'POST', body: JSON.stringify({ windowId: opened.windowId, action: 'show' }) })).json();
+    const shown = await geometry(opened.windowId, 'show');
     assert.equal(shown.onMain, true);
     const size = await page.evaluate(() => ({ width: outerWidth, height: outerHeight }));
-    assert.deepEqual({ width: shown.actual.width, height: shown.actual.height }, size);
+    assert.deepEqual({ width: shown.bounds.width, height: shown.bounds.height }, size);
     assert.ok(size.width <= display.main.width && size.width <= display.park.width);
     assert.ok(size.height <= display.main.height && size.height <= display.park.height);
     await visibility.release({ page });
     const target = (await listNativeWindows(pid)).find(window => window.number === shown.number);
     assert.ok(target && nativelyParked(target, display));
-    assert.deepEqual({ width: target.width, height: target.height }, size);
-    assert.equal(await page.locator('input').inputValue(), 'target unsaved');
-    assert.equal(await sibling.locator('input').inputValue(), 'sibling unsaved');
+    assert.equal(await page.locator('input').inputValue(), 'unsaved 0');
+    assert.equal(await sibling.locator('input').inputValue(), 'unsaved 1');
+    const deadline = Date.now() + 1000;
+    while (diagnostics.filter(record => record.event === 'ack').length < 20 && Date.now() < deadline)
+      await new Promise(resolve => setTimeout(resolve, 10));
+    const starts = diagnostics.filter(record => record.event === 'start');
+    const creates = diagnostics.filter(record => record.event === 'create');
+    assert.equal(starts.length, 1, 'one background throughout all native window creates');
+    assert.equal(new Set(diagnostics.map(record => record.instance)).size, 1);
+    assert.equal(creates.length, 6, 'each create command executes once');
+    assert.equal(new Set(creates.map(record => record.commandId)).size, 6);
+    assert.equal(diagnostics.filter(record => record.event === 'ack' && !record.accepted).length, 0);
+    const acknowledgments = diagnostics.filter(record => record.event === 'ack').map(record => record.commandId);
+    assert.equal(acknowledgments.length, 20, 'all create/open/release acknowledgments were observed');
+    assert.equal(new Set(acknowledgments).size, acknowledgments.length, 'each command acknowledges once');
     console.log(JSON.stringify({ pid, shown, parked: target, fingerprint: size }));
   } catch (error) {
-    const pid = findBrowserPid(process.pid, snapshotDarwinProcesses(), profilePath);
-    console.log(JSON.stringify({ failure: error.message, display, parkBounds: visibility?.park, windows: pid ? await listNativeWindows(pid) : [] }));
+    failure = error;
+    console.error(JSON.stringify({ failure: error.message }));
+    try {
+      const pid = findBrowserPid(process.pid, snapshotDarwinProcesses() || [], profilePath);
+      console.log(JSON.stringify({ display, parkBounds: visibility?.park, windows: pid ? await listNativeWindows(pid) : [] }));
+    } catch (diagnosticError) { console.error(JSON.stringify({ diagnosticFailure: diagnosticError.message })); }
     throw error;
-  } finally {
-    await context?.close();
-    await visibility?.close();
-    await fs.rm(root, { recursive: true, force: true });
-  }
+  } finally { await closeFixture({ context, visibility, root, profilePath }, failure); }
 });
