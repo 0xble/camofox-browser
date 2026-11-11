@@ -186,8 +186,11 @@ if (CONFIG.sharedIdentityNames.length && !await refreshSharedParkDisplay())
 
 const app = express();
 const globalJsonParser = express.json({ limit: '100kb' });
+// Express routing is case-insensitive and non-strict by default, so these
+// exclusions must match the same URLs as the route-specific parsers below.
+const ROUTE_PARSER_PATHS = [/^\/tabs\/[^/]+\/evaluate\/?$/i, /^\/tabs\/[^/]+\/upload\/?$/i];
 app.use((req, res, next) => {
-  if (req.method === 'POST' && (/^\/tabs\/[^/]+\/evaluate$/.test(req.path) || /^\/tabs\/[^/]+\/upload\/?$/.test(req.path))) {
+  if (req.method === 'POST' && ROUTE_PARSER_PATHS.some(pattern => pattern.test(req.path))) {
     return next();
   }
   return globalJsonParser(req, res, next);
