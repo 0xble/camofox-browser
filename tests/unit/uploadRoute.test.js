@@ -69,6 +69,7 @@ async function fixture({ mode = 'direct', busy = false, attachError } = {}) {
   const start = source.indexOf('const UPLOAD_UI_TIMEOUT_MS');
   vm.runInContext(source.slice(start, source.indexOf('\n// Type', start)), context);
   app.post('/unrelated', (_req, res) => res.json({ ok: true }));
+  app.post('/tabs/:tabId/evaluate', express.json({ limit: '1mb' }), (req, res) => res.json({ size: JSON.stringify(req.body).length }));
   app.use((err, _req, res, _next) => res.status(err.status || 500).json({ error: err.type }));
   const server = await new Promise(resolve => {
     const listener = app.listen(0, '127.0.0.1', () => resolve(listener));
@@ -212,4 +213,72 @@ test.each(['direct', 'panel', 'chooser'])('ambiguous inline %s failure is not re
     expect(f.input.setInputFiles.mock.calls.length + f.chooser.setFiles.mock.calls.length).toBe(1);
     expect(f.events).toHaveLength(0);
   } finally { await f.close(); }
+});
+
+const CASINGS = ['/tabs/tab/upload', '/tabs/tab/Upload', '/tabs/tab/UPLOAD', '/tabs/tab/upload/', '/tabs/tab/Upload/'];
+const jsonBodyOfBytes = bytes => {
+  const prefix = '{"userId":"owner","pad":"';
+  const suffix = '"}';
+  return prefix + ' '.repeat(bytes - prefix.length - suffix.length) + suffix;
+};
+
+describe('global parser exclusion follows Express routing case contract', () => {
+  test.each(CASINGS)('%s accepts exact inline bytes above the 100kb global limit', async route => {
+    const f = await fixture();
+    try {
+      const bytes = Buffer.from(Array.from({ length: 160 * 1024 }, (_, i) => i % 256));
+      const result = await f.request({ files: [inlineFile('large.bin', bytes)] }, { route });
+      expect(result).toMatchObject({ status: 200, body: { attached: ['large.bin'] } });
+      expect(f.attachments[0][0].buffer).toEqual(bytes);
+    } finally { await f.close(); }
+  });
+
+  test.each(CASINGS)('%s sanitizes invalid JSON, authenticating first', async route => {
+    const f = await fixture();
+    try {
+      const rawBody = '{"files":[{"dataBase64":"cHJpdmF0ZS1ieXRlcw=="}';
+      expect(await f.request({}, { route, rawBody })).toEqual({ status: 400, body: { error: 'Invalid upload JSON' } });
+      expect((await f.request({}, { route, rawBody, auth: false })).status).toBe(401);
+      expect(JSON.stringify(f.logs)).not.toContain('cHJpdmF0ZS1ieXRlcw==');
+    } finally { await f.close(); }
+  });
+
+  test.each(CASINGS)('%s requires auth before parsing an oversized body', async route => {
+    const f = await fixture();
+    try {
+      const rawBody = jsonBodyOfBytes(200 * 1024);
+      expect((await f.request({}, { route, rawBody, auth: false })).status).toBe(401);
+      expect((await f.request({}, { route, rawBody })).status).toBe(400);
+      expect(f.attachments).toHaveLength(0);
+    } finally { await f.close(); }
+  });
+
+  test.each(CASINGS)('%s enforces the 28MiB limit with the sanitized error', async route => {
+    const f = await fixture();
+    try {
+      const limit = 28 * 1024 * 1024;
+      expect((await f.request({}, { route, rawBody: jsonBodyOfBytes(limit) })).status).toBe(400);
+      expect(await f.request({}, { route, rawBody: jsonBodyOfBytes(limit + 1) }))
+        .toEqual({ status: 413, body: { error: 'Upload JSON exceeds the 28MiB limit' } });
+      expect((await f.request({}, { route, rawBody: jsonBodyOfBytes(limit + 1), auth: false })).status).toBe(401);
+    } finally { await f.close(); }
+  });
+
+  test.each([
+    '/tabs/tab/evaluate', '/tabs/tab/Evaluate', '/tabs/tab/EVALUATE', '/tabs/tab/evaluate/', '/tabs/tab/Evaluate/',
+  ])('%s is not capped by the 100kb global parser', async route => {
+    const f = await fixture();
+    try {
+      const result = await f.request({}, { route, rawBody: jsonBodyOfBytes(200 * 1024) });
+      expect(result.status).toBe(200);
+    } finally { await f.close(); }
+  });
+
+  test('unrelated routes keep the 100kb global limit regardless of casing', async () => {
+    const f = await fixture();
+    try {
+      for (const route of ['/unrelated', '/tabs/tab/evaluated', '/tabs/a/b/Upload'])
+        expect((await f.request({}, { route, rawBody: jsonBodyOfBytes(200 * 1024) })).status).not.toBe(200);
+    } finally { await f.close(); }
+  });
 });
