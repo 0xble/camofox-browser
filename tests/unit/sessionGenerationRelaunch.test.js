@@ -20,7 +20,7 @@ function deferred() {
   return { promise, resolve };
 }
 
-function fixture({ connected = true } = {}) {
+function fixture({ connected = true, realClose = false } = {}) {
   const sessions = new Map();
   const staleContext = { close: jest.fn(async () => {}), pages: () => [] };
   sessions.set('stale-user', { context: staleContext, tabGroups: new Map(), pageLeases: new Set() });
@@ -43,15 +43,24 @@ function fixture({ connected = true } = {}) {
     },
     registerPage() { return { created: false }; }, isQuarantinedPage: () => false,
     log() {}, failuresTotal: { labels: () => ({ inc() {} }) },
-    browser: connected ? relaunched : { isConnected: () => false }, _browserClosePromise: null,
+    browser: connected ? relaunched : { isConnected: () => false, close: async () => {} }, _browserClosePromise: null,
     browserRecoveryPromise: null, browserLaunchRecoveryGeneration: null,
     browserLaunchPromise: null, browserLaunchProxy: null, clearBrowserIdleTimer() {},
     launchBrowserInstance: jest.fn(async () => { box.browser = relaunched; return relaunched; }),
     closeBrowserFully: jest.fn(async () => { box.browser = null; }),
     setTimeout, clearTimeout,
   };
+  if (realClose) Object.assign(box, {
+    snapshotOwnedBrowserProcesses: () => [], process: { pid: 1 },
+    _countOpenFds: () => null, _countActiveHandles: () => null,
+    _lastBrowserPid: null, _lastBrowserStopReason: null, _nativeMemBaseline: null,
+    _forceKillProcessTree: async () => {}, _forceKillBrowserProcesses: async () => {},
+    cleanupStaleFirefoxProfiles: () => ({ removed: 0 }),
+    reporter: { resetNativeMemBaseline() {} },
+  });
   vm.runInNewContext(
     source.slice(source.indexOf('function clearSessionLocks('), source.indexOf('async function createSharedIdentityContext(')) +
+    (realClose ? `\n${['closeBrowserFully', '_closeBrowserFullyImpl'].map(serverFunction).join('\n')}\n` : '') +
     '\n' + ['ensureBrowser', 'getSession'].map(serverFunction).join('\n') +
     '\nglobalThis.closeAll = closeAllSessions;', box);
   return { box, sessions, staleContext, freshContext, relaunched, newContextGate };
@@ -141,6 +150,42 @@ test('a terminal close while awaiting an in-progress browser close retires the a
   expect(await acquiring).toMatchObject({ code: 'session_destroyed', statusCode: 410 });
   expect(f.freshContext.close).not.toHaveBeenCalled();
   expect(f.sessions.has('fresh-user')).toBe(false);
+});
+
+test('a disconnect recovery initiator keeps its token when a later request joins the delayed launch', async () => {
+  const f = fixture({ connected: false, realClose: true });
+  const pendingClose = deferred();
+  const pendingLaunch = deferred();
+  f.box.browser.close = () => pendingClose.promise;
+  f.box.launchBrowserInstance.mockImplementation(async () => {
+    await pendingLaunch.promise;
+    f.box.browser = f.relaunched;
+    return f.relaunched;
+  });
+
+  const acquiringA = f.box.getSession('fresh-user-a').catch(error => error);
+  for (let i = 0; i < 50 && !f.box._browserClosePromise; i++) await Promise.resolve();
+  expect(f.box.sessionLifecycleGeneration).toBe(1);
+  expect(f.box._browserClosePromise).toBeTruthy();
+
+  // B arrives while the real close is still pending, then resumes on the impl
+  // promise before A's recovery continuation and publishes a null launch token.
+  const acquiringB = f.box.getSession('fresh-user-b').catch(error => error);
+  pendingClose.resolve();
+  for (let i = 0; i < 50 && !f.box.launchBrowserInstance.mock.calls.length; i++) await Promise.resolve();
+  expect(f.box.launchBrowserInstance).toHaveBeenCalledTimes(1);
+  expect(f.box.browserLaunchPromise.recoveryGeneration).toBeNull();
+  for (let i = 0; i < 20; i++) await Promise.resolve();
+  pendingLaunch.resolve();
+  f.newContextGate.resolve(f.freshContext);
+
+  const resultA = await acquiringA;
+  expect(resultA).not.toMatchObject({ code: 'session_destroyed', statusCode: 410 });
+  expect(f.sessions.get('fresh-user-a')).toBe(resultA);
+  const resultB = await acquiringB;
+  expect(resultB).not.toMatchObject({ code: 'session_destroyed', statusCode: 410 });
+  expect(f.sessions.get('fresh-user-b')).toBe(resultB);
+  expect(f.box.sessionLifecycleGeneration).toBe(1);
 });
 
 test('a terminal close racing a connected browser still retires the acquisition', async () => {

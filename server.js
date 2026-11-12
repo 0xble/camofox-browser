@@ -632,8 +632,9 @@ let browser = null;
 // Terminal retirement invalidates pre-existing acquisitions without an identity lock.
 let sessionLifecycleGeneration = 0;
 // Generation advanced by the latest disconnect recovery, not by terminal closes.
+// The recovery token rides on the launch promise it belongs to. A process-global
+// slot can be overwritten by whichever caller starts the launch.
 let browserRecoveryPromise = null;
-let browserLaunchRecoveryGeneration = null;
 let _lastBrowserPid = null; // Track PID independently for force-kill after close
 let _browserClosePromise = null; // Shared promise for concurrent close serialization
 let _lastBrowserRestartAt = 0; // Timestamp of last browser relaunch (for stale tab detection)
@@ -1606,21 +1607,24 @@ async function ensureBrowser({ recoveryAware = false } = {}) {
   }
   if (browser) return result(browser, recoveryGeneration);
   if (browserLaunchPromise) {
-    const launchRecoveryGeneration = browserLaunchRecoveryGeneration;
-    const launched = await browserLaunchPromise;
-    return result(launched, launchRecoveryGeneration);
+    const joined = browserLaunchPromise;
+    const launched = await joined;
+    // Keep this caller's token when the joined launch was published without
+    // one. A later terminal increment still fails the equality fence.
+    return result(launched, joined.recoveryGeneration ?? recoveryGeneration);
   }
   const launchTimeoutMs = proxyPool?.launchTimeoutMs ?? 60000;
-  browserLaunchRecoveryGeneration = recoveryGeneration;
-  browserLaunchPromise = Promise.race([
+  let launch;
+  launch = Promise.race([
     launchBrowserInstance(),
     new Promise((_, reject) => setTimeout(() => reject(new Error(`Browser launch timeout (${Math.round(launchTimeoutMs / 1000)}s)`)), launchTimeoutMs)),
   ]).finally(() => {
-    browserLaunchPromise = null;
-    browserLaunchRecoveryGeneration = null;
+    if (browserLaunchPromise === launch) browserLaunchPromise = null;
   });
-  const launched = await browserLaunchPromise;
-  return result(launched, recoveryGeneration);
+  launch.recoveryGeneration = recoveryGeneration;
+  browserLaunchPromise = launch;
+  const launched = await launch;
+  return result(launched, launch.recoveryGeneration ?? recoveryGeneration);
 }
 
 // Resolve local-control aliases once at the API boundary. Native Hermes already
