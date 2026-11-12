@@ -16,7 +16,7 @@ let uploadsDir;
 beforeAll(async () => { uploadsDir = await fs.mkdtemp(path.join(os.tmpdir(), 'camofox-upload-route-')); });
 afterAll(async () => { await fs.rm(uploadsDir, { recursive: true, force: true }); });
 
-async function fixture({ mode = 'direct', busy = false, attachError } = {}) {
+async function fixture({ mode = 'direct', busy = false, closing = false, unavailable = null, attachError } = {}) {
   const app = express();
   const attachments = [];
   const logs = [];
@@ -63,8 +63,8 @@ async function fixture({ mode = 'direct', busy = false, attachError } = {}) {
   vm.runInContext(source.slice(parserStart, source.indexOf('\n// Request logging', parserStart)), context);
   app.use(accessKeyMiddleware({ accessKey: 'test-only-access-key' }));
   app.use(createSharedIdentityRequestTracker({
-    getSessions: () => sessions, manager: { owns: id => id === 'owner', closings: new Map() },
-    normalizeUserId: String, findTab, transitioning: () => busy, requests,
+    getSessions: () => sessions, manager: { owns: id => id === 'owner', closings: closing ? new Map([['owner', true]]) : new Map() },
+    normalizeUserId: String, findTab, transitioning: () => busy, requests, unavailable: () => unavailable,
   }));
   const start = source.indexOf('const UPLOAD_UI_TIMEOUT_MS');
   vm.runInContext(source.slice(start, source.indexOf('\n// Type', start)), context);
@@ -279,6 +279,43 @@ describe('global parser exclusion follows Express routing case contract', () => 
     try {
       for (const route of ['/unrelated', '/tabs/tab/evaluated', '/tabs/a/b/Upload'])
         expect((await f.request({}, { route, rawBody: jsonBodyOfBytes(200 * 1024) })).status).not.toBe(200);
+    } finally { await f.close(); }
+  });
+});
+
+describe('mixed-case routes keep shared-identity gates and in-flight tracking', () => {
+  const GATED_ROUTES = ['/TABS/tab/upload', '/TABS/tab/evaluate'];
+
+  test.each(GATED_ROUTES)('%s returns identity busy while the identity is transitioning', async route => {
+    const f = await fixture({ busy: true });
+    try {
+      expect(await f.request({}, { route, rawBody: '{"userId":"owner"}' })).toEqual({ status: 409, body: { error: 'identity busy' } });
+      expect(f.requests.size).toBe(0);
+    } finally { await f.close(); }
+  });
+
+  test.each(GATED_ROUTES)('%s returns identity busy while the identity is closing', async route => {
+    const f = await fixture({ closing: true });
+    try {
+      expect(await f.request({}, { route, rawBody: '{"userId":"owner"}' })).toEqual({ status: 409, body: { error: 'identity busy' } });
+      expect(f.requests.size).toBe(0);
+    } finally { await f.close(); }
+  });
+
+  test.each(GATED_ROUTES)('%s returns the identity unavailable response', async route => {
+    const f = await fixture({ unavailable: { statusCode: 503, message: 'identity unavailable', code: 'identity_unavailable' } });
+    try {
+      expect(await f.request({}, { route, rawBody: '{"userId":"owner"}' }))
+        .toEqual({ status: 503, body: { error: 'identity unavailable', code: 'identity_unavailable' } });
+      expect(f.requests.size).toBe(0);
+    } finally { await f.close(); }
+  });
+
+  test.each(['/TABS/tab/upload/', '/TABS/tab/evaluate/'])('%s counts the request while it is in flight', async route => {
+    const f = await fixture();
+    try {
+      expect((await f.request({}, { route, rawBody: '{"userId":"owner"}' })).status).toBe(route.toLowerCase().includes('/upload/') ? 400 : 200);
+      expect(f.requests.size).toBe(0);
     } finally { await f.close(); }
   });
 });

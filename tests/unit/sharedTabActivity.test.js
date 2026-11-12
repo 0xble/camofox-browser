@@ -7,7 +7,8 @@ const activityStart = source.indexOf('// Agent requests, not browser focus');
 const middleware = source.slice(source.indexOf('app.use(', activityStart) + 8, source.indexOf('\n});', activityStart) + 2);
 
 for (const [path, method, tabTarget] of [
-  ['/tabs/tab/snapshot', 'GET', {}], ['/navigate', 'POST', { body: { targetId: 'tab' } }],
+  ['/tabs/tab/snapshot', 'GET', {}], ['/TABS/tab/snapshot', 'GET', {}], ['/TABS/tab/upload/', 'POST', {}], ['/TABS/tab/evaluate', 'POST', {}],
+  ['/navigate', 'POST', { body: { targetId: 'tab' } }],
   ['/snapshot', 'GET', { query: { targetId: 'tab' } }], ['/act', 'POST', { body: { targetId: 'tab' } }],
 ]) test(`agent activity includes ${method} ${path}`, () => {
   const tab = { lastAgentActivityAt: 1 };
