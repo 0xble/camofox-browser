@@ -165,8 +165,27 @@ describe('bounded session close', () => {
     expect(sessions.size).toBe(0);
   });
 
-  test('closeContextBounded reports success when the context closes in time', async () => {
-    await expect(closeContextBounded(fakeContext([], { hangs: false }), { timeoutMs: 50 })).resolves.toBe(true);
+  test('a close event confirms while the public close promise hangs', async () => {
+    const context = Object.assign(new EventEmitter(), {
+      pages: () => [],
+      isClosed: () => false,
+      close: jest.fn(() => new Promise(() => { setTimeout(() => context.emit('close'), 5); })),
+    });
+    await expect(closeContextBounded(context, { timeoutMs: 50 })).resolves.toBe(true);
+    expect(context.close).toHaveBeenCalledTimes(1);
+    expect(context.listenerCount('close')).toBe(0);
+  });
+
+  test('a genuine closed-state readback confirms after public close rejects', async () => {
+    const context = Object.assign(new EventEmitter(), {
+      _closingStatus: 'closing',
+      pages: () => [],
+      isClosed: BrowserContext.prototype.isClosed,
+      close: jest.fn(async () => { context._closingStatus = 'closed'; throw new Error('already closed'); }),
+    });
+    await expect(closeContextBounded(context, { timeoutMs: 50 })).resolves.toBe(true);
+    expect(context.close).toHaveBeenCalledTimes(1);
+    expect(context.listenerCount('close')).toBe(0);
   });
 
   test('pre-protocol Playwright rejection stays tracked until the protocol close is confirmed', async () => {
@@ -175,11 +194,18 @@ describe('bounded session close', () => {
       _closingStatus: 'none',
       isClosed: BrowserContext.prototype.isClosed,
       request: { dispose: jest.fn(async () => { throw new Error('disposal rejected'); }) },
-      // Faithful Playwright protocol fixture: the low-level close response
-      // causes the browser context close event and closed-state readback.
-      _channel: { close: jest.fn(async () => { context._closingStatus = 'closed'; context.emit('close'); }) },
+      // Faithful Playwright 1.59.1 protocol fixture: undefined params are
+      // invalid, while the explicit empty options object is accepted. The
+      // low-level close response causes the close event and closed readback.
+      _channel: { close: jest.fn(async params => {
+        if (params === undefined) throw new TypeError('BrowserContextCloseParams requires an object');
+        expect(params).toEqual({});
+        context._closingStatus = 'closed'; context.emit('close');
+      }) },
       pages: () => [page],
     });
+    await expect(context._channel.close()).rejects.toThrow('BrowserContextCloseParams requires an object');
+    context._channel.close.mockClear();
     context.close = jest.fn(() => BrowserContext.prototype.close.call(context));
     const session = fakeSession(context, ['tab']);
     const sessions = new Map([['rejected', session]]);
@@ -201,6 +227,7 @@ describe('bounded session close', () => {
     await reapAbandonedContexts({ timeoutMs: 20 });
     expect(context.close).toHaveBeenCalledTimes(2);
     expect(context._channel.close).toHaveBeenCalledTimes(1);
+    expect(context._channel.close).toHaveBeenCalledWith({});
     expect(context._closingStatus).toBe('closed');
     expect(abandonedContexts.has(context)).toBe(false);
     expect(context.listenerCount('close')).toBe(0);
