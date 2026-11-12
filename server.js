@@ -1924,9 +1924,16 @@ async function getSession(userId, { trace = false, headed = false, parkedOpen = 
         }
       }
       const sharedIdentity = sharedIdentities.owns(key);
-      const b = sharedIdentity ? null : await ensureBrowser({ recoveryAware: true });
+      const launched = sharedIdentity ? null : await ensureBrowser({ recoveryAware: true });
+      // recoveryAware returns { browser, recoveryGeneration }. A direct browser
+      // (no recoveryGeneration) is the pre-token contract used by VM fixtures
+      // and any caller that did not opt in. Only an explicit generation token
+      // may be adopted; a missing token must not look like generation 0.
+      const browser = launched && Object.hasOwn(launched, 'recoveryGeneration') ? launched.browser : launched;
       if (!sharedIdentity) {
-        const recoveredGeneration = b.recoveryGeneration;
+        const recoveredGeneration = launched && Object.hasOwn(launched, 'recoveryGeneration')
+          ? launched.recoveryGeneration
+          : null;
         const currentGeneration = typeof sessionLifecycleGeneration === 'undefined' ? 0 : sessionLifecycleGeneration;
         // Adopt only the generation this call awaited from disconnect recovery,
         // and only when no terminal close landed afterward. A concurrent
@@ -1956,7 +1963,7 @@ async function getSession(userId, { trace = false, headed = false, parkedOpen = 
       transitionCheck();
       const context = sharedIdentity
         ? await sharedIdentities.open(key, profilePath => createSharedIdentityContext(key, profilePath, { headed, parkedOpen, transitionCheck }))
-        : await b.browser.newContext(contextOptions);
+        : await browser.newContext(contextOptions);
       const checkAcquisition = () => {
         try { generationCheck(); }
         catch (error) {
