@@ -1954,7 +1954,7 @@ async function getSession(userId, { trace = false, headed = false, parkedOpen = 
       created.visibility = context.sharedIdentityVisibility;
       if (created.visibility) created.createPage = async () => {
         try { return await created.visibility.newPage(context); }
-        finally { created.headed = Boolean(created.visibility.visible?.size); }
+        finally { created.headed = created.visibility.isVisible?.() ?? Boolean(created.visibility.visible?.size); }
       };
       // Abort before publishing so a retry still runs pending URL restoration.
       checkAcquisition();
@@ -2312,7 +2312,7 @@ function sharedTabClosable(session, tabId, tab, latestTabId, { checkVisibility =
     if (checkVisibility) {
       if (session.visibility?.isPageVisible?.(tab.page)) return false;
       // Legacy headed contexts have no per-page visibility readback. Fail closed.
-      if ((session.headed || session.visibility?.visible.size) && !session.visibility?.isPageVisible) return false;
+      if ((session.headed || session.visibility?.isVisible?.() || session.visibility?.visible.size) && !session.visibility?.isPageVisible) return false;
     }
   }
   return tabClosable({ session, tabId, tab, latestTabId, tabLocks, humanControlledTabs });
@@ -3409,7 +3409,7 @@ app.get('/health', async (req, res) => {
   const controllers = [...sessions.values()].filter(session => session.visibility);
   for (const session of controllers) {
     session.visibility.updateDisplay(sharedParkDisplay);
-    session.headed = session.visibility.visible.size > 0;
+    session.headed = session.visibility.isVisible?.() ?? session.visibility.visible.size > 0;
   }
   const visibility = {
     mode: !CONFIG.sharedIdentityNames.length ? 'unconfigured'
@@ -3658,7 +3658,7 @@ async function releaseIdentity(userId, { headedOnly = false, all = false, tabId 
       .filter(([id, tab]) => humanControlledTabs.has(id) && tab.page && !tab.page.isClosed?.() && !isQuarantinedPage(tab.page)).map(([, tab]) => tab.page) : [];
     // Recompute even after a failed park so idle reaping reflects the windows still shown.
     try { return { ok: true, released: await session.visibility.release(keep.length ? { all, page, keep } : { all, page }) }; }
-    finally { session.headed = session.visibility.visible.size > 0; }
+    finally { session.headed = session.visibility.isVisible?.() ?? session.visibility.visible.size > 0; }
   }
   if (!session || (headedOnly && !session.headed)) return { ok: true, released: false };
   while (identityBusy(userId, session) && Date.now() < deadline) {
@@ -3684,7 +3684,7 @@ async function releaseIdentity(userId, { headedOnly = false, all = false, tabId 
 const sharedIdentityIdlePolicy = createSharedIdentityIdlePolicy({ readIdleSeconds: readHidIdleSeconds });
 function sharedSessionExpiryEligible(key, session) {
   return CONFIG.hiddenSessionIdleMin && sessions.get(key) === session && !session.headed
-    && !session.visibility?.visible.size && !identityTransitions.has(key)
+    && !(session.visibility?.isVisible?.() ?? Boolean(session.visibility?.visible.size)) && !identityTransitions.has(key)
     && sharedIdentityIdlePolicy.agentIdle(session.lastAccess, CONFIG.hiddenSessionIdleMin) && !identityBusy(key, session);
 }
 
@@ -3706,7 +3706,9 @@ async function cleanIdleSharedSessions() {
   for (const [key, original] of [...sessions]) {
     if (sessions.get(key) !== original || !original.sharedIdentity || identityTransitions.has(key)
       || (typeof sharedIdentityWindow !== 'undefined' && sharedIdentityWindow?.unavailable?.(key))) continue;
-    try { await original.visibility?.refresh?.(); } catch { continue; }
+    try { await original.visibility?.refresh?.(); }
+    catch { original.headed = original.visibility?.isVisible ? original.visibility.isVisible() : original.headed || Boolean(original.visibility?.visible.size); continue; }
+    original.headed = original.visibility?.isVisible ? original.visibility.isVisible() : original.headed || Boolean(original.visibility?.visible.size);
     if (tabThreshold) {
       const tabs = [...original.tabGroups.values()].flatMap(group => [...group.entries()]);
       for (const [tabId, tab] of tabs) {
@@ -3723,7 +3725,7 @@ async function cleanIdleSharedSessions() {
       }
     }
     try { await original.visibility?.refresh?.(); } catch { continue; }
-    if (original.headed || original.visibility?.visible.size) continue;
+    if (original.headed || (original.visibility?.isVisible?.() ?? original.visibility?.visible.size)) continue;
     if (sharedSessionExpiryEligible(key, original)) {
       // Parking hides live windows. Expiry must checkpoint and close the context.
       await closeSession(key, original, { reason: 'hidden_idle' }).catch(err => {
