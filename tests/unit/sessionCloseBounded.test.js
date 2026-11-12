@@ -172,7 +172,8 @@ describe('bounded session close', () => {
   test('pre-protocol Playwright rejection falls back and stays tracked until a confirmed retry', async () => {
     const page = fakePage();
     const context = Object.assign(new EventEmitter(), {
-      isClosed: () => false,
+      _closingStatus: 'none',
+      isClosed: BrowserContext.prototype.isClosed,
       request: { dispose: jest.fn(async () => { throw new Error('disposal rejected'); }) },
       _channel: { close: jest.fn(async () => {}) },
       pages: () => [page],
@@ -187,6 +188,8 @@ describe('bounded session close', () => {
     });
     expect(context.request.dispose).toHaveBeenCalledTimes(1);
     expect(context._channel.close).not.toHaveBeenCalled();
+    expect(context.isClosed()).toBe(true); // Playwright reports "closing" as isClosed().
+    expect(context._closingStatus).toBe('closing');
     expect(page.close).toHaveBeenCalledWith({ runBeforeUnload: false });
     expect(sessions.has('rejected')).toBe(false);
     expect(abandonedContexts.has(context)).toBe(true);

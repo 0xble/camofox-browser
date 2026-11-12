@@ -6,7 +6,7 @@ import { createSharedIdentityRequestTracker } from '../../lib/shared-identity-re
 async function fixture() {
   const requests = new Map();
   const page = { id: 'page' };
-  const session = { lastUsedPage: null };
+  const session = { lastUsedPage: null, visibility: {} };
   const sessions = new Map([['personal', session]]);
   const manager = { owns: key => key === 'personal', closings: new Set() };
   let busy = false, parked = false;
@@ -65,7 +65,8 @@ describe('shared identity HTTP tracking and transition gate', () => {
 test.each(['open', 'focus'])('parked %s is active work without a transition gate or wait', action => {
   const requests = new Map();
   const manager = { owns: key => key === 'fixture', closings: new Set() };
-  const tracker = createSharedIdentityRequestTracker({ getSessions: () => new Map(), manager,
+  const sessions = new Map([['fixture', { visibility: {} }]]);
+  const tracker = createSharedIdentityRequestTracker({ getSessions: () => sessions, manager,
     normalizeUserId: String, findTab: () => null, transitioning: () => true, requests,
     parkedVisibility: () => true });
   const response = Object.assign(new EventEmitter(), { status: jest.fn().mockReturnThis(), json: jest.fn() });
@@ -79,5 +80,18 @@ test.each(['open', 'focus'])('parked %s is active work without a transition gate
   tracker({ path: `/browser/identities/fixture/${action}` }, response, next);
   expect(next).toHaveBeenCalledTimes(1);
   expect(response.status).toHaveBeenCalledWith(409);
+  expect(requests.size).toBe(0);
+});
+
+test.each(['open', 'focus'])('legacy %s fallback is not counted before visibility setup succeeds', action => {
+  const requests = new Map();
+  const manager = { owns: key => key === 'fixture', closings: new Set() };
+  const tracker = createSharedIdentityRequestTracker({ getSessions: () => new Map(), manager,
+    normalizeUserId: String, findTab: () => null, transitioning: () => false, requests,
+    parkedVisibility: () => true });
+  const response = Object.assign(new EventEmitter(), { status: jest.fn().mockReturnThis(), json: jest.fn() });
+  const next = jest.fn();
+  tracker({ path: `/browser/identities/fixture/${action}` }, response, next);
+  expect(next).toHaveBeenCalledTimes(1);
   expect(requests.size).toBe(0);
 });
