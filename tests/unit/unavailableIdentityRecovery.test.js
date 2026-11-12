@@ -41,6 +41,7 @@ async function fixture() {
     browserRestartsTotal: { labels: () => ({ inc() {} }) }, userNavHealth: new Map(),
     healthState: {}, pluginEvents: { emit() {}, emitAsync: async () => {} },
     browser: { isConnected: () => false }, _browserClosePromise: null,
+    browserRecoveryPromise: null, browserLaunchRecoveryGeneration: null,
     browserLaunchPromise: null, proxyPool: null, clearBrowserIdleTimer() {},
     launchBrowserInstance: jest.fn(async () => ({})),
     closeBrowserFully: jest.fn(async () => { box.browser = null; }),

@@ -44,6 +44,7 @@ function fixture({ connected = true } = {}) {
     registerPage() { return { created: false }; }, isQuarantinedPage: () => false,
     log() {}, failuresTotal: { labels: () => ({ inc() {} }) },
     browser: connected ? relaunched : { isConnected: () => false }, _browserClosePromise: null,
+    browserRecoveryPromise: null, browserLaunchRecoveryGeneration: null,
     browserLaunchPromise: null, browserLaunchProxy: null, clearBrowserIdleTimer() {},
     launchBrowserInstance: jest.fn(async () => { box.browser = relaunched; return relaunched; }),
     closeBrowserFully: jest.fn(async () => { box.browser = null; }),
@@ -77,7 +78,7 @@ test('a terminal close after relaunch still retires the in-flight acquisition wi
   expect(f.relaunched.newContext).toHaveBeenCalledTimes(1);
   await f.box.closeAll('admin_stop');
   f.newContextGate.resolve(f.freshContext);
-  expect(await acquiring).toMatchObject({ code: 'session_destroyed', statusCode: 410, retryable: true, recovery: 'retry' });
+  expect(await acquiring).toMatchObject({ code: 'session_destroyed', statusCode: 410 });
   expect(f.freshContext.close).toHaveBeenCalledTimes(1);
   expect(f.sessions.has('fresh-user')).toBe(false);
 });
@@ -93,9 +94,55 @@ test('a terminal close during relaunch still retires the in-flight acquisition',
   await f.box.closeAll('admin_stop');
   releaseLaunch();
   f.newContextGate.resolve(f.freshContext);
-  expect(await acquiring).toMatchObject({ code: 'session_destroyed', statusCode: 410, retryable: true, recovery: 'retry' });
+  expect(await acquiring).toMatchObject({ code: 'session_destroyed', statusCode: 410 });
   expect(f.sessions.has('fresh-user')).toBe(false);
 });
+
+test('concurrent acquisitions after a browser crash share the recovery generation', async () => {
+  const f = fixture({ connected: false });
+  const acquiringA = f.box.getSession('fresh-user-a');
+  const acquiringB = f.box.getSession('fresh-user-b');
+  for (let i = 0; i < 50 && f.relaunched.newContext.mock.calls.length < 2; i++) await Promise.resolve();
+  expect(f.relaunched.newContext).toHaveBeenCalledTimes(2);
+  f.newContextGate.resolve(f.freshContext);
+  const [sessionA, sessionB] = await Promise.all([acquiringA, acquiringB]);
+  expect(f.box.sessionLifecycleGeneration).toBe(1);
+  expect(f.sessions.get('fresh-user-a')).toBe(sessionA);
+  expect(f.sessions.get('fresh-user-b')).toBe(sessionB);
+});
+
+test.each(['admin_stop', 'shutdown', 'browser_restart:test'])('a terminal close during a cold launch retires the acquisition (%s)', async reason => {
+  const f = fixture({ connected: true });
+  f.box.browser = null;
+  let releaseLaunch;
+  f.box.launchBrowserInstance.mockImplementation(() => new Promise(resolve => {
+    releaseLaunch = () => { f.box.browser = f.relaunched; resolve(f.relaunched); };
+  }));
+  const acquiring = f.box.getSession('fresh-user').catch(error => error);
+  for (let i = 0; i < 50 && !releaseLaunch; i++) await Promise.resolve();
+  await f.box.closeAll(reason);
+  releaseLaunch();
+  f.newContextGate.resolve(f.freshContext);
+  expect(await acquiring).toMatchObject({ code: 'session_destroyed', statusCode: 410 });
+  expect(f.freshContext.close).not.toHaveBeenCalled();
+  expect(f.sessions.has('fresh-user')).toBe(false);
+});
+
+test('a terminal close while awaiting an in-progress browser close retires the acquisition', async () => {
+  const f = fixture({ connected: true });
+  let releaseClose;
+  f.box._browserClosePromise = new Promise(resolve => { releaseClose = resolve; });
+  const acquiring = f.box.getSession('fresh-user').catch(error => error);
+  for (let i = 0; i < 50 && f.relaunched.newContext.mock.calls.length > 0; i++) await Promise.resolve();
+  await f.box.closeAll('browser_restart:test');
+  releaseClose();
+  for (let i = 0; i < 50 && f.relaunched.newContext.mock.calls.length === 0; i++) await Promise.resolve();
+  f.newContextGate.resolve(f.freshContext);
+  expect(await acquiring).toMatchObject({ code: 'session_destroyed', statusCode: 410 });
+  expect(f.freshContext.close).not.toHaveBeenCalled();
+  expect(f.sessions.has('fresh-user')).toBe(false);
+});
+
 test('a terminal close racing a connected browser still retires the acquisition', async () => {
   const f = fixture({ connected: true });
   const acquiring = f.box.getSession('fresh-user').catch(error => error);

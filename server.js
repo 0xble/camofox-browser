@@ -631,6 +631,9 @@ app.post('/sessions/:userId/cookies', express.json({ limit: '512kb' }), async (r
 let browser = null;
 // Terminal retirement invalidates pre-existing acquisitions without an identity lock.
 let sessionLifecycleGeneration = 0;
+// Generation advanced by the latest disconnect recovery, not by terminal closes.
+let browserRecoveryPromise = null;
+let browserLaunchRecoveryGeneration = null;
 let _lastBrowserPid = null; // Track PID independently for force-kill after close
 let _browserClosePromise = null; // Shared promise for concurrent close serialization
 let _lastBrowserRestartAt = 0; // Timestamp of last browser relaunch (for stale tab detection)
@@ -1573,27 +1576,51 @@ async function launchBrowserInstance() {
   throw lastError || new Error('Failed to launch a usable browser');
 }
 
-async function ensureBrowser() {
+async function ensureBrowser({ recoveryAware = false } = {}) {
   clearBrowserIdleTimer();
+  const result = (value, recoveryGeneration = null) => recoveryAware
+    ? { browser: value, recoveryGeneration }
+    : value;
   if (_browserClosePromise) {
     await _browserClosePromise;
   }
+  let recoveryGeneration = null;
   if (browser && !browser.isConnected()) {
-    failuresTotal.labels('browser_disconnected', 'internal').inc();
-    log('warn', 'browser disconnected, clearing dead sessions and relaunching', {
-      deadSessions: sessions.size,
-    });
-    await closeAllSessions('browser_disconnected', { clearDownloads: true, clearLocks: true });
-    await closeBrowserFully('browser_disconnected');
+    if (!browserRecoveryPromise) {
+      failuresTotal.labels('browser_disconnected', 'internal').inc();
+      log('warn', 'browser disconnected, clearing dead sessions and relaunching', {
+        deadSessions: sessions.size,
+      });
+      // closeAllSessions() advances the generation synchronously before its
+      // first await. Capture that increment before any terminal close can add
+      // another one while the old contexts finish closing.
+      const closing = closeAllSessions('browser_disconnected', { clearDownloads: true, clearLocks: true });
+      const ownGeneration = typeof sessionLifecycleGeneration === 'undefined' ? 0 : sessionLifecycleGeneration;
+      browserRecoveryPromise = (async () => {
+        await closing;
+        await closeBrowserFully('browser_disconnected');
+        return ownGeneration;
+      })().finally(() => { browserRecoveryPromise = null; });
+    }
+    recoveryGeneration = await browserRecoveryPromise;
   }
-  if (browser) return browser;
-  if (browserLaunchPromise) return browserLaunchPromise;
+  if (browser) return result(browser, recoveryGeneration);
+  if (browserLaunchPromise) {
+    const launchRecoveryGeneration = browserLaunchRecoveryGeneration;
+    const launched = await browserLaunchPromise;
+    return result(launched, launchRecoveryGeneration);
+  }
   const launchTimeoutMs = proxyPool?.launchTimeoutMs ?? 60000;
+  browserLaunchRecoveryGeneration = recoveryGeneration;
   browserLaunchPromise = Promise.race([
     launchBrowserInstance(),
     new Promise((_, reject) => setTimeout(() => reject(new Error(`Browser launch timeout (${Math.round(launchTimeoutMs / 1000)}s)`)), launchTimeoutMs)),
-  ]).finally(() => { browserLaunchPromise = null; });
-  return browserLaunchPromise;
+  ]).finally(() => {
+    browserLaunchPromise = null;
+    browserLaunchRecoveryGeneration = null;
+  });
+  const launched = await browserLaunchPromise;
+  return result(launched, recoveryGeneration);
 }
 
 // Resolve local-control aliases once at the API boundary. Native Hermes already
@@ -1658,7 +1685,7 @@ async function closeSessionNow(userId, session, {
   transitionCheck = () => {
     callerCheck();
     if (session?._terminalClose && !UNAVAILABLE_IDENTITY_CLOSE_REASONS.has(reason.split(':', 1)[0])) {
-      throw Object.assign(new Error('Session retired by terminal close'), { code: 'session_destroyed', statusCode: 410, retryable: true, recovery: 'retry' });
+      throw Object.assign(new Error('Session retired by terminal close'), { code: 'session_destroyed', statusCode: 410 });
     }
   };
   transitionCheck();
@@ -1830,7 +1857,7 @@ async function getSession(userId, { trace = false, headed = false, parkedOpen = 
   let generation = initialGeneration;
   const generationCheck = () => {
     if (generation !== (typeof sessionLifecycleGeneration === 'undefined' ? 0 : sessionLifecycleGeneration)) {
-      throw Object.assign(new Error('Session retired by terminal close'), { code: 'session_destroyed', statusCode: 410, retryable: true, recovery: 'retry' });
+      throw Object.assign(new Error('Session retired by terminal close'), { code: 'session_destroyed', statusCode: 410 });
     }
   };
   const callerCheck = transitionCheck;
@@ -1897,13 +1924,14 @@ async function getSession(userId, { trace = false, headed = false, parkedOpen = 
         }
       }
       const sharedIdentity = sharedIdentities.owns(key);
-      const b = sharedIdentity ? null : await ensureBrowser();
+      const b = sharedIdentity ? null : await ensureBrowser({ recoveryAware: true });
       if (!sharedIdentity) {
-        const recoveredGeneration = typeof sessionLifecycleGeneration === 'undefined' ? 0 : sessionLifecycleGeneration;
-        // Recovery itself closes sessions for a disconnected browser and
-        // advances the generation. That increment belongs to this request, so
-        // it must not retire the request; any other increment still must.
-        if (recoveredGeneration === initialGeneration + 1) generation = recoveredGeneration;
+        const recoveredGeneration = b.recoveryGeneration;
+        const currentGeneration = typeof sessionLifecycleGeneration === 'undefined' ? 0 : sessionLifecycleGeneration;
+        // Adopt only the generation this call awaited from disconnect recovery,
+        // and only when no terminal close landed afterward. A concurrent
+        // terminal increment, including one during a cold launch, still retires.
+        if (recoveredGeneration !== null && recoveredGeneration === currentGeneration) generation = recoveredGeneration;
       }
       const contextOptions = {
         viewport: null,
@@ -1928,7 +1956,7 @@ async function getSession(userId, { trace = false, headed = false, parkedOpen = 
       transitionCheck();
       const context = sharedIdentity
         ? await sharedIdentities.open(key, profilePath => createSharedIdentityContext(key, profilePath, { headed, parkedOpen, transitionCheck }))
-        : await b.newContext(contextOptions);
+        : await b.browser.newContext(contextOptions);
       const checkAcquisition = () => {
         try { generationCheck(); }
         catch (error) {
