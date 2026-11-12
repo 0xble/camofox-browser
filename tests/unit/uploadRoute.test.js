@@ -49,7 +49,7 @@ async function fixture({ mode = 'direct', busy = false, closing = false, unavail
     app, express, Buffer, resolveUploadPaths, CONFIG: { uploadsDir }, sessions, findTab,
     normalizeUserId: String, log: (...args) => logs.push(args),
     pluginEvents: { emit: (...args) => events.push(args) },
-    withUserLimit: jest.fn(async (_user, fn) => { trackedDuringRoute = requests.get('owner') || 0; return fn(); }),
+    withUserLimit: jest.fn(async (_user, fn) => fn()),
     withTabLock: jest.fn(async (_tab, fn) => fn()),
     refToLocator: () => trigger, refreshTabRefs: async () => new Map([['e1', {}]]),
     tabNotFoundResponse: res => res.status(404).json({ error: 'Tab not found' }),
@@ -67,6 +67,8 @@ async function fixture({ mode = 'direct', busy = false, closing = false, unavail
     getSessions: () => sessions, manager: { owns: id => id === 'owner', closings: closing ? new Map([['owner', true]]) : new Map() },
     normalizeUserId: String, findTab, transitioning: () => busy, requests, unavailable: () => unavailable,
   }));
+  // Observe the tracker's count after it admits the request, before any route handler runs.
+  app.use((req, res, next) => { trackedDuringRoute = Math.max(trackedDuringRoute, requests.get('owner') || 0); next(); });
   const start = source.indexOf('const UPLOAD_UI_TIMEOUT_MS');
   vm.runInContext(source.slice(start, source.indexOf('\n// Type', start)), context);
   app.post('/unrelated', (_req, res) => res.json({ ok: true }));
