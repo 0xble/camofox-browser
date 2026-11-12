@@ -1658,7 +1658,7 @@ async function closeSessionNow(userId, session, {
   transitionCheck = () => {
     callerCheck();
     if (session?._terminalClose && !UNAVAILABLE_IDENTITY_CLOSE_REASONS.has(reason.split(':', 1)[0])) {
-      throw Object.assign(new Error('Session retired by terminal close'), { code: 'session_destroyed', statusCode: 410 });
+      throw Object.assign(new Error('Session retired by terminal close'), { code: 'session_destroyed', statusCode: 410, retryable: true, recovery: 'retry' });
     }
   };
   transitionCheck();
@@ -1826,10 +1826,11 @@ async function createSharedIdentityContext(userId, profilePath, { headed = false
 }
 
 async function getSession(userId, { trace = false, headed = false, parkedOpen = false, transitionCheck = () => {} } = {}) {
-  const generation = typeof sessionLifecycleGeneration === 'undefined' ? 0 : sessionLifecycleGeneration;
+  const initialGeneration = typeof sessionLifecycleGeneration === 'undefined' ? 0 : sessionLifecycleGeneration;
+  let generation = initialGeneration;
   const generationCheck = () => {
     if (generation !== (typeof sessionLifecycleGeneration === 'undefined' ? 0 : sessionLifecycleGeneration)) {
-      throw Object.assign(new Error('Session retired by terminal close'), { code: 'session_destroyed', statusCode: 410 });
+      throw Object.assign(new Error('Session retired by terminal close'), { code: 'session_destroyed', statusCode: 410, retryable: true, recovery: 'retry' });
     }
   };
   const callerCheck = transitionCheck;
@@ -1897,6 +1898,13 @@ async function getSession(userId, { trace = false, headed = false, parkedOpen = 
       }
       const sharedIdentity = sharedIdentities.owns(key);
       const b = sharedIdentity ? null : await ensureBrowser();
+      if (!sharedIdentity) {
+        const recoveredGeneration = typeof sessionLifecycleGeneration === 'undefined' ? 0 : sessionLifecycleGeneration;
+        // Recovery itself closes sessions for a disconnected browser and
+        // advances the generation. That increment belongs to this request, so
+        // it must not retire the request; any other increment still must.
+        if (recoveredGeneration === initialGeneration + 1) generation = recoveredGeneration;
+      }
       const contextOptions = {
         viewport: null,
         ...contextIdentityOptions({
