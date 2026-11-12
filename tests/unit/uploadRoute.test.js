@@ -22,6 +22,7 @@ async function fixture({ mode = 'direct', busy = false, closing = false, unavail
   const logs = [];
   const events = [];
   const requests = new Map();
+  let trackedDuringRoute = 0;
   let activated = false;
   const setFiles = async files => {
     attachments.push(files);
@@ -48,7 +49,7 @@ async function fixture({ mode = 'direct', busy = false, closing = false, unavail
     app, express, Buffer, resolveUploadPaths, CONFIG: { uploadsDir }, sessions, findTab,
     normalizeUserId: String, log: (...args) => logs.push(args),
     pluginEvents: { emit: (...args) => events.push(args) },
-    withUserLimit: jest.fn(async (_user, fn) => fn()),
+    withUserLimit: jest.fn(async (_user, fn) => { trackedDuringRoute = requests.get('owner') || 0; return fn(); }),
     withTabLock: jest.fn(async (_tab, fn) => fn()),
     refToLocator: () => trigger, refreshTabRefs: async () => new Map([['e1', {}]]),
     tabNotFoundResponse: res => res.status(404).json({ error: 'Tab not found' }),
@@ -83,7 +84,7 @@ async function fixture({ mode = 'direct', busy = false, closing = false, unavail
     return { status: response.status, body: await response.json() };
   };
   return {
-    request, attachments, logs, events, requests, input, chooser, dependencies,
+    request, attachments, logs, events, requests, trackedDuringRoute: () => trackedDuringRoute, input, chooser, dependencies,
     close: () => new Promise(resolve => server.close(resolve)),
   };
 }
@@ -315,6 +316,7 @@ describe('mixed-case routes keep shared-identity gates and in-flight tracking', 
     const f = await fixture();
     try {
       expect((await f.request({}, { route, rawBody: '{"userId":"owner"}' })).status).toBe(route.toLowerCase().includes('/upload/') ? 400 : 200);
+      expect(f.trackedDuringRoute()).toBe(1);
       expect(f.requests.size).toBe(0);
     } finally { await f.close(); }
   });
