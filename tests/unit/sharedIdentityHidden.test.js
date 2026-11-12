@@ -148,6 +148,33 @@ test('failed cleanup refresh cannot make a visible application collectible', asy
   fail = true;
   await assert.rejects(visibility.refresh(), /readback failed/);
   assert.equal(visibility.isPageVisible({}), true);
+  assert.equal(visibility.visible.size, 0, 'failed readback is unknown, not confirmed visible');
+  fail = false;
+  await visibility.refresh();
+  assert.equal(visibility.isPageVisible({}), false, 'a later successful refresh clears the unknown flag');
+  assert.equal(visibility.visible.size, 0);
+});
+
+test('newPage re-hides after a failed visibility refresh', async () => {
+  let fail = false;
+  const calls = [];
+  const { visibility } = controller(async (_pid, hidden) => {
+    calls.push(hidden);
+    return { hidden, active: !hidden, activated: !hidden };
+  }, { readState: async () => { if (fail) throw Error('readback failed'); return { hidden: true }; } });
+  await visibility.attach();
+  const hiddenCalls = calls.length;
+  fail = true;
+  await assert.rejects(visibility.refresh(), /readback failed/);
+  assert.equal(visibility.visible.size, 0);
+  assert.equal(visibility.isPageVisible({}), true, 'cleanup still fails closed while native state is unknown');
+  fail = false;
+  const page = { isClosed: () => false };
+  assert.equal(await visibility.newPage({ newPage: async () => page }), page);
+  assert.equal(calls.length, hiddenCalls + 1, 'unknown state must not skip the re-hide a confirmed-hidden app would get');
+  assert.equal(calls.at(-1), true);
+  assert.equal(visibility.visible.size, 0);
+  assert.equal(visibility.isPageVisible({}), false);
 });
 
 test('hide refusal reports failure and retains visible state without closing anything', async () => {
@@ -292,7 +319,7 @@ for (const operation of ['open', 'newPage']) {
       assert.match(outcome?.message || '', /visibility.*timed out/);
       assert.equal(outcome.code, 'request_timeout');
       assert.deepEqual(calls, [true], 'timeout itself must not hide or close anything');
-      assert.equal(visibility.visible.size, 1, 'unconfirmed browser work must remain protected');
+      assert.equal(visibility.isPageVisible({}), true, 'unconfirmed browser work must remain protected');
       assert.equal(await visibility.release(), true, 'later work must not wait for the hung browser call');
       await visibility.open({ bringToFront: async () => {} });
       assert.deepEqual(calls, [true, true, false]);
@@ -329,7 +356,8 @@ test('an unconfirmed show remains visible to expiry checks', async () => {
   await visibility.attach();
   fail = true;
   await assert.rejects(visibility.open({ bringToFront: async () => {} }), /readback failed/);
-  assert.equal(visibility.visible.size, 1);
+  assert.equal(visibility.isPageVisible({}), true);
+  assert.equal(visibility.visible.size, 0);
 });
 
 test('native lookup is fresh and cannot act on a missing or reused browser PID', async () => {
