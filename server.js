@@ -310,7 +310,7 @@ app.use(createSharedIdentityRequestTracker({
 // Agent requests, not browser focus or passive page events, determine hidden-tab
 // recency. Record before the handler so long-running actions count as active.
 app.use((req, res, next) => {
-  const tabId = req.path.match(/^\/tabs\/([^/]+)/)?.[1]
+  const tabId = req.path.match(/^\/tabs\/([^/]+)/i)?.[1]
     || (['/navigate', '/snapshot', '/act'].includes(req.path) ? req.body?.targetId || req.query?.targetId : null);
   if (tabId && tabId !== 'group') {
     for (const session of sessions.values()) {
