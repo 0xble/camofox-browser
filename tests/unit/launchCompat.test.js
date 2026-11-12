@@ -60,7 +60,7 @@ describe('launch compatibility source contract', () => {
     );
     const launchBrowser = sourceBetween(
       'async function launchBrowserInstance()',
-      'async function ensureBrowser()'
+      'async function ensureBrowser({ recoveryAware = false } = {})'
     );
 
     expect(`${probeOptions}\n${sessionContextOptions}`).toContain('contextIdentityOptions({');
@@ -72,7 +72,7 @@ describe('launch compatibility source contract', () => {
   test('uses a real desktop window only when interactive desktop mode is explicit', () => {
     const launch = sourceBetween(
       'async function launchBrowserInstance()',
-      'async function ensureBrowser()'
+      'async function ensureBrowser({ recoveryAware = false } = {})'
     );
 
     expect(launch).toContain("const useDesktopWindow = CONFIG.interactiveMode === 'desktop'");
@@ -87,7 +87,7 @@ describe('launch compatibility source contract', () => {
     );
     const launchBrowser = sourceBetween(
       'async function launchBrowserInstance()',
-      'async function ensureBrowser()'
+      'async function ensureBrowser({ recoveryAware = false } = {})'
     );
 
     expect(geoipFallback).toMatch(/GeoLite\|MaxMind\|geolocation/);

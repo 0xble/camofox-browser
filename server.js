@@ -631,6 +631,10 @@ app.post('/sessions/:userId/cookies', express.json({ limit: '512kb' }), async (r
 let browser = null;
 // Terminal retirement invalidates pre-existing acquisitions without an identity lock.
 let sessionLifecycleGeneration = 0;
+// Generation advanced by the latest disconnect recovery, not by terminal closes.
+// The recovery token rides on the launch promise it belongs to. A process-global
+// slot can be overwritten by whichever caller starts the launch.
+let browserRecoveryPromise = null;
 let _lastBrowserPid = null; // Track PID independently for force-kill after close
 let _browserClosePromise = null; // Shared promise for concurrent close serialization
 let _lastBrowserRestartAt = 0; // Timestamp of last browser relaunch (for stale tab detection)
@@ -1573,27 +1577,54 @@ async function launchBrowserInstance() {
   throw lastError || new Error('Failed to launch a usable browser');
 }
 
-async function ensureBrowser() {
+async function ensureBrowser({ recoveryAware = false } = {}) {
   clearBrowserIdleTimer();
+  const result = (value, recoveryGeneration = null) => recoveryAware
+    ? { browser: value, recoveryGeneration }
+    : value;
   if (_browserClosePromise) {
     await _browserClosePromise;
   }
+  let recoveryGeneration = null;
   if (browser && !browser.isConnected()) {
-    failuresTotal.labels('browser_disconnected', 'internal').inc();
-    log('warn', 'browser disconnected, clearing dead sessions and relaunching', {
-      deadSessions: sessions.size,
-    });
-    await closeAllSessions('browser_disconnected', { clearDownloads: true, clearLocks: true });
-    await closeBrowserFully('browser_disconnected');
+    if (!browserRecoveryPromise) {
+      failuresTotal.labels('browser_disconnected', 'internal').inc();
+      log('warn', 'browser disconnected, clearing dead sessions and relaunching', {
+        deadSessions: sessions.size,
+      });
+      // closeAllSessions() advances the generation synchronously before its
+      // first await. Capture that increment before any terminal close can add
+      // another one while the old contexts finish closing.
+      const closing = closeAllSessions('browser_disconnected', { clearDownloads: true, clearLocks: true });
+      const ownGeneration = typeof sessionLifecycleGeneration === 'undefined' ? 0 : sessionLifecycleGeneration;
+      browserRecoveryPromise = (async () => {
+        await closing;
+        await closeBrowserFully('browser_disconnected');
+        return ownGeneration;
+      })().finally(() => { browserRecoveryPromise = null; });
+    }
+    recoveryGeneration = await browserRecoveryPromise;
   }
-  if (browser) return browser;
-  if (browserLaunchPromise) return browserLaunchPromise;
+  if (browser) return result(browser, recoveryGeneration);
+  if (browserLaunchPromise) {
+    const joined = browserLaunchPromise;
+    const launched = await joined;
+    // Keep this caller's token when the joined launch was published without
+    // one. A later terminal increment still fails the equality fence.
+    return result(launched, joined.recoveryGeneration ?? recoveryGeneration);
+  }
   const launchTimeoutMs = proxyPool?.launchTimeoutMs ?? 60000;
-  browserLaunchPromise = Promise.race([
+  let launch;
+  launch = Promise.race([
     launchBrowserInstance(),
     new Promise((_, reject) => setTimeout(() => reject(new Error(`Browser launch timeout (${Math.round(launchTimeoutMs / 1000)}s)`)), launchTimeoutMs)),
-  ]).finally(() => { browserLaunchPromise = null; });
-  return browserLaunchPromise;
+  ]).finally(() => {
+    if (browserLaunchPromise === launch) browserLaunchPromise = null;
+  });
+  launch.recoveryGeneration = recoveryGeneration;
+  browserLaunchPromise = launch;
+  const launched = await launch;
+  return result(launched, launch.recoveryGeneration ?? recoveryGeneration);
 }
 
 // Resolve local-control aliases once at the API boundary. Native Hermes already
@@ -1826,7 +1857,8 @@ async function createSharedIdentityContext(userId, profilePath, { headed = false
 }
 
 async function getSession(userId, { trace = false, headed = false, parkedOpen = false, transitionCheck = () => {} } = {}) {
-  const generation = typeof sessionLifecycleGeneration === 'undefined' ? 0 : sessionLifecycleGeneration;
+  const initialGeneration = typeof sessionLifecycleGeneration === 'undefined' ? 0 : sessionLifecycleGeneration;
+  let generation = initialGeneration;
   const generationCheck = () => {
     if (generation !== (typeof sessionLifecycleGeneration === 'undefined' ? 0 : sessionLifecycleGeneration)) {
       throw Object.assign(new Error('Session retired by terminal close'), { code: 'session_destroyed', statusCode: 410 });
@@ -1896,7 +1928,22 @@ async function getSession(userId, { trace = false, headed = false, parkedOpen = 
         }
       }
       const sharedIdentity = sharedIdentities.owns(key);
-      const b = sharedIdentity ? null : await ensureBrowser();
+      const launched = sharedIdentity ? null : await ensureBrowser({ recoveryAware: true });
+      // recoveryAware returns { browser, recoveryGeneration }. A direct browser
+      // (no recoveryGeneration) is the pre-token contract used by VM fixtures
+      // and any caller that did not opt in. Only an explicit generation token
+      // may be adopted; a missing token must not look like generation 0.
+      const browser = launched && Object.hasOwn(launched, 'recoveryGeneration') ? launched.browser : launched;
+      if (!sharedIdentity) {
+        const recoveredGeneration = launched && Object.hasOwn(launched, 'recoveryGeneration')
+          ? launched.recoveryGeneration
+          : null;
+        const currentGeneration = typeof sessionLifecycleGeneration === 'undefined' ? 0 : sessionLifecycleGeneration;
+        // Adopt only the generation this call awaited from disconnect recovery,
+        // and only when no terminal close landed afterward. A concurrent
+        // terminal increment, including one during a cold launch, still retires.
+        if (recoveredGeneration !== null && recoveredGeneration === currentGeneration) generation = recoveredGeneration;
+      }
       const contextOptions = {
         viewport: null,
         ...contextIdentityOptions({
@@ -1920,7 +1967,7 @@ async function getSession(userId, { trace = false, headed = false, parkedOpen = 
       transitionCheck();
       const context = sharedIdentity
         ? await sharedIdentities.open(key, profilePath => createSharedIdentityContext(key, profilePath, { headed, parkedOpen, transitionCheck }))
-        : await b.newContext(contextOptions);
+        : await browser.newContext(contextOptions);
       const checkAcquisition = () => {
         try { generationCheck(); }
         catch (error) {
