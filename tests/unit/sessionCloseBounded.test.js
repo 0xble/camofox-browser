@@ -169,13 +169,15 @@ describe('bounded session close', () => {
     await expect(closeContextBounded(fakeContext([], { hangs: false }), { timeoutMs: 50 })).resolves.toBe(true);
   });
 
-  test('pre-protocol Playwright rejection falls back and stays tracked until a confirmed retry', async () => {
+  test('pre-protocol Playwright rejection stays tracked until the protocol close is confirmed', async () => {
     const page = fakePage();
     const context = Object.assign(new EventEmitter(), {
       _closingStatus: 'none',
       isClosed: BrowserContext.prototype.isClosed,
       request: { dispose: jest.fn(async () => { throw new Error('disposal rejected'); }) },
-      _channel: { close: jest.fn(async () => {}) },
+      // Faithful Playwright protocol fixture: the low-level close response
+      // causes the browser context close event and closed-state readback.
+      _channel: { close: jest.fn(async () => { context._closingStatus = 'closed'; context.emit('close'); }) },
       pages: () => [page],
     });
     context.close = jest.fn(() => BrowserContext.prototype.close.call(context));
@@ -196,9 +198,10 @@ describe('bounded session close', () => {
     expect(log).toHaveBeenCalledWith('warn', 'session context close unconfirmed; closed pages individually',
       expect.objectContaining({ userId: 'rejected' }));
     expect(context.listenerCount('close')).toBe(0);
-    context.close.mockImplementationOnce(async () => { context.emit('close'); });
     await reapAbandonedContexts({ timeoutMs: 20 });
     expect(context.close).toHaveBeenCalledTimes(2);
+    expect(context._channel.close).toHaveBeenCalledTimes(1);
+    expect(context._closingStatus).toBe('closed');
     expect(abandonedContexts.has(context)).toBe(false);
     expect(context.listenerCount('close')).toBe(0);
   });

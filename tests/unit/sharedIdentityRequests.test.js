@@ -83,6 +83,21 @@ test.each(['open', 'focus'])('parked %s is active work without a transition gate
   expect(requests.size).toBe(0);
 });
 
+test('legacy focus on an existing headed session remains active work until the response closes', () => {
+  const requests = new Map();
+  const manager = { owns: key => key === 'fixture', closings: new Set() };
+  const sessions = new Map([['fixture', { headed: true }]]);
+  const tracker = createSharedIdentityRequestTracker({ getSessions: () => sessions, manager,
+    normalizeUserId: String, findTab: () => null, transitioning: () => false, requests });
+  const response = Object.assign(new EventEmitter(), { status: jest.fn().mockReturnThis(), json: jest.fn() });
+  const next = jest.fn();
+  tracker({ path: '/browser/identities/fixture/focus' }, response, next);
+  expect(next).toHaveBeenCalledTimes(1);
+  expect(requests.get('fixture')).toBe(1);
+  response.emit('close');
+  expect(requests.size).toBe(0);
+});
+
 test.each(['open', 'focus'])('legacy %s fallback is not counted before visibility setup succeeds', action => {
   const requests = new Map();
   const manager = { owns: key => key === 'fixture', closings: new Set() };
