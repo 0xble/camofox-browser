@@ -817,6 +817,19 @@ async function withTabLock(tabId, operation, timeoutMs = HANDLER_TIMEOUT_MS, { a
     // The timed-out operation no longer counts as in-flight navigation, so a
     // navigation that itself exceeds its budget still feeds the streak.
     lock.navigating = false;
+    if (err?.code === 'native_input_timeout') {
+      // Playwright's Firefox input is an in-engine protocol call, not a
+      // cancellable OS helper. Never unlock a live page under its late input.
+      // Retire just this page (bounded close), not its identity or sibling tabs.
+      const owner = findTabOwner(tabId);
+      if (owner?.session === timeoutOwner?.session && owner?.tabState === timeoutOwner?.tabState &&
+          tabLocks.get(tabId) === lock && !humanControlledTabs.has(tabId)) {
+        if (await destroyUnresponsiveTab(owner.session, tabId, 'native_input_timeout', owner.userId)) throw tabDestroyedError(err);
+      }
+      // An already requested human rescue takes precedence over teardown. The
+      // actual input remains fenced until settlement; do not claim cancellation.
+      Object.assign(err, { code: 'human_handoff_required', statusCode: 409, recovery: 'human_handoff', retryable: false });
+    }
     if (err?.code === 'tab_lock_timeout') {
       const timeoutResult = await handleTimedOutTab(tabId, timeoutOwner);
       // tab_missing means a concurrent timeout or close already removed the
@@ -3920,10 +3933,12 @@ app.post('/tabs/:tabId/handoff', async (req, res) => {
   if (!session?.sharedIdentity) return res.status(409).json({ error: 'Handoff is available only for shared identity tabs' });
   if (!findTab(session, req.params.tabId)) return tabNotFoundResponse(res, req.params.tabId);
   try {
-    const result = await withTabLock(req.params.tabId, async () => {
+    const nativeRescue = handoff === 'human' && session.visibility?.capability?.().mode === 'app-hidden';
+    const perform = async () => {
       const current = findTab(session, req.params.tabId);
       const handoffLock = tabLocks.get(req.params.tabId);
       return applySharedTabHandoff({
+        nativeOnly: nativeRescue && Boolean(handoffLock?.active),
         tabId: req.params.tabId,
         handoff,
         tabState: current?.tabState,
@@ -3932,7 +3947,9 @@ app.post('/tabs/:tabId/handoff', async (req, res) => {
         onAgentControl: () => armAbandonedTabRecovery(req.params.tabId, handoffLock, { session, tabState: current?.tabState }),
         log,
       });
-    }, HANDLER_TIMEOUT_MS, { allowHumanControl: true });
+    };
+    // AppKit rescue intentionally does not acquire the engine input lock.
+    const result = nativeRescue ? await perform() : await withTabLock(req.params.tabId, perform, HANDLER_TIMEOUT_MS, { allowHumanControl: true });
     return res.json({ ok: true, ...result });
   } catch (err) {
     return handleRouteError(err, req, res);
@@ -5071,14 +5088,16 @@ app.post('/tabs/:tabId/click', async (req, res) => {
         const x = box.x + box.width / 2;
         const y = box.y + box.height / 2;
         
+        const nativeDeadline = Date.now() + 12000;
+        const nativeBudget = () => Math.max(1, Math.min(nativeDeadline - Date.now(), remainingBudget()));
         // Move mouse to element (triggers mouseover/mouseenter)
-        await withTimeout(tabState.page.mouse.move(x, y), Math.max(1, remainingBudget()), 'native mouse move');
+        await withTimeout(tabState.page.mouse.move(x, y), nativeBudget(), 'native mouse move', 'native_input_timeout');
         await tabState.page.waitForTimeout(50);
         
         // Full click sequence
-        await withTimeout(tabState.page.mouse.down(), Math.max(1, remainingBudget()), 'native mouse down');
+        await withTimeout(tabState.page.mouse.down(), nativeBudget(), 'native mouse down', 'native_input_timeout');
         await tabState.page.waitForTimeout(50);
-        await withTimeout(tabState.page.mouse.up(), Math.max(1, remainingBudget()), 'native mouse up');
+        await withTimeout(tabState.page.mouse.up(), nativeBudget(), 'native mouse up', 'native_input_timeout');
         
         log('info', 'mouse sequence dispatched', { x: x.toFixed(0), y: y.toFixed(0) });
       };

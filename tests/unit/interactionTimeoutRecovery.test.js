@@ -52,6 +52,7 @@ async function fixture({ keyboard, click, mouse, fill, focus, refresh, frames = 
     findTab: () => ({ tabState }), findTabOwner: () => ({ session, tabState }),
     tabLockTimeoutsTotal: { inc() {} }, refreshTabLockQueueDepth() {},
     handleTimedOutTab: async () => ({ destroyed: false }),
+    destroyUnresponsiveTab: async () => { tabState.retired = true; box.locks.get('A')?.drain(); box.locks.delete('A'); return true; },
     withUserLimit: (_userId, operation) => operation(),
     selectorValidationError: () => null, visibleSelectorCandidate: () => null,
     isGoogleSerp: () => false, clickWithDownloadGuard: (_tab, operation) => operation(),
@@ -90,17 +91,15 @@ async function fixture({ keyboard, click, mouse, fill, focus, refresh, frames = 
   };
 }
 
-test('1Password notification returns human_handoff_required before any native input and releases the lock', async () => {
+test('1Password notification alone does not misclassify the identity input fault', async () => {
   const click = jest.fn(async () => {}), move = jest.fn(async () => {});
   const frames = [{ name: () => 'op-notification', url: () => 'moz-extension://fixture/inline/notification/notification.html',
     frameElement: async () => ({ isVisible: async () => true, dispose: async () => {} }),
   }];
   const f = await fixture({ click, mouse: { move }, frames });
   try {
-    expect(await f.request('click')).toMatchObject({ status: 409, body: {
-      code: 'human_handoff_required', retryable: false, recovery: 'human_handoff',
-    } });
-    expect(click).not.toHaveBeenCalled();
+    expect(await f.request('click')).toMatchObject({ status: 200 });
+    expect(click).toHaveBeenCalledTimes(1);
     expect(move).not.toHaveBeenCalled();
     expect(f.locks.get('A').active).toBe(false);
     frames.length = 0;
@@ -142,11 +141,10 @@ test.each(['move', 'down', 'up'])('nested native mouse %s timeout retains classi
   try {
     const response = await f.request('click');
     observe(`nested mouse ${action}`, f, response);
-    expect(response).toEqual(timeoutResponse);
-    expect(response.body.error).toContain(`native mouse ${action} timed out`);
+    expect(response).toMatchObject({ status: 410, body: { code: 'tab_destroyed', retryable: true, recovery: 'create_new_tab' } });
     expect(f.refreshes).toEqual([]);
-    expect(f.locks.get('A').settling).toBe(true);
-    expect(await f.request('click')).toMatchObject({ status: 503, body: { code: 'tab_busy' } });
+    expect(f.locks.has('A')).toBe(false);
+    expect(await f.request('click')).toMatchObject({ status: 410, body: { code: 'tab_destroyed' } });
   } finally {
     slow.resolve();
     await turn();

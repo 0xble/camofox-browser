@@ -101,7 +101,7 @@ test('native timeout retires only the affected tab without waiting for the under
   const f = fixture(); f.enableRecovery();
   const mouse = deferred(), continuation = jest.fn();
   const first = f.run('A', async () => {
-    await f.timeout(mouse.promise, 1, 'native mouse move', { retireOnTimeout: true });
+    await f.timeout(mouse.promise, 1, 'native mouse move', 'native_input_timeout');
     continuation();
   }, 100);
   await expect(first).rejects.toMatchObject({ code: 'tab_destroyed', statusCode: 410 });
