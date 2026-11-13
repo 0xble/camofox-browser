@@ -97,6 +97,21 @@ test.each([false, true])('timed-out work refuses retries and handoff until it se
   expect(f.locks.get('A').active).toBe(false);
 });
 
+test('native timeout retires only the affected tab without waiting for the underlying input', async () => {
+  const f = fixture(); f.enableRecovery();
+  const mouse = deferred(), continuation = jest.fn();
+  const first = f.run('A', async () => {
+    await f.timeout(mouse.promise, 1, 'native mouse move', { retireOnTimeout: true });
+    continuation();
+  }, 100);
+  await expect(first).rejects.toMatchObject({ code: 'tab_destroyed', statusCode: 410 });
+  expect(f.owners.has('A')).toBe(false);
+  expect(f.locks.has('A')).toBe(false);
+  expect(f.owners.has('B')).toBe(true);
+  mouse.resolve(); await turn();
+  expect(continuation).not.toHaveBeenCalled();
+});
+
 test('nested timeout retains the actual mouse operation after the route promise rejects', async () => {
   const f = fixture();
   const mouse = deferred();
