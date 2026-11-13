@@ -26,7 +26,7 @@ function deferred() {
   return { promise, resolve };
 }
 
-async function fixture({ keyboard, click, mouse, fill, focus, refresh } = {}) {
+async function fixture({ keyboard, click, mouse, fill, focus, refresh, frames = [] } = {}) {
   const app = express();
   app.use(express.json());
   const locator = {
@@ -34,7 +34,7 @@ async function fixture({ keyboard, click, mouse, fill, focus, refresh } = {}) {
     boundingBox: async () => ({ x: 0, y: 0, width: 10, height: 10 }),
   };
   const page = {
-    isClosed: () => false, url: () => 'https://fixture.invalid/changed',
+    isClosed: () => false, url: () => 'https://fixture.invalid/changed', frames: () => frames,
     keyboard: { type: keyboard || jest.fn(async () => {}), press: async () => {} },
     mouse: { move: async () => {}, down: async () => {}, up: async () => {}, ...mouse },
     locator: () => locator, focus: focus || (async () => {}), waitForTimeout: async () => {},
@@ -89,6 +89,22 @@ async function fixture({ keyboard, click, mouse, fill, focus, refresh } = {}) {
     close: () => new Promise((resolve, reject) => server.close(error => error ? reject(error) : resolve())),
   };
 }
+
+test('1Password notification returns human_handoff_required before any native input and releases the lock', async () => {
+  const click = jest.fn(async () => {}), move = jest.fn(async () => {});
+  const frames = [{ name: () => 'op-notification', url: () => 'moz-extension://fixture/inline/notification/notification.html' }];
+  const f = await fixture({ click, mouse: { move }, frames });
+  try {
+    expect(await f.request('click')).toMatchObject({ status: 409, body: {
+      code: 'human_handoff_required', retryable: false, recovery: 'human_handoff',
+    } });
+    expect(click).not.toHaveBeenCalled();
+    expect(move).not.toHaveBeenCalled();
+    expect(f.locks.get('A').active).toBe(false);
+    frames.length = 0;
+    expect(await f.request('click')).toMatchObject({ status: 200 });
+  } finally { await f.close(); }
+});
 
 function observe(label, f, response) {
   console.log(JSON.stringify({ case: label, ...response, refreshes: f.refreshes, settling: f.locks.get('A')?.settling || false }));
