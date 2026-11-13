@@ -40,7 +40,7 @@ test('human handoff shows a busy tab without acquiring its input lock', async ()
 
 test('native-only handoff unhides the identity without waiting on Juggler or moving an unconfirmed window', async () => {
   let state = { hidden: true, active: false };
-  const focus = jest.fn(async () => {}), move = jest.fn(async () => {});
+  const focus = jest.fn(async () => {}), move = jest.fn(async () => ({ onMain: true, frontmost: true }));
   const visibility = createDarwinIdentityVisibility('/fixture/profile', {
     rootPid: 10, snapshot: () => [{ pid: 12, ppid: 10, args: '/engine/camoufox -profile /fixture/profile -juggler-pipe' }],
     setHidden: async (_pid, hidden) => (state = { hidden, active: !hidden }), readState: async () => state,

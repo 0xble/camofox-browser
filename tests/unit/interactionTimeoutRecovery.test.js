@@ -92,7 +92,9 @@ async function fixture({ keyboard, click, mouse, fill, focus, refresh, frames = 
 
 test('1Password notification returns human_handoff_required before any native input and releases the lock', async () => {
   const click = jest.fn(async () => {}), move = jest.fn(async () => {});
-  const frames = [{ name: () => 'op-notification', url: () => 'moz-extension://fixture/inline/notification/notification.html' }];
+  const frames = [{ name: () => 'op-notification', url: () => 'moz-extension://fixture/inline/notification/notification.html',
+    frameElement: async () => ({ isVisible: async () => true, dispose: async () => {} }),
+  }];
   const f = await fixture({ click, mouse: { move }, frames });
   try {
     expect(await f.request('click')).toMatchObject({ status: 409, body: {
