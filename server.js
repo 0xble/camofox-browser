@@ -3686,6 +3686,11 @@ function transitionIdentity(userId, action, operation, { coalesceKey = null } = 
   return promise;
 }
 
+function identityInputBusy(_userId, session) {
+  return Boolean(session && [...session.tabGroups.values()].some(group =>
+    [...group.keys()].some(tabId => tabLocks.get(tabId)?.active)));
+}
+
 function identityBusy(userId, session) {
   if (typeof sharedIdentityWindow !== 'undefined' && sharedIdentityWindow?.unavailable?.(userId)) return true;
   return Boolean(
@@ -3803,6 +3808,7 @@ sharedIdentityWindow = createSharedIdentityWindowOpener({
   closeSession,
   registerPage: registerSharedIdentityPage,
   isBusy: identityBusy,
+  isInputBusy: identityInputBusy,
   parkingEnabled: async () => os.platform() === 'darwin' || Boolean(await refreshSharedParkDisplay()),
   transitionTimeoutMs: CONFIG.sharedIdentityOpenTimeoutMs,
 });

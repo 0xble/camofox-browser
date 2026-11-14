@@ -65,12 +65,12 @@ test('failed human visibility restores agent control instead of claiming a hando
   expect(human.has('A')).toBe(false);
 });
 
-function visibilityFixture({ timeoutMs = 20, prepare } = {}) {
+function visibilityFixture({ timeoutMs = 20, prepare, beforeSetHidden } = {}) {
   let state = { hidden: true, active: false };
   const changes = [], move = jest.fn(async () => ({ onMain: true, number: 8, frontmost: true }));
   const visibility = createDarwinIdentityVisibility('/fixture/profile', {
     rootPid: 10, snapshot: () => [{ pid: 12, ppid: 10, args: '/engine/camoufox -profile /fixture/profile -juggler-pipe' }],
-    timeoutMs, setHidden: async (_pid, hidden) => { changes.push(hidden); return (state = { hidden, active: !hidden }); },
+    timeoutMs, setHidden: async (_pid, hidden, options) => { beforeSetHidden?.(hidden); changes.push(hidden); return (state = { hidden, active: !hidden }); },
     readState: async () => state,
     createWindowControl: prepare || (async () => ({ open: move, close: async () => {} })),
   });
@@ -122,7 +122,7 @@ test('identity open uses native rescue for busy input and reports unconfirmed ta
   const session = { sharedIdentity: true, visibility: f.visibility,
     context: { pages: () => [page] }, lastUsedPage: page, tabGroups: new Map([['task', new Map([['A', { page }]])]]) };
   const opener = createSharedIdentityWindowOpener({ sessions: new Map([['identity', session]]),
-    parkingEnabled: true, manager: {}, getSession: async () => session, isBusy: () => true,
+    parkingEnabled: true, manager: {}, getSession: async () => session, isBusy: () => true, isInputBusy: () => true,
     registerPage: () => 'A' });
   try {
     expect(await opener.openWindow('identity', 'A')).toMatchObject({ ok: true, visible: true, focused: false,

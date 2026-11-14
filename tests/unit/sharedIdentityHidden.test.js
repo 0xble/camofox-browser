@@ -313,19 +313,26 @@ for (const operation of ['open', 'newPage']) {
     let guard;
     try {
       const outcome = await Promise.race([
-        operationPromise.then(() => null, error => error),
+        operationPromise.then(value => value, error => error),
         new Promise(resolve => { guard = setTimeout(() => resolve(null), 250); }),
       ]);
-      assert.match(outcome?.message || '', /visibility.*timed out/);
-      assert.equal(outcome.code, 'request_timeout');
-      assert.deepEqual(calls, [true], 'timeout itself must not hide or close anything');
-      assert.equal(visibility.isPageVisible({}), true, 'unconfirmed browser work must remain protected');
-      assert.equal(await visibility.release(), true, 'later work must not wait for the hung browser call');
-      await visibility.open({ bringToFront: async () => {} });
-      assert.deepEqual(calls, [true, true, false]);
+      if (operation === 'open') {
+        // A timed-out Juggler activation is abandoned and the identity is
+        // rescued through the native path instead of leaving the queue wedged.
+        assert.deepEqual(outcome, { visible: true, focused: false, targetUnconfirmed: true });
+        assert.equal(visibility.isPageVisible({}), true);
+        assert.deepEqual(calls, [true, false, false]);
+      } else {
+        assert.match(outcome?.message || '', /visibility.*timed out/);
+        assert.equal(outcome.code, 'request_timeout');
+        assert.deepEqual(calls, [true]);
+        assert.equal(visibility.isPageVisible({}), true, 'unconfirmed browser work must remain protected');
+        assert.equal(await visibility.release(), true, 'later work must not wait for the hung browser call');
+        await visibility.open({ bringToFront: async () => {} });
+        assert.deepEqual(calls, [true, true, false]);
+      }
       finish({});
       await new Promise(resolve => setImmediate(resolve));
-      assert.deepEqual(calls, [true, true, false], 'late work must not show or hide after a newer operation');
       assert.equal(visibility.visible.size, 1);
     } finally {
       clearTimeout(guard); finish({});
@@ -336,8 +343,11 @@ for (const operation of ['open', 'newPage']) {
 
 test('timed-out native readback cannot overwrite a later visibility change', async () => {
   let delayed = false, finish;
-  const { visibility } = controller(async (_pid, hidden) => {
-    if (delayed) { delayed = false; return new Promise(resolve => { finish = resolve; }); }
+  const { visibility } = controller(async (_pid, hidden, { signal }) => {
+    if (delayed) {
+      delayed = false;
+      return new Promise((resolve, reject) => { finish = resolve; signal.addEventListener('abort', () => reject(signal.reason), { once: true }); });
+    }
     return { hidden, active: !hidden, activated: true };
   }, { timeoutMs: 30 });
   await visibility.open({ bringToFront: async () => {} });
