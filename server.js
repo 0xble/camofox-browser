@@ -73,7 +73,7 @@ import { createSharedIdentityIdlePolicy } from './lib/shared-identity-idle.js';
 import { createProfileCleanupGuard, isEligibleForAutomaticCleanup } from './lib/cleanup-policy.js';
 import { closeSessionOnce, hasSessionClose, teardownEphemeralSession, reapAbandonedContexts, settleWithin, SESSION_CLOSE_STEP_TIMEOUT_MS } from './lib/session-close.js';
 import { tabClosable, latestAgentTabId, sweepIdleEphemeralTabs } from './lib/idle-tabs.js';
-import { applySharedTabHandoff } from './lib/shared-tab-handoff.js';
+import { applySharedTabHandoff, settleHumanReservation } from './lib/shared-tab-handoff.js';
 import { handleTabTimeout } from './lib/tab-timeout.js';
 import { createVirtualDisplayRegistry } from './lib/plugin-capabilities.js';
 import { killProcessIds } from './lib/browser-processes.js';
@@ -825,6 +825,17 @@ async function withTabLock(tabId, operation, timeoutMs = HANDLER_TIMEOUT_MS, { a
         const current = findTabOwner(tabId);
         return Boolean(timeoutOwner) && current?.session === timeoutOwner.session && current?.tabState === timeoutOwner.tabState;
       };
+      // A human handoff still in flight decides the outcome. Wait for it to
+      // commit or roll back, so a provisional reservation is never reported
+      // as a confirmed rescue.
+      await settleHumanReservation(timeoutOwner?.tabState);
+      // A page already shown to a human (via handoff or identity open) becomes
+      // a human rescue instead of being torn down mid-ceremony, e.g. a passkey.
+      if (sameTab() && !humanControlledTabs.has(tabId) && timeoutOwner.session?.sharedIdentity
+          && timeoutOwner.session.visibility?.isPageVisible?.(timeoutOwner.tabState.page)) {
+        humanControlledTabs.add(tabId);
+        timeoutOwner.tabState.handoff = 'human';
+      }
       if (sameTab() && tabLocks.get(tabId) === lock && !humanControlledTabs.has(tabId)) {
         const owner = findTabOwner(tabId);
         if (await destroyUnresponsiveTab(owner.session, tabId, 'native_input_timeout', owner.userId)) throw tabDestroyedError(err);
@@ -3951,11 +3962,16 @@ app.post('/tabs/:tabId/handoff', async (req, res) => {
   if (!findTab(session, req.params.tabId)) return tabNotFoundResponse(res, req.params.tabId);
   try {
     const nativeRescue = handoff === 'human' && session.visibility?.capability?.().mode === 'app-hidden';
+    // AppKit rescue skips the engine input lock only when that lock is held by
+    // wedged or settling work. An idle tab still serializes through the lock,
+    // so a concurrent agent handoff cannot be overwritten by a later human one.
+    const busyLock = tabLocks.get(req.params.tabId);
+    const bypassLock = nativeRescue && Boolean(busyLock?.active || busyLock?.settling);
     const perform = async () => {
       const current = findTab(session, req.params.tabId);
       const handoffLock = tabLocks.get(req.params.tabId);
       return applySharedTabHandoff({
-        nativeOnly: nativeRescue && Boolean(handoffLock?.active),
+        nativeOnly: bypassLock,
         tabId: req.params.tabId,
         handoff,
         tabState: current?.tabState,
@@ -3965,8 +3981,7 @@ app.post('/tabs/:tabId/handoff', async (req, res) => {
         log,
       });
     };
-    // AppKit rescue intentionally does not acquire the engine input lock.
-    const result = nativeRescue ? await perform() : await withTabLock(req.params.tabId, perform, HANDLER_TIMEOUT_MS, { allowHumanControl: true });
+    const result = bypassLock ? await perform() : await withTabLock(req.params.tabId, perform, HANDLER_TIMEOUT_MS, { allowHumanControl: true });
     return res.json({ ok: true, ...result });
   } catch (err) {
     return handleRouteError(err, req, res);

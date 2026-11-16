@@ -39,6 +39,26 @@ test('human handoff shows a busy tab without acquiring its input lock', async ()
   expect(open).toHaveBeenCalledWith(page, { nativeOnly: true });
 });
 
+test('app-hidden human handoff takes the tab lock when the tab is idle', async () => {
+  const human = new Set();
+  const page = { isClosed: () => false };
+  const open = jest.fn(async () => ({ visible: true, focused: true }));
+  const session = { sharedIdentity: true, visibility: { open, isVisible: () => true, capability: () => ({ mode: 'app-hidden' }) } };
+  const withTabLock = jest.fn(async (_id, operation) => operation());
+  const handler = handoffRoute({
+    normalizeUserId: String, sessions: new Map([['identity', session]]), findTab: () => ({ tabState: { page } }),
+    tabLocks: new Map([['A', { active: false, settling: false }]]), humanControlledTabs: human,
+    withTabLock, HANDLER_TIMEOUT_MS: 20, applySharedTabHandoff, armAbandonedTabRecovery() {}, log() {},
+    handleRouteError: (err, _req, res) => res.status(err.statusCode || 500).json({ error: err.message }),
+  });
+  const res = { status: jest.fn(() => res), json: jest.fn(() => res) };
+  await handler({ params: { tabId: 'A' }, body: { userId: 'identity', handoff: 'human' } }, res);
+  expect(withTabLock).toHaveBeenCalledTimes(1);
+  expect(open).toHaveBeenCalledWith(page);
+  expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ ok: true, handoff: 'human' }));
+  expect(res.json.mock.calls[0][0]).not.toHaveProperty('operationMayStillBeRunning');
+});
+
 test('native-only handoff unhides the identity without waiting on Juggler or moving an unconfirmed window', async () => {
   let state = { hidden: true, active: false };
   const focus = jest.fn(async () => {}), move = jest.fn(async () => ({ onMain: true, frontmost: true }));

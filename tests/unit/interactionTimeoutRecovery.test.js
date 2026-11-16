@@ -4,6 +4,7 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import fs from 'node:fs';
 import vm from 'node:vm';
 import * as browserErrors from '../../lib/browser-errors.js';
+import { settleHumanReservation } from '../../lib/shared-tab-handoff.js';
 import { actionFromReq, classifyError } from '../../lib/request-utils.js';
 
 // Execute the actual route registrations and lock/error functions through a
@@ -43,7 +44,7 @@ async function fixture({ keyboard, click, mouse, fill, focus, refresh, frames = 
   const session = {};
   const refreshes = [];
   const box = {
-    ...browserErrors, AsyncLocalStorage, setTimeout, clearTimeout,
+    ...browserErrors, AsyncLocalStorage, setTimeout, clearTimeout, settleHumanReservation,
     app: { post(path, handler) {
       app.post(path, (req, res, next) => Promise.resolve(handler(req, res)).catch(next));
     } },
