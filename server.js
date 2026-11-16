@@ -829,8 +829,10 @@ async function withTabLock(tabId, operation, timeoutMs = HANDLER_TIMEOUT_MS, { a
       // commit or roll back, so a provisional reservation is never reported
       // as a confirmed rescue.
       await settleHumanReservation(timeoutOwner?.tabState);
-      // A page already shown to a human (via handoff or identity open) becomes
-      // a human rescue instead of being torn down mid-ceremony, e.g. a passkey.
+      // A page that may be shown to a human (via handoff or identity open)
+      // becomes a human rescue instead of being torn down mid-ceremony, e.g. a
+      // passkey. isPageVisible is fail-closed: an opening or unconfirmed show
+      // also counts, because keeping a possibly visible page is the safe side.
       if (sameTab() && !humanControlledTabs.has(tabId) && timeoutOwner.session?.sharedIdentity
           && timeoutOwner.session.visibility?.isPageVisible?.(timeoutOwner.tabState.page)) {
         humanControlledTabs.add(tabId);
@@ -840,8 +842,9 @@ async function withTabLock(tabId, operation, timeoutMs = HANDLER_TIMEOUT_MS, { a
         const owner = findTabOwner(tabId);
         if (await destroyUnresponsiveTab(owner.session, tabId, 'native_input_timeout', owner.userId)) throw tabDestroyedError(err);
       }
-      // Only a confirmed rescue on this same tab outranks teardown. A tab that
-      // vanished or was replaced meanwhile is gone, so the caller needs a new one.
+      // Only a human rescue on this same tab (confirmed or possibly visible)
+      // outranks teardown. A tab that vanished or was replaced meanwhile is
+      // gone, so the caller needs a new one.
       if (!sameTab() || !humanControlledTabs.has(tabId)) throw tabDestroyedError(err);
       // The actual input remains fenced until settlement; do not claim cancellation.
       Object.assign(err, { code: 'human_handoff_required', statusCode: 409, recovery: 'human_handoff', retryable: false });
@@ -5063,7 +5066,7 @@ app.post('/tabs/:tabId/wait', async (req, res) => {
  *             schema:
  *               $ref: '#/components/schemas/Error'
  *       409:
- *         description: Page changed during the click; caller should take a fresh snapshot and retry with current refs. Or code=human_handoff_required (recovery=human_handoff, retryable=false) after a native input timeout on a tab with a confirmed human rescue; hand the tab to a human instead of retrying.
+ *         description: Page changed during the click; caller should take a fresh snapshot and retry with current refs. Or code=human_handoff_required (recovery=human_handoff, retryable=false) after a native input timeout on a tab that is in human control or may be visible to a human (visibility is fail-closed, so an opening or unconfirmed show counts); the tab is kept for a human instead of being retired. Hand the tab to a human instead of retrying.
  *         content:
  *           application/json:
  *             schema:

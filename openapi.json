@@ -1343,7 +1343,7 @@
             }
           },
           "409": {
-            "description": "Page changed during the click; caller should take a fresh snapshot and retry with current refs. Or code=human_handoff_required (recovery=human_handoff, retryable=false) after a native input timeout on a tab with a confirmed human rescue; hand the tab to a human instead of retrying.",
+            "description": "Page changed during the click; caller should take a fresh snapshot and retry with current refs. Or code=human_handoff_required (recovery=human_handoff, retryable=false) after a native input timeout on a tab that is in human control or may be visible to a human (visibility is fail-closed, so an opening or unconfirmed show counts); the tab is kept for a human instead of being retired. Hand the tab to a human instead of retrying.",
             "content": {
               "application/json": {
                 "schema": {
