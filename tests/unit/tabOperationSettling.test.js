@@ -112,6 +112,34 @@ test('native timeout retires only the affected tab without waiting for the under
   expect(continuation).not.toHaveBeenCalled();
 });
 
+test('native timeout reports a confirmed rescue on the same tab as a human handoff', async () => {
+  const f = fixture(); f.enableRecovery();
+  const mouse = deferred();
+  const first = f.run('A', async () => {
+    f.human.add('A');
+    await f.timeout(mouse.promise, 1, 'native mouse move', 'native_input_timeout');
+  }, 100, { allowHumanControl: true });
+  await expect(first).rejects.toMatchObject({ code: 'human_handoff_required', statusCode: 409, recovery: 'human_handoff' });
+  expect(f.destroyUnresponsiveTab).not.toHaveBeenCalled();
+  expect(f.owners.has('A')).toBe(true);
+  mouse.resolve(); await turn();
+});
+
+test.each([
+  ['vanished', f => f.owners.delete('A')],
+  ['replaced', f => f.owners.set('A', { session: {}, tabState: { page: {} } })],
+])('native timeout on a tab that %s without a rescue reports it destroyed, not a handoff', async (_label, change) => {
+  const f = fixture(); f.enableRecovery();
+  const mouse = deferred();
+  const first = f.run('A', async () => {
+    change(f);
+    await f.timeout(mouse.promise, 1, 'native mouse move', 'native_input_timeout');
+  }, 100);
+  await expect(first).rejects.toMatchObject({ code: 'tab_destroyed', statusCode: 410, recovery: 'create_new_tab' });
+  expect(f.destroyUnresponsiveTab).not.toHaveBeenCalled();
+  mouse.resolve(); await turn();
+});
+
 test('nested timeout retains the actual mouse operation after the route promise rejects', async () => {
   const f = fixture();
   const mouse = deferred();

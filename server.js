@@ -821,13 +821,18 @@ async function withTabLock(tabId, operation, timeoutMs = HANDLER_TIMEOUT_MS, { a
       // Playwright's Firefox input is an in-engine protocol call, not a
       // cancellable OS helper. Never unlock a live page under its late input.
       // Retire just this page (bounded close), not its identity or sibling tabs.
-      const owner = findTabOwner(tabId);
-      if (owner?.session === timeoutOwner?.session && owner?.tabState === timeoutOwner?.tabState &&
-          tabLocks.get(tabId) === lock && !humanControlledTabs.has(tabId)) {
+      const sameTab = () => {
+        const current = findTabOwner(tabId);
+        return Boolean(timeoutOwner) && current?.session === timeoutOwner.session && current?.tabState === timeoutOwner.tabState;
+      };
+      if (sameTab() && tabLocks.get(tabId) === lock && !humanControlledTabs.has(tabId)) {
+        const owner = findTabOwner(tabId);
         if (await destroyUnresponsiveTab(owner.session, tabId, 'native_input_timeout', owner.userId)) throw tabDestroyedError(err);
       }
-      // An already requested human rescue takes precedence over teardown. The
-      // actual input remains fenced until settlement; do not claim cancellation.
+      // Only a confirmed rescue on this same tab outranks teardown. A tab that
+      // vanished or was replaced meanwhile is gone, so the caller needs a new one.
+      if (!sameTab() || !humanControlledTabs.has(tabId)) throw tabDestroyedError(err);
+      // The actual input remains fenced until settlement; do not claim cancellation.
       Object.assign(err, { code: 'human_handoff_required', statusCode: 409, recovery: 'human_handoff', retryable: false });
     }
     if (err?.code === 'tab_lock_timeout') {
