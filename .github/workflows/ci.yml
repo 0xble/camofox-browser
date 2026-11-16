@@ -49,11 +49,6 @@ jobs:
       - name: Verify standalone MCP package
         run: npm run test:mcp
 
-      - name: Audit standalone MCP package
-        run: |
-          npm ci --prefix mcp --ignore-scripts
-          npm audit --prefix mcp --omit=dev
-
       - name: Run unit + plugin tests (Jest)
         run: |
           npm install --no-save jest-junit
@@ -69,6 +64,13 @@ jobs:
         run: node --test plugins/local-storage-checkpoint/index.test.js
         env:
           CAMOFOX_PACKAGE_DIR: ${{ github.workspace }}
+
+      # Keep the audit blocking, but do not let it hide unrelated test failures.
+      - name: Audit standalone MCP package
+        if: ${{ !cancelled() }}
+        run: |
+          npm ci --prefix mcp --ignore-scripts
+          npm audit --prefix mcp --omit=dev
 
   e2e:
     runs-on: ubuntu-latest

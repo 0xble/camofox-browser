@@ -73,7 +73,7 @@ import { createSharedIdentityIdlePolicy } from './lib/shared-identity-idle.js';
 import { createProfileCleanupGuard, isEligibleForAutomaticCleanup } from './lib/cleanup-policy.js';
 import { closeSessionOnce, hasSessionClose, teardownEphemeralSession, reapAbandonedContexts, settleWithin, SESSION_CLOSE_STEP_TIMEOUT_MS } from './lib/session-close.js';
 import { tabClosable, latestAgentTabId, sweepIdleEphemeralTabs } from './lib/idle-tabs.js';
-import { applySharedTabHandoff } from './lib/shared-tab-handoff.js';
+import { applySharedTabHandoff, settleHumanReservation } from './lib/shared-tab-handoff.js';
 import { handleTabTimeout } from './lib/tab-timeout.js';
 import { createVirtualDisplayRegistry } from './lib/plugin-capabilities.js';
 import { killProcessIds } from './lib/browser-processes.js';
@@ -817,6 +817,38 @@ async function withTabLock(tabId, operation, timeoutMs = HANDLER_TIMEOUT_MS, { a
     // The timed-out operation no longer counts as in-flight navigation, so a
     // navigation that itself exceeds its budget still feeds the streak.
     lock.navigating = false;
+    if (err?.code === 'native_input_timeout') {
+      // Playwright's Firefox input is an in-engine protocol call, not a
+      // cancellable OS helper. Never unlock a live page under its late input.
+      // Retire just this page (bounded close), not its identity or sibling tabs.
+      const sameTab = () => {
+        const current = findTabOwner(tabId);
+        return Boolean(timeoutOwner) && current?.session === timeoutOwner.session && current?.tabState === timeoutOwner.tabState;
+      };
+      // A human handoff still in flight decides the outcome. Wait for it to
+      // commit or roll back, so a provisional reservation is never reported
+      // as a confirmed rescue.
+      await settleHumanReservation(timeoutOwner?.tabState);
+      // A page that may be shown to a human (via handoff or identity open)
+      // becomes a human rescue instead of being torn down mid-ceremony, e.g. a
+      // passkey. isPageVisible is fail-closed: an opening or unconfirmed show
+      // also counts, because keeping a possibly visible page is the safe side.
+      if (sameTab() && !humanControlledTabs.has(tabId) && timeoutOwner.session?.sharedIdentity
+          && timeoutOwner.session.visibility?.isPageVisible?.(timeoutOwner.tabState.page)) {
+        humanControlledTabs.add(tabId);
+        timeoutOwner.tabState.handoff = 'human';
+      }
+      if (sameTab() && tabLocks.get(tabId) === lock && !humanControlledTabs.has(tabId)) {
+        const owner = findTabOwner(tabId);
+        if (await destroyUnresponsiveTab(owner.session, tabId, 'native_input_timeout', owner.userId)) throw tabDestroyedError(err);
+      }
+      // Only a human rescue on this same tab (confirmed or possibly visible)
+      // outranks teardown. A tab that vanished or was replaced meanwhile is
+      // gone, so the caller needs a new one.
+      if (!sameTab() || !humanControlledTabs.has(tabId)) throw tabDestroyedError(err);
+      // The actual input remains fenced until settlement; do not claim cancellation.
+      Object.assign(err, { code: 'human_handoff_required', statusCode: 409, recovery: 'human_handoff', retryable: false });
+    }
     if (err?.code === 'tab_lock_timeout') {
       const timeoutResult = await handleTimedOutTab(tabId, timeoutOwner);
       // tab_missing means a concurrent timeout or close already removed the
@@ -3673,6 +3705,17 @@ function transitionIdentity(userId, action, operation, { coalesceKey = null } = 
   return promise;
 }
 
+function identityInputBusy(_userId, session) {
+  // Only wedged input counts: a settling lock means timed-out browser work is
+  // still running past its budget. A merely active lock is ordinary work (a
+  // snapshot or evaluate, often on a sibling tab); treating it as wedged
+  // would send identity open down the epoch-aborting native-only rescue and
+  // degrade it to targetUnconfirmed. The normal open path still falls back
+  // to that rescue if it actually times out.
+  return Boolean(session && [...session.tabGroups.values()].some(group =>
+    [...group.keys()].some(tabId => tabLocks.get(tabId)?.settling)));
+}
+
 function identityBusy(userId, session) {
   if (typeof sharedIdentityWindow !== 'undefined' && sharedIdentityWindow?.unavailable?.(userId)) return true;
   return Boolean(
@@ -3790,6 +3833,7 @@ sharedIdentityWindow = createSharedIdentityWindowOpener({
   closeSession,
   registerPage: registerSharedIdentityPage,
   isBusy: identityBusy,
+  isInputBusy: identityInputBusy,
   parkingEnabled: async () => os.platform() === 'darwin' || Boolean(await refreshSharedParkDisplay()),
   transitionTimeoutMs: CONFIG.sharedIdentityOpenTimeoutMs,
 });
@@ -3820,7 +3864,7 @@ sharedIdentityWindow = createSharedIdentityWindowOpener({
  *                 default: false
  *                 description: Explicitly accept restarting a legacy headless context and discarding every live tab's in-memory state. Has no effect in parking mode.
  *     responses:
- *       200: { description: "Shared identity is visible; app-hidden mode returns visible: true and focused equal to the native active-state readback (false is a successful unhide without activation). restarted is true after a headless transition; restoreFailed is true if bounded URL restoration failed." }
+ *       200: { description: "Shared identity is visible; app-hidden mode returns visible: true and focused equal to the native active-state readback (false is a successful unhide without activation). restarted is true after a headless transition; restoreFailed is true if bounded URL restoration failed. When wedged input forced the native-only rescue, the response adds targetUnconfirmed: true (app visibility confirmed, not the tab's placement) and operationMayStillBeRunning: true (the wedged input was fenced, not cancelled)." }
  *       404: { description: Identity is not configured for shared mode. }
  *       409: { description: "Identity is busy, context_restart_required because a legacy headless context still has live tabs, or native handoff is unavailable (code handoff_unavailable, retryable false; relaunch this browser context)." }
  *       503: { description: "identity_transition_timeout. The open did not settle within its deadline. The identity stays unavailable until that browser operation settles; it is not silently retried." }
@@ -3904,7 +3948,7 @@ app.post('/browser/identities/:userId/focus', async (req, res) => {
  *               userId: { type: string, description: Shared identity owner. }
  *               handoff: { type: string, enum: [human, agent] }
  *     responses:
- *       200: { description: "Control transferred after the requested show or park completes. In app-hidden mode a human handoff succeeds after confirmed unhide, returns visible: true, and reports focused equal to the native active-state readback (which may be false). If the park on an agent return fails, agent control is still returned and the response adds parked: false and a reason." }
+ *       200: { description: "Control transferred after the requested show or park completes. In app-hidden mode a human handoff succeeds after confirmed unhide, returns visible: true, and reports focused equal to the native active-state readback (which may be false). When the show used the native-only rescue (wedged input), the response adds targetUnconfirmed: true (app visibility confirmed, not this tab's placement) and operationMayStillBeRunning: true (the wedged input was fenced, not cancelled). If the park on an agent return fails, agent control is still returned and the response adds parked: false and a reason." }
  *       400: { description: Invalid handoff payload. }
  *       404: { description: Tab not found. }
  *       409: { description: 'Tab is not a shared identity tab, is no longer available, or native handoff is unavailable (code handoff_unavailable, retryable false; no control transfer).' }
@@ -3920,10 +3964,17 @@ app.post('/tabs/:tabId/handoff', async (req, res) => {
   if (!session?.sharedIdentity) return res.status(409).json({ error: 'Handoff is available only for shared identity tabs' });
   if (!findTab(session, req.params.tabId)) return tabNotFoundResponse(res, req.params.tabId);
   try {
-    const result = await withTabLock(req.params.tabId, async () => {
+    const nativeRescue = handoff === 'human' && session.visibility?.capability?.().mode === 'app-hidden';
+    // AppKit rescue skips the engine input lock only when that lock is held by
+    // wedged or settling work. An idle tab still serializes through the lock,
+    // so a concurrent agent handoff cannot be overwritten by a later human one.
+    const busyLock = tabLocks.get(req.params.tabId);
+    const bypassLock = nativeRescue && Boolean(busyLock?.active || busyLock?.settling);
+    const perform = async () => {
       const current = findTab(session, req.params.tabId);
       const handoffLock = tabLocks.get(req.params.tabId);
       return applySharedTabHandoff({
+        nativeOnly: bypassLock,
         tabId: req.params.tabId,
         handoff,
         tabState: current?.tabState,
@@ -3932,7 +3983,8 @@ app.post('/tabs/:tabId/handoff', async (req, res) => {
         onAgentControl: () => armAbandonedTabRecovery(req.params.tabId, handoffLock, { session, tabState: current?.tabState }),
         log,
       });
-    }, HANDLER_TIMEOUT_MS, { allowHumanControl: true });
+    };
+    const result = bypassLock ? await perform() : await withTabLock(req.params.tabId, perform, HANDLER_TIMEOUT_MS, { allowHumanControl: true });
     return res.json({ ok: true, ...result });
   } catch (err) {
     return handleRouteError(err, req, res);
@@ -5014,12 +5066,12 @@ app.post('/tabs/:tabId/wait', async (req, res) => {
  *             schema:
  *               $ref: '#/components/schemas/Error'
  *       409:
- *         description: Page changed during the click; caller should take a fresh snapshot and retry with current refs.
+ *         description: Page changed during the click; caller should take a fresh snapshot and retry with current refs. Or code=human_handoff_required (recovery=human_handoff, retryable=false) after a native input timeout on a tab that is in human control or may be visible to a human (visibility is fail-closed, so an opening or unconfirmed show counts); the tab is kept for a human instead of being retired. Hand the tab to a human instead of retrying.
  *         content:
  *           application/json:
  *             schema:
  *               $ref: '#/components/schemas/Error'
- *       410: { description: "Tab was retired by timeout recovery or is no longer available (code=tab_destroyed, retryable=true, recovery=create_new_tab); create a new tab instead of retrying this tab." }
+ *       410: { description: "Tab was retired by timeout recovery or is no longer available (code=tab_destroyed, retryable=true, recovery=create_new_tab), including after a native input timeout retired the tab; create a new tab instead of retrying this tab." }
  *       422: { description: "Locator wait timeouts remain element_not_actionable (retryable=true, recovery=snapshot_then_retry); take a fresh snapshot and retry with current refs." }
  *       503: { description: "For code=operation_timeout, the action exceeded its budget and may still be running; handler/native timeout classification takes precedence over page-change recovery, not locator wait timeouts. For code=tab_busy, a previous operation is still settling. Both are retryable=true, recovery=retry; retry the same tab after it settles." }
  */
@@ -5071,14 +5123,16 @@ app.post('/tabs/:tabId/click', async (req, res) => {
         const x = box.x + box.width / 2;
         const y = box.y + box.height / 2;
         
+        const nativeDeadline = Date.now() + 12000;
+        const nativeBudget = () => Math.max(1, Math.min(nativeDeadline - Date.now(), remainingBudget()));
         // Move mouse to element (triggers mouseover/mouseenter)
-        await withTimeout(tabState.page.mouse.move(x, y), Math.max(1, remainingBudget()), 'native mouse move');
+        await withTimeout(tabState.page.mouse.move(x, y), nativeBudget(), 'native mouse move', 'native_input_timeout');
         await tabState.page.waitForTimeout(50);
         
         // Full click sequence
-        await withTimeout(tabState.page.mouse.down(), Math.max(1, remainingBudget()), 'native mouse down');
+        await withTimeout(tabState.page.mouse.down(), nativeBudget(), 'native mouse down', 'native_input_timeout');
         await tabState.page.waitForTimeout(50);
-        await withTimeout(tabState.page.mouse.up(), Math.max(1, remainingBudget()), 'native mouse up');
+        await withTimeout(tabState.page.mouse.up(), nativeBudget(), 'native mouse up', 'native_input_timeout');
         
         log('info', 'mouse sequence dispatched', { x: x.toFixed(0), y: y.toFixed(0) });
       };

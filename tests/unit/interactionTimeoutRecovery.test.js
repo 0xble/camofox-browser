@@ -4,6 +4,7 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import fs from 'node:fs';
 import vm from 'node:vm';
 import * as browserErrors from '../../lib/browser-errors.js';
+import { settleHumanReservation } from '../../lib/shared-tab-handoff.js';
 import { actionFromReq, classifyError } from '../../lib/request-utils.js';
 
 // Execute the actual route registrations and lock/error functions through a
@@ -26,7 +27,7 @@ function deferred() {
   return { promise, resolve };
 }
 
-async function fixture({ keyboard, click, mouse, fill, focus, refresh } = {}) {
+async function fixture({ keyboard, click, mouse, fill, focus, refresh, frames = [] } = {}) {
   const app = express();
   app.use(express.json());
   const locator = {
@@ -34,7 +35,7 @@ async function fixture({ keyboard, click, mouse, fill, focus, refresh } = {}) {
     boundingBox: async () => ({ x: 0, y: 0, width: 10, height: 10 }),
   };
   const page = {
-    isClosed: () => false, url: () => 'https://fixture.invalid/changed',
+    isClosed: () => false, url: () => 'https://fixture.invalid/changed', frames: () => frames,
     keyboard: { type: keyboard || jest.fn(async () => {}), press: async () => {} },
     mouse: { move: async () => {}, down: async () => {}, up: async () => {}, ...mouse },
     locator: () => locator, focus: focus || (async () => {}), waitForTimeout: async () => {},
@@ -43,7 +44,7 @@ async function fixture({ keyboard, click, mouse, fill, focus, refresh } = {}) {
   const session = {};
   const refreshes = [];
   const box = {
-    ...browserErrors, AsyncLocalStorage, setTimeout, clearTimeout,
+    ...browserErrors, AsyncLocalStorage, setTimeout, clearTimeout, settleHumanReservation,
     app: { post(path, handler) {
       app.post(path, (req, res, next) => Promise.resolve(handler(req, res)).catch(next));
     } },
@@ -52,6 +53,7 @@ async function fixture({ keyboard, click, mouse, fill, focus, refresh } = {}) {
     findTab: () => ({ tabState }), findTabOwner: () => ({ session, tabState }),
     tabLockTimeoutsTotal: { inc() {} }, refreshTabLockQueueDepth() {},
     handleTimedOutTab: async () => ({ destroyed: false }),
+    destroyUnresponsiveTab: async () => { tabState.retired = true; box.locks.get('A')?.drain(); box.locks.delete('A'); return true; },
     withUserLimit: (_userId, operation) => operation(),
     selectorValidationError: () => null, visibleSelectorCandidate: () => null,
     isGoogleSerp: () => false, clickWithDownloadGuard: (_tab, operation) => operation(),
@@ -90,6 +92,22 @@ async function fixture({ keyboard, click, mouse, fill, focus, refresh } = {}) {
   };
 }
 
+test('1Password notification alone does not misclassify the identity input fault', async () => {
+  const click = jest.fn(async () => {}), move = jest.fn(async () => {});
+  const frames = [{ name: () => 'op-notification', url: () => 'moz-extension://fixture/inline/notification/notification.html',
+    frameElement: async () => ({ isVisible: async () => true, dispose: async () => {} }),
+  }];
+  const f = await fixture({ click, mouse: { move }, frames });
+  try {
+    expect(await f.request('click')).toMatchObject({ status: 200 });
+    expect(click).toHaveBeenCalledTimes(1);
+    expect(move).not.toHaveBeenCalled();
+    expect(f.locks.get('A').active).toBe(false);
+    frames.length = 0;
+    expect(await f.request('click')).toMatchObject({ status: 200 });
+  } finally { await f.close(); }
+});
+
 function observe(label, f, response) {
   console.log(JSON.stringify({ case: label, ...response, refreshes: f.refreshes, settling: f.locks.get('A')?.settling || false }));
 }
@@ -124,11 +142,10 @@ test.each(['move', 'down', 'up'])('nested native mouse %s timeout retains classi
   try {
     const response = await f.request('click');
     observe(`nested mouse ${action}`, f, response);
-    expect(response).toEqual(timeoutResponse);
-    expect(response.body.error).toContain(`native mouse ${action} timed out`);
+    expect(response).toMatchObject({ status: 410, body: { code: 'tab_destroyed', retryable: true, recovery: 'create_new_tab' } });
     expect(f.refreshes).toEqual([]);
-    expect(f.locks.get('A').settling).toBe(true);
-    expect(await f.request('click')).toMatchObject({ status: 503, body: { code: 'tab_busy' } });
+    expect(f.locks.has('A')).toBe(false);
+    expect(await f.request('click')).toMatchObject({ status: 410, body: { code: 'tab_destroyed' } });
   } finally {
     slow.resolve();
     await turn();

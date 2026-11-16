@@ -189,6 +189,32 @@ describe('timed-out tab operations', () => {
         status: 503, data: expect.objectContaining({ code: 'tab_busy', recovery: 'retry' }),
       });
       const handoff = value => client.request('POST', `/tabs/${tabId}/handoff`, { userId: client.userId, handoff: value });
+      if (process.platform === 'darwin') {
+        // App-hidden macOS: a human rescue of a busy tab intentionally skips
+        // the engine input lock (a wedged passkey prompt must still reach a
+        // human) and says so. Ordering still holds: the old mutation settles
+        // first, newer agent work never runs while a human holds the tab, and
+        // agent control resumes only after settlement.
+        await expect(handoff('human')).resolves.toMatchObject({
+          handoff: 'human', visible: true, targetUnconfirmed: true, operationMayStillBeRunning: true,
+        });
+        expect(gateResponse).toBeDefined();
+        gateResponse.end('settled');
+        const deadline = Date.now() + 5000;
+        for (;;) {
+          try {
+            await client.evaluate(tabId, 'window.actionOrder.push("stale")');
+            throw new Error('agent work ran while a human held the tab');
+          } catch (error) {
+            if (error.status === 409) break;
+            if (error.data?.code !== 'tab_busy' || Date.now() >= deadline) throw error;
+            await wait(50);
+          }
+        }
+        await handoff('agent');
+        expect((await client.evaluate(tabId, 'window.actionOrder')).result).toEqual(['old']);
+        return;
+      }
       await expect(handoff('human')).rejects.toMatchObject({
         status: 503, data: expect.objectContaining({ code: 'tab_busy', recovery: 'retry' }),
       });
