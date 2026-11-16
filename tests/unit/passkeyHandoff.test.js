@@ -56,6 +56,39 @@ test('native-only handoff unhides the identity without waiting on Juggler or mov
   } finally { await visibility.close(); }
 });
 
+test('concurrent native rescues coalesce instead of aborting each other', async () => {
+  let state = { hidden: true, active: false };
+  let releaseUnhide;
+  const unhideGate = new Promise(resolve => { releaseUnhide = resolve; });
+  const setHidden = jest.fn(async (_pid, hidden) => { await unhideGate; return (state = { hidden, active: !hidden }); });
+  const visibility = createDarwinIdentityVisibility('/fixture/profile', {
+    rootPid: 10, snapshot: () => [{ pid: 12, ppid: 10, args: '/engine/camoufox -profile /fixture/profile -juggler-pipe' }],
+    setHidden, readState: async () => state,
+    createWindowControl: async () => ({ open: jest.fn(), close: async () => {} }),
+  });
+  try {
+    const page = () => ({ bringToFront: jest.fn(async () => {}), isClosed: () => false });
+    const first = visibility.open(page(), { nativeOnly: true });
+    const second = visibility.open(page(), { nativeOnly: true });
+    releaseUnhide();
+    await expect(first).resolves.toMatchObject({ visible: true, targetUnconfirmed: true });
+    await expect(second).resolves.toMatchObject({ visible: true, targetUnconfirmed: true });
+    expect(state.hidden).toBe(false);
+  } finally { await visibility.close(); }
+});
+
+test('identity input-busy counts only settling (wedged) tab locks, not active ones', () => {
+  const start = source.indexOf('function identityInputBusy(');
+  const end = source.indexOf('function identityBusy(', start);
+  const tabLocks = new Map([['A', { active: true }], ['B', { settling: true }]]);
+  const box = { tabLocks };
+  vm.runInNewContext(source.slice(start, end) + ';globalThis.busy = identityInputBusy;', box);
+  const session = tabs => ({ tabGroups: new Map([['g', new Map(tabs.map(id => [id, {}]))]]) });
+  expect(box.busy('u', session(['A']))).toBe(false);
+  expect(box.busy('u', session(['B']))).toBe(true);
+  expect(box.busy('u', session(['A', 'B']))).toBe(true);
+});
+
 test('failed human visibility restores agent control instead of claiming a handoff', async () => {
   const human = new Set();
   await expect(applySharedTabHandoff({ tabId: 'A', handoff: 'human',

@@ -3692,8 +3692,14 @@ function transitionIdentity(userId, action, operation, { coalesceKey = null } = 
 }
 
 function identityInputBusy(_userId, session) {
+  // Only wedged input counts: a settling lock means timed-out browser work is
+  // still running past its budget. A merely active lock is ordinary work (a
+  // snapshot or evaluate, often on a sibling tab); treating it as wedged
+  // would send identity open down the epoch-aborting native-only rescue and
+  // degrade it to targetUnconfirmed. The normal open path still falls back
+  // to that rescue if it actually times out.
   return Boolean(session && [...session.tabGroups.values()].some(group =>
-    [...group.keys()].some(tabId => tabLocks.get(tabId)?.active)));
+    [...group.keys()].some(tabId => tabLocks.get(tabId)?.settling)));
 }
 
 function identityBusy(userId, session) {
@@ -3844,7 +3850,7 @@ sharedIdentityWindow = createSharedIdentityWindowOpener({
  *                 default: false
  *                 description: Explicitly accept restarting a legacy headless context and discarding every live tab's in-memory state. Has no effect in parking mode.
  *     responses:
- *       200: { description: "Shared identity is visible; app-hidden mode returns visible: true and focused equal to the native active-state readback (false is a successful unhide without activation). restarted is true after a headless transition; restoreFailed is true if bounded URL restoration failed." }
+ *       200: { description: "Shared identity is visible; app-hidden mode returns visible: true and focused equal to the native active-state readback (false is a successful unhide without activation). restarted is true after a headless transition; restoreFailed is true if bounded URL restoration failed. When wedged input forced the native-only rescue, the response adds targetUnconfirmed: true (app visibility confirmed, not the tab's placement) and operationMayStillBeRunning: true (the wedged input was fenced, not cancelled)." }
  *       404: { description: Identity is not configured for shared mode. }
  *       409: { description: "Identity is busy, context_restart_required because a legacy headless context still has live tabs, or native handoff is unavailable (code handoff_unavailable, retryable false; relaunch this browser context)." }
  *       503: { description: "identity_transition_timeout. The open did not settle within its deadline. The identity stays unavailable until that browser operation settles; it is not silently retried." }
@@ -3928,7 +3934,7 @@ app.post('/browser/identities/:userId/focus', async (req, res) => {
  *               userId: { type: string, description: Shared identity owner. }
  *               handoff: { type: string, enum: [human, agent] }
  *     responses:
- *       200: { description: "Control transferred after the requested show or park completes. In app-hidden mode a human handoff succeeds after confirmed unhide, returns visible: true, and reports focused equal to the native active-state readback (which may be false). If the park on an agent return fails, agent control is still returned and the response adds parked: false and a reason." }
+ *       200: { description: "Control transferred after the requested show or park completes. In app-hidden mode a human handoff succeeds after confirmed unhide, returns visible: true, and reports focused equal to the native active-state readback (which may be false). When the show used the native-only rescue (wedged input), the response adds targetUnconfirmed: true (app visibility confirmed, not this tab's placement) and operationMayStillBeRunning: true (the wedged input was fenced, not cancelled). If the park on an agent return fails, agent control is still returned and the response adds parked: false and a reason." }
  *       400: { description: Invalid handoff payload. }
  *       404: { description: Tab not found. }
  *       409: { description: 'Tab is not a shared identity tab, is no longer available, or native handoff is unavailable (code handoff_unavailable, retryable false; no control transfer).' }
@@ -5042,12 +5048,12 @@ app.post('/tabs/:tabId/wait', async (req, res) => {
  *             schema:
  *               $ref: '#/components/schemas/Error'
  *       409:
- *         description: Page changed during the click; caller should take a fresh snapshot and retry with current refs.
+ *         description: Page changed during the click; caller should take a fresh snapshot and retry with current refs. Or code=human_handoff_required (recovery=human_handoff, retryable=false) after a native input timeout on a tab with a confirmed human rescue; hand the tab to a human instead of retrying.
  *         content:
  *           application/json:
  *             schema:
  *               $ref: '#/components/schemas/Error'
- *       410: { description: "Tab was retired by timeout recovery or is no longer available (code=tab_destroyed, retryable=true, recovery=create_new_tab); create a new tab instead of retrying this tab." }
+ *       410: { description: "Tab was retired by timeout recovery or is no longer available (code=tab_destroyed, retryable=true, recovery=create_new_tab), including after a native input timeout retired the tab; create a new tab instead of retrying this tab." }
  *       422: { description: "Locator wait timeouts remain element_not_actionable (retryable=true, recovery=snapshot_then_retry); take a fresh snapshot and retry with current refs." }
  *       503: { description: "For code=operation_timeout, the action exceeded its budget and may still be running; handler/native timeout classification takes precedence over page-change recovery, not locator wait timeouts. For code=tab_busy, a previous operation is still settling. Both are retryable=true, recovery=retry; retry the same tab after it settles." }
  */

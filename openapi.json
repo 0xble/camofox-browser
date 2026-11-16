@@ -595,7 +595,7 @@
         },
         "responses": {
           "200": {
-            "description": "Shared identity is visible; app-hidden mode returns visible: true and focused equal to the native active-state readback (false is a successful unhide without activation). restarted is true after a headless transition; restoreFailed is true if bounded URL restoration failed."
+            "description": "Shared identity is visible; app-hidden mode returns visible: true and focused equal to the native active-state readback (false is a successful unhide without activation). restarted is true after a headless transition; restoreFailed is true if bounded URL restoration failed. When wedged input forced the native-only rescue, the response adds targetUnconfirmed: true (app visibility confirmed, not the tab's placement) and operationMayStillBeRunning: true (the wedged input was fenced, not cancelled)."
           },
           "404": {
             "description": "Identity is not configured for shared mode."
@@ -699,7 +699,7 @@
         },
         "responses": {
           "200": {
-            "description": "Control transferred after the requested show or park completes. In app-hidden mode a human handoff succeeds after confirmed unhide, returns visible: true, and reports focused equal to the native active-state readback (which may be false). If the park on an agent return fails, agent control is still returned and the response adds parked: false and a reason."
+            "description": "Control transferred after the requested show or park completes. In app-hidden mode a human handoff succeeds after confirmed unhide, returns visible: true, and reports focused equal to the native active-state readback (which may be false). When the show used the native-only rescue (wedged input), the response adds targetUnconfirmed: true (app visibility confirmed, not this tab's placement) and operationMayStillBeRunning: true (the wedged input was fenced, not cancelled). If the park on an agent return fails, agent control is still returned and the response adds parked: false and a reason."
           },
           "400": {
             "description": "Invalid handoff payload."
@@ -1343,7 +1343,7 @@
             }
           },
           "409": {
-            "description": "Page changed during the click; caller should take a fresh snapshot and retry with current refs.",
+            "description": "Page changed during the click; caller should take a fresh snapshot and retry with current refs. Or code=human_handoff_required (recovery=human_handoff, retryable=false) after a native input timeout on a tab with a confirmed human rescue; hand the tab to a human instead of retrying.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1353,7 +1353,7 @@
             }
           },
           "410": {
-            "description": "Tab was retired by timeout recovery or is no longer available (code=tab_destroyed, retryable=true, recovery=create_new_tab); create a new tab instead of retrying this tab."
+            "description": "Tab was retired by timeout recovery or is no longer available (code=tab_destroyed, retryable=true, recovery=create_new_tab), including after a native input timeout retired the tab; create a new tab instead of retrying this tab."
           },
           "422": {
             "description": "Locator wait timeouts remain element_not_actionable (retryable=true, recovery=snapshot_then_retry); take a fresh snapshot and retry with current refs."
